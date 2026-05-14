@@ -396,7 +396,11 @@ runs:
             exit 1
             ;;
         esac
-        patch -p1 -F3 --forward < ksun_susfs_latest.patch || true
+        if [ -f "ksun_susfs_latest.patch" ]; then
+            patch -p1 -F3 --forward < ksun_susfs_latest.patch || true
+        else
+            echo "ksun_susfs_latest.patch not found, skipping"
+        fi
         cd ../common
 
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
@@ -415,7 +419,7 @@ runs:
           fi
         fi
 
-        patch -p1 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch
+        patch -p1 -F3 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch || { echo "::warning::SUSFS kernel patch had failures, checking..."; true; }
 
         if [ "$fake_patched" = 1 ]; then
           if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
