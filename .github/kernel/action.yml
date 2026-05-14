@@ -365,21 +365,38 @@ runs:
           "v2.1.0")
             cd ./KernelSU-Next
             patch -p1 --forward < "../../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+            # Clean up .rej files and apply fix patches
             for file in $(find ./kernel -maxdepth 2 -name "*.rej" -exec basename {} .rej \;); do
-              echo "Patching file: $file with fix_$file.patch"
-              patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_$file.patch"
+              fix_patch="../../../kernel_patches/next/susfs_fix_patches/$susfs_version/fix_$file.patch"
+              if [ -f "$fix_patch" ]; then
+                echo "Patching file: $file with fix_$file.patch"
+                patch -p1 -F3 --forward < "$fix_patch" || true
+              else
+                echo "No fix patch for $file, skipping"
+              fi
             done
-            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/overwrite_hook_mode.patch"
-            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/ksu_toolkit.patch"
-            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/multi_manager.patch"
-            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/multi_sepolicy_fix.patch"
+            # Remove leftover .rej files
+            find ./kernel -name "*.rej" -delete 2>/dev/null || true
+            echo "Patching Hook Mode!"
+            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/overwrite_hook_mode.patch" || true
+            echo "Patching KSU_TOOLKIT Support!"
+            patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/ksu_toolkit.patch" || true
+            # Version-conditional patches (from WildKernels)
+            if [ "$KSUVER" -le 33095 ]; then
+              echo "Patching Multi-manager Support!"
+              patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/multi_manager.patch" || true
+            fi
+            if [ "$KSUVER" -ge 33068 ] && [ "$KSUVER" -lt 33070 ]; then
+              echo "Patching Multi-manager sepolicy Support!"
+              patch -p1 --forward < "../../../kernel_patches/next/susfs_fix_patches/$susfs_version/multi_sepolicy_fix.patch" || true
+            fi
             ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
             ;;
         esac
-        patch -p1 --forward < ksun_susfs_latest.patch || true
+        patch -p1 -F3 --forward < ksun_susfs_latest.patch || true
         cd ../common
 
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then

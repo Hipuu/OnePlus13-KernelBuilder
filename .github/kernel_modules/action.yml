@@ -126,7 +126,14 @@ runs:
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
-        cd "$CONFIG_DIR/kernel_platform/msm-kernel"
+        # SM8750 uses common, older SoCs use msm-kernel
+        if [ -d "$CONFIG_DIR/kernel_platform/msm-kernel" ]; then
+          KERNEL_DIR="$CONFIG_DIR/kernel_platform/msm-kernel"
+        else
+          KERNEL_DIR="$CONFIG_DIR/kernel_platform/common"
+        fi
+        echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
+        cd "$KERNEL_DIR"
         CONFIG_FILES=("build.config.common" "build.config.constants")
         BRANCH_LINE=""
         for f in "${CONFIG_FILES[@]}"; do
@@ -163,7 +170,8 @@ runs:
       run: |
         set -euo pipefail
         cd "$CONFIG/kernel_platform"
-        rm -f msm-kernel/android/abi_gki_protected_exports_* || true
+        rm -f msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
+        rm -f common/android/abi_gki_protected_exports_* 2>/dev/null || true
         df -h
 
     - name: Merge vendor defconfig
@@ -171,7 +179,12 @@ runs:
       run: |
         set -euo pipefail
         KERNEL_PLATFORM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        MSM="$KERNEL_PLATFORM/msm-kernel"
+        # SM8750 uses common, older SoCs use msm-kernel
+        if [ -d "$KERNEL_PLATFORM/msm-kernel" ]; then
+          MSM="$KERNEL_PLATFORM/msm-kernel"
+        else
+          MSM="$KERNEL_PLATFORM/common"
+        fi
         cd "$MSM"
         make ARCH=arm64 mrproper
         mkdir -p out
@@ -185,7 +198,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        else
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        fi
         cd "$MSM"
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
           --enable CONFIG_WLAN_VENDOR_REALTEK \
@@ -205,7 +222,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        else
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        fi
         cd "$MSM"
         curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s M br0k3n
 
@@ -213,7 +234,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        else
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        fi
         cd "$MSM/drivers/net/wireless/realtek/"
         rm -rf rtw88
         git clone https://github.com/lwfinger/rtw88.git
@@ -244,7 +269,12 @@ runs:
       run: |
         set -euo pipefail
         KERNEL_PLATFORM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        MSM="$KERNEL_PLATFORM/msm-kernel"
+        # SM8750 uses common, older SoCs use msm-kernel
+        if [ -d "$KERNEL_PLATFORM/msm-kernel" ]; then
+          MSM="$KERNEL_PLATFORM/msm-kernel"
+        else
+          MSM="$KERNEL_PLATFORM/common"
+        fi
         cd "$MSM"
         export PATH="${CLANG_BIN_PATH}:$PATH"
         export PATH="/usr/lib/ccache:$PATH"
@@ -325,7 +355,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        else
+          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        fi
         OUT="$MSM/out"
         UNAME=$(ls "$OUT/lib/modules/")
         cd "$OUT"
@@ -351,7 +385,11 @@ runs:
       run: |
         set -euo pipefail
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        MSM="$CONFIG_DIR/kernel_platform/msm-kernel"
+        if [ -d "$CONFIG_DIR/kernel_platform/msm-kernel" ]; then
+          MSM="$CONFIG_DIR/kernel_platform/msm-kernel"
+        else
+          MSM="$CONFIG_DIR/kernel_platform/common"
+        fi
         OUT="$MSM/out"
         MODULES_SRC="$OUT/modules"
         MODULES_ZIP="$CONFIG_DIR/artifacts/kernel_modules_${{ env.MODEL }}.zip"
