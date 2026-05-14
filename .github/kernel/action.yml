@@ -513,10 +513,15 @@ runs:
         cd "$CONFIG/kernel_platform/common"
 
         patch -p1 --forward < "../../../kernel_patches/common/mem_opt_prefetch.patch" || true
-        sed -e 's/SYM_FUNC_START(__pi_memcmp)/SYM_FUNC_START_WEAK_PI(memcmp)/' \
-            -e 's/SYM_FUNC_END(__pi_memcmp)/SYM_FUNC_END_PI(memcmp)/' \
-            -e 's/SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)/EXPORT_SYMBOL_NOKASAN(memcmp)/' \
-            "../../../kernel_patches/common/optimise_memcmp.patch" | patch -p1 --forward || true
+        # Skip optimise_memcmp for kernel 6.6+ (incompatible ARM64 assembly macros)
+        if [ "$(printf '%s\n' "${{ env.KERNEL_VER }}" "6.6" | sort -V | head -n1)" != "6.6" ]; then
+          sed -e 's/SYM_FUNC_START(__pi_memcmp)/SYM_FUNC_START_WEAK_PI(memcmp)/' \
+              -e 's/SYM_FUNC_END(__pi_memcmp)/SYM_FUNC_END_PI(memcmp)/' \
+              -e 's/SYM_FUNC_ALIAS_WEAK(memcmp, __pi_memcmp)/EXPORT_SYMBOL_NOKASAN(memcmp)/' \
+              "../../../kernel_patches/common/optimise_memcmp.patch" | patch -p1 --forward || true
+        else
+          echo "Skipping optimise_memcmp.patch (incompatible with kernel ${{ env.KERNEL_VER }})"
+        fi
         patch -p1 --forward < "../../../kernel_patches/common/minimise_wakeup_time.patch" || true
         patch -p1 --forward < "../../../kernel_patches/common/int_sqrt.patch" || true
         patch -p1 --forward < "../../../kernel_patches/common/force_tcp_nodelay.patch" || true
