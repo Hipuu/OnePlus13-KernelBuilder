@@ -1,0 +1,12 @@
+{
+  "model": "OP13-CPH",
+  "soc": "sun",
+  "branch": "oneplus/sm8750",
+  "manifest_oos15": "oneplus_13_global_v.xml",
+  "manifest_oos15_modules": "oneplus_13_global_v.xml",
+  "manifest_oos16": "oneplus_13_global_w.xml",
+  "manifest_oos16_modules": "oneplus_13_global_w.xml",
+  "android_version": "android15",
+  "kernel_version": "6.6",
+  "hmbird": true
+}

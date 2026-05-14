@@ -1,0 +1,7 @@
+*.o
+*.ko
+*.img
+out/
+.ccache/
+*.zip
+!tools/boot.zip
