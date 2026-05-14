@@ -441,6 +441,33 @@ runs:
         echo "SuSFS added ✅"
         echo "::endgroup::"
 
+    - name: Fix KernelSU init.c missing declarations (post-SUSFS patch fixup)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$CONFIG/kernel_platform/KernelSU-Next/kernel/core"
+        if [ -f "init.c" ]; then
+          # Check if the declarations are missing (SUSFS fix_init.c.patch hunk #3 failed)
+          if ! grep -q "ksu_lsm_hook_init" init.c || grep -q "undeclared" /dev/null 2>/dev/null; then
+            # Add missing includes at the top of init.c if not present
+            if ! grep -q '#include "../hook/lsm_hook.h"' init.c; then
+              sed -i '/#include "init.h"/a #include "../hook/lsm_hook.h"' init.c || true
+            fi
+            if ! grep -q '#include "../hook/syscall_hook_manager.h"' init.c; then
+              # Check if the header exists
+              if [ -f "../hook/syscall_hook_manager.h" ]; then
+                sed -i '/#include "../hook\/lsm_hook.h"/a #include "../hook/syscall_hook_manager.h"' init.c || true
+              else
+                # Add forward declarations directly
+                if ! grep -q "void ksu_syscall_hook_manager_init" init.c; then
+                  sed -i '/#include.*hook/a extern void ksu_syscall_hook_manager_init(void);extern void ksu_syscall_hook_manager_exit(void);extern bool ksu_late_loaded;' init.c || true
+                fi
+              fi
+            fi
+          fi
+          echo "init.c declarations check complete"
+        fi
+
     - name: Add BBG
       shell: bash
       run: |
