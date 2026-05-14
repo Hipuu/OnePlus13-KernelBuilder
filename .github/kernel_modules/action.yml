@@ -205,6 +205,8 @@ runs:
         fi
         cd "$MSM"
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
+          --module CONFIG_CFG80211 \
+          --module CONFIG_MAC80211 \
           --enable CONFIG_WLAN_VENDOR_REALTEK \
           --enable CONFIG_WLAN_VENDOR_ATH \
           --module CONFIG_ATH_COMMON --module CONFIG_ATH9K --module CONFIG_ATH9K_HW \
@@ -295,7 +297,7 @@ runs:
           --disable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
         echo "Building kernel modules..."
         make "${MAKE_FLAGS[@]}" O=$OUT olddefconfig
-        make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" modules
+        make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" modules KCFLAGS="-Wno-error"
         make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" INSTALL_MOD_PATH="$INSTALL_MOD_PATH" modules_install
 
         cd "$KERNEL_PLATFORM"
