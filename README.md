@@ -6,7 +6,7 @@ Custom kernel builder for **OnePlus 13** (SM8750/Snapdragon 8 Elite) combining t
 
 ## Features
 
-- **KernelSU Next** - Root solution with manager support
+- **KernelSU** - Root solution with manager support
 - **SUSFS v2.1.0** - Stealth/hiding capabilities
 - **Baseband Guard (BBG)** - LSM security module
 - **BBR v1** - TCP congestion control

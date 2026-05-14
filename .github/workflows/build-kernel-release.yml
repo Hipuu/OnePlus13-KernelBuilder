@@ -24,11 +24,11 @@ on:
           - OOS15
           - OOS16
         default: OOS15
-      ksun_branch:
-        description: 'Enter KernelSU Next Branch or commit hash (blank for stable tag)'
+      ksu_branch:
+        description: 'Enter KernelSU Branch or commit hash'
         required: true
         type: string
-        default: 551ad80473f60e052917aec08abf5323b6ab2f7c
+        default: main
       optimize_level:
         description: "Compiler optimization level"
         required: true
@@ -126,7 +126,7 @@ jobs:
         uses: ./.github/kernel
         with:
           op_config_json: ${{ toJSON(matrix) }}
-          ksun_branch_or_hash: ${{ inputs.ksun_branch }}
+          ksu_branch_or_hash: ${{ inputs.ksu_branch }}
           susfs_commit_hash_or_branch: ${{ inputs.susfs_branch_or_commit }}
           optimize_level: ${{ inputs.optimize_level }}
           kernel_uname: ${{ inputs.kernel_uname }}
@@ -207,7 +207,7 @@ jobs:
       - name: Generate Release name
         run: |
           DEVICE="OnePlus 13"
-          RELEASE_NAME="$DEVICE Kernel With KernelSU Next, Nethunter & SUSFS v2.1.0"
+          RELEASE_NAME="$DEVICE Kernel With KernelSU, Nethunter & SUSFS v2.1.0"
           echo "RELEASE_NAME=$RELEASE_NAME" >> "$GITHUB_ENV"
 
       - name: Generate and Create New Tag
@@ -236,13 +236,13 @@ jobs:
           echo "=== Start building the release notes ==="
           OS_VERSION=$(echo "${{ inputs.manifest }}" | grep -oi 'oos[0-9]\+' || echo "unknown")
           cat << EOF > release_notes.md
-          This release contains KernelSU Next and SUSFS v2.1.0 for OnePlus 13
+          This release contains KernelSU and SUSFS v2.1.0 for OnePlus 13
 
           Module:
           -> https://github.com/sidex15/ksu_module_susfs
 
           Official Managers:
-          -> https://github.com/KernelSU-Next/KernelSU-Next
+          -> https://github.com/tiann/KernelSU
 
           Non-Official Managers:
           -> https://github.com/WildKernels/Wild_KSU
@@ -264,7 +264,7 @@ jobs:
           cat << 'EOF' >> release_notes.md
 
           ### Features
-          - [+] KernelSU-Next / WildKSU Manager Support
+          - [+] KernelSU / WildKSU Manager Support
           - [+] SUSFS v2.1.0
           - [+] Wireguard Support
           - [+] Magic Mount Support
