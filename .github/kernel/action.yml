@@ -149,17 +149,19 @@ runs:
         cd "$CONFIG"
         echo "Initializing and syncing kernel source..."
 
-        # Check if we have a local manifest in the repo
         MANIFEST_FILE="${GITHUB_WORKSPACE}/manifests/${MANIFEST}"
         if [ -f "$MANIFEST_FILE" ]; then
           echo "Using local manifest: $MANIFEST_FILE"
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
-          cp "$MANIFEST_FILE" .repo/manifests/"$MANIFEST"
-          "$REPO" init -m "$MANIFEST"
+          # Initialize with any valid branch, then override manifest
+          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags || true
+          mkdir -p .repo/local_manifests
+          cp "$MANIFEST_FILE" .repo/manifests/custom_manifest.xml
+          # Re-init with our custom manifest
+          "$REPO" init -m custom_manifest.xml
         elif [[ "$MANIFEST" == https://* ]]; then
           mkdir -p .repo/manifests
-          curl --fail --show-error --location --proto '=https' "$MANIFEST" -o .repo/manifests/temp_manifest.xml
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+          curl --fail --show-error --location --proto '=https' "$MANIFEST" -o .repo/manifests/custom_manifest.xml
+          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" -m custom_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         else
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" -m "$MANIFEST" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         fi
