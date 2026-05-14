@@ -467,7 +467,6 @@ runs:
         cd "$CONFIG/kernel_platform/common"
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
           --enable CONFIG_KSU \
-          
           --enable CONFIG_KSU_SUSFS \
           --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
           --enable CONFIG_KSU_SUSFS_SUS_PATH \
