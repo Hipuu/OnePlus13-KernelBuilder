@@ -409,31 +409,43 @@ runs:
         echo "SuSFS added ✅"
         echo "::endgroup::"
 
-    - name: Fix KernelSU init.c missing declarations (post-SUSFS patch fixup)
+    - name: Fix KernelSU init.c ksu_late_loaded declaration
       shell: bash
       run: |
         set -euo pipefail
-        cd "$CONFIG/kernel_platform/KernelSU/kernel/core"
-        if [ -f "init.c" ]; then
-          # Check if the declarations are missing (SUSFS fix_init.c.patch hunk #3 failed)
-          if ! grep -q "ksu_lsm_hook_init" init.c || grep -q "undeclared" /dev/null 2>/dev/null; then
-            # Add missing includes at the top of init.c if not present
-            if ! grep -q '#include "../hook/lsm_hook.h"' init.c; then
-              sed -i '/#include "init.h"/a #include "../hook/lsm_hook.h"' init.c || true
-            fi
-            if ! grep -q '#include "../hook/syscall_hook_manager.h"' init.c; then
-              # Check if the header exists
-              if [ -f "../hook/syscall_hook_manager.h" ]; then
-                sed -i '/#include "../hook\/lsm_hook.h"/a #include "../hook/syscall_hook_manager.h"' init.c || true
-              else
-                # Add forward declarations directly
-                if ! grep -q "void ksu_syscall_hook_manager_init" init.c; then
-                  sed -i '/#include.*hook/a extern void ksu_syscall_hook_manager_init(void);extern void ksu_syscall_hook_manager_exit(void);extern bool ksu_late_loaded;' init.c || true
-                fi
-              fi
-            fi
+        # tiann KSU installs into common/drivers/kernelsu/
+        INIT_C=""
+        CANDIDATES=(
+          "$CONFIG/kernel_platform/common/drivers/kernelsu/core/init.c"
+          "$CONFIG/kernel_platform/KernelSU/kernel/core/init.c"
+          "$CONFIG/kernel_platform/drivers/kernelsu/core/init.c"
+        )
+        for candidate in "${CANDIDATES[@]}"; do
+          if [ -f "$candidate" ]; then
+            INIT_C="$candidate"
+            echo "Found init.c at: $INIT_C"
+            break
           fi
-          echo "init.c declarations check complete"
+        done
+        if [ -z "$INIT_C" ]; then
+          echo "init.c not found, skipping"
+          exit 0
+        fi
+        if grep -q "ksu_late_loaded" "$INIT_C" && ! grep -q "bool ksu_late_loaded" "$INIT_C"; then
+          LAST_INC=$(grep -n "^#include" "$INIT_C" | tail -1 | cut -d: -f1)
+          if [ -n "$LAST_INC" ]; then
+            python3 -c "
+import sys
+lines = open('$INIT_C').readlines()
+n = $LAST_INC
+lines.insert(n, 'extern bool ksu_late_loaded;
+')
+open('$INIT_C', 'w').writelines(lines)
+print('Inserted extern bool ksu_late_loaded after line', n)
+"
+          fi
+        else
+          echo "ksu_late_loaded already declared or not used"
         fi
 
     - name: Add BBG
