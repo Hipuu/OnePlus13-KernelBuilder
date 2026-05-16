@@ -293,7 +293,7 @@ runs:
           LLVM=1 LLVM_IAS=1 ARCH=arm64 SUBARCH=arm64
           LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm
           OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump
-          DEPMOD=depmod DTC=dtc STRIP=llvm-strip
+          DEPMOD=depmod STRIP=llvm-strip
           HOSTCC=clang HOSTCXX=clang++ CC="ccache clang"
         )
 
