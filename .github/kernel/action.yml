@@ -413,39 +413,19 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # tiann KSU installs into common/drivers/kernelsu/
         INIT_C=""
-        CANDIDATES=(
-          "$CONFIG/kernel_platform/common/drivers/kernelsu/core/init.c"
-          "$CONFIG/kernel_platform/KernelSU/kernel/core/init.c"
-          "$CONFIG/kernel_platform/drivers/kernelsu/core/init.c"
-        )
-        for candidate in "${CANDIDATES[@]}"; do
-          if [ -f "$candidate" ]; then
-            INIT_C="$candidate"
-            echo "Found init.c at: $INIT_C"
-            break
-          fi
+        for d in common/drivers/kernelsu KernelSU/kernel drivers/kernelsu; do
+          f="$CONFIG/kernel_platform/$d/core/init.c"
+          if [ -f "$f" ]; then INIT_C="$f"; break; fi
         done
-        if [ -z "$INIT_C" ]; then
-          echo "init.c not found, skipping"
-          exit 0
-        fi
+        if [ -z "$INIT_C" ]; then echo "init.c not found"; exit 0; fi
+        echo "Found init.c at $INIT_C"
         if grep -q "ksu_late_loaded" "$INIT_C" && ! grep -q "bool ksu_late_loaded" "$INIT_C"; then
-          LAST_INC=$(grep -n "^#include" "$INIT_C" | tail -1 | cut -d: -f1)
-          if [ -n "$LAST_INC" ]; then
-            python3 -c "
-import sys
-lines = open('$INIT_C').readlines()
-n = $LAST_INC
-lines.insert(n, 'extern bool ksu_late_loaded;
-')
-open('$INIT_C', 'w').writelines(lines)
-print('Inserted extern bool ksu_late_loaded after line', n)
-"
-          fi
+          LAST_INC=$(grep -n '^#include' "$INIT_C" | tail -1 | cut -d: -f1)
+          sed -i "${LAST_INC}a\\extern bool ksu_late_loaded;" "$INIT_C"
+          echo "Injected extern bool ksu_late_loaded after line $LAST_INC"
         else
-          echo "ksu_late_loaded already declared or not used"
+          echo "ksu_late_loaded OK"
         fi
 
     - name: Add BBG
