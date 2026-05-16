@@ -404,6 +404,14 @@ runs:
             if [ -e "$module" ]; then rm -f "$module"; REMOVED=$((REMOVED+1)); fi
           done < default_modules.txt
           echo "Excluded $REMOVED default modules"
+          # cfg80211 is in the default blocklist but mac80211 depends on it.
+          # SM8750/CNSS doesn't pre-load cfg80211, so Nethunter's mac80211
+          # needs it present in the ZIP. Re-add it if it was built.
+          cfg80211_src=$(find "$OUT/lib/modules/$UNAME" -name "cfg80211.ko" 2>/dev/null | head -1)
+          if [ -n "$cfg80211_src" ]; then
+            cp "$cfg80211_src" cfg80211.ko
+            echo "Restored cfg80211.ko (required dependency of mac80211)"
+          fi
         else
           echo "::warning::Could not fetch default_modules.txt — keeping all modules"
         fi
