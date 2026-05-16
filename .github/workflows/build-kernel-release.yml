@@ -28,7 +28,7 @@ on:
         description: 'Enter KernelSU Branch or commit hash'
         required: true
         type: string
-        default: main
+        default: 9e6de0ad8877566d47601a78fe4a99ca93b7b39e
       optimize_level:
         description: "Compiler optimization level"
         required: true
