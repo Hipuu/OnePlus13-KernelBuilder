@@ -34,23 +34,28 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        MANIFEST_KEY="MANIFEST_${{ inputs.manifest }}_MODULES"
-        echo "MANIFEST=${!MANIFEST_KEY}" >> "$GITHUB_ENV"
+        # Use case to avoid ${!var} indirect-expansion issues in composite actions
+        case "${{ inputs.manifest }}" in
+          OOS15) echo "MANIFEST=$MANIFEST_OOS15_MODULES" >> "$GITHUB_ENV" ;;
+          OOS16) echo "MANIFEST=$MANIFEST_OOS16_MODULES" >> "$GITHUB_ENV" ;;
+          *)     echo "Unknown manifest: ${{ inputs.manifest }}"; exit 1 ;;
+        esac
 
     - name: Validate Inputs
       shell: bash
       run: |
         set -euo pipefail
         model="$MODEL"; soc="$SOC"; branch="$BRANCH"; manifest="$MANIFEST"
-        [[ -n "$model" ]] || { echo "model empty"; exit 1; }
-        [[ -n "$soc" ]] || { echo "soc empty"; exit 1; }
-        [[ -n "$branch" ]] || { echo "branch empty"; exit 1; }
-        [[ -n "$manifest" ]] || { echo "manifest empty"; exit 1; }
+        [[ -n "$model" ]]    || { echo "model empty"; exit 1; }
+        [[ -n "$soc" ]]      || { echo "soc empty"; exit 1; }
+        [[ -n "$branch" ]]   || { echo "branch empty"; exit 1; }
+        [[ -n "$manifest" ]] || { echo "manifest empty — check manifest_oos15_modules key in config JSON"; exit 1; }
         if [[ "$manifest" == http*://* ]]; then
           [[ "$manifest" =~ ^https:// ]] || { echo "Manifest URL must be HTTPS"; exit 1; }
         else
           [[ "$manifest" =~ \.xml$ ]] || { echo "Manifest must end with .xml"; exit 1; }
         fi
+        echo "Inputs OK: model=$model soc=$soc branch=$branch manifest=$manifest"
 
     - name: Aggressive cleanup
       shell: bash
@@ -99,7 +104,7 @@ runs:
         if [ -f "$MANIFEST_FILE" ]; then
           echo "Using local manifest: $MANIFEST_FILE"
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$BRANCH" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags || true
-          mkdir -p .repo/local_manifests
+          mkdir -p .repo/manifests
           cp "$MANIFEST_FILE" .repo/manifests/custom_manifest.xml
           "$REPO" init -m custom_manifest.xml
         elif [[ "$MANIFEST" == https://* ]]; then
@@ -119,31 +124,42 @@ runs:
         done
         $success || { echo "repo sync failed after 3 attempts"; exit 1; }
 
+    - name: Detect kernel directory (common vs msm-kernel)
+      shell: bash
+      run: |
+        set -euo pipefail
+        KERNEL_PLATFORM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        # SM8750 (sun) syncs kernel to common/; older SoCs use msm-kernel/
+        if [ -d "$KERNEL_PLATFORM/common" ]; then
+          MSM="$KERNEL_PLATFORM/common"
+          echo "Detected SM8750-style layout: using kernel_platform/common/"
+        elif [ -d "$KERNEL_PLATFORM/msm-kernel" ]; then
+          MSM="$KERNEL_PLATFORM/msm-kernel"
+          echo "Detected legacy layout: using kernel_platform/msm-kernel/"
+        else
+          echo "ERROR: Neither common/ nor msm-kernel/ found under kernel_platform/"
+          ls "$KERNEL_PLATFORM/" 2>/dev/null || echo "(kernel_platform dir missing)"
+          exit 1
+        fi
+        echo "MSM=$MSM" >> "$GITHUB_ENV"
+        echo "KERNEL_PLATFORM=$KERNEL_PLATFORM" >> "$GITHUB_ENV"
+
     - name: Get Kernel Version Info
       shell: bash
       run: |
         set -euo pipefail
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
-        # SM8750 uses common, older SoCs use msm-kernel
-        if [ -d "$CONFIG_DIR/kernel_platform/msm-kernel" ]; then
-          KERNEL_DIR="$CONFIG_DIR/kernel_platform/msm-kernel"
-        else
-          KERNEL_DIR="$CONFIG_DIR/kernel_platform/common"
-        fi
-        echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
-        cd "$KERNEL_DIR"
-        CONFIG_FILES=("build.config.common" "build.config.constants")
+        cd "$MSM"
         BRANCH_LINE=""
-        for f in "${CONFIG_FILES[@]}"; do
+        for f in build.config.common build.config.constants; do
           if [ -f "$f" ]; then
             l=$(grep '^[[:space:]]*BRANCH=' "$f" || true)
             if [ -n "$l" ]; then BRANCH_LINE="$l"; break; fi
           fi
         done
         if [ -z "$BRANCH_LINE" ]; then
-          echo "Error: No BRANCH= found"; exit 1
+          echo "Error: No BRANCH= found in build config files"; exit 1
         fi
         BRANCH_VALUE="${BRANCH_LINE#*=}"
         ANDROID_VERSION="${BRANCH_VALUE%-*}"
@@ -154,6 +170,7 @@ runs:
         echo "ANDROID_VER=$ANDROID_VERSION" >> "$GITHUB_ENV"
         echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
         echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION" >> "$GITHUB_ENV"
+        echo "Kernel: $FULL_VERSION  Android: $ANDROID_VERSION"
 
     - name: Setup ccache
       uses: hendrikmuhs/ccache-action@v1.2.19
@@ -169,40 +186,31 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        cd "$CONFIG/kernel_platform"
-        rm -f msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
-        rm -f common/android/abi_gki_protected_exports_* 2>/dev/null || true
+        rm -f "$KERNEL_PLATFORM/msm-kernel/android/abi_gki_protected_exports_"* 2>/dev/null || true
+        rm -f "$KERNEL_PLATFORM/common/android/abi_gki_protected_exports_"* 2>/dev/null || true
         df -h
 
     - name: Merge vendor defconfig
       shell: bash
       run: |
         set -euo pipefail
-        KERNEL_PLATFORM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        # SM8750 uses common, older SoCs use msm-kernel
-        if [ -d "$KERNEL_PLATFORM/msm-kernel" ]; then
-          MSM="$KERNEL_PLATFORM/msm-kernel"
-        else
-          MSM="$KERNEL_PLATFORM/common"
-        fi
         cd "$MSM"
         make ARCH=arm64 mrproper
         mkdir -p out
-        if [ -f "arch/arm64/configs/vendor/${SOC}_GKI.config" ]; then
-          ./scripts/kconfig/merge_config.sh -O out -m arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/${SOC}_GKI.config
+        VENDOR_CFG="arch/arm64/configs/vendor/${SOC}_GKI.config"
+        if [ -f "$VENDOR_CFG" ]; then
+          echo "Merging vendor defconfig: $VENDOR_CFG"
+          ./scripts/kconfig/merge_config.sh -O out -m arch/arm64/configs/gki_defconfig "$VENDOR_CFG"
           cp out/.config arch/arm64/configs/gki_defconfig
           rm out/.config
+        else
+          echo "No vendor defconfig at $VENDOR_CFG — skipping merge (OK for SM8750)"
         fi
 
     - name: Add Nethunter wireless drivers as modules
       shell: bash
       run: |
         set -euo pipefail
-        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
-        else
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        fi
         cd "$MSM"
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
           --module CONFIG_CFG80211 \
@@ -219,41 +227,47 @@ runs:
           --module CONFIG_MT76x2_COMMON --module CONFIG_MT76x0_COMMON \
           --module CONFIG_MT7615_COMMON --module CONFIG_MT7915E --module CONFIG_MT7921E \
           --module CONFIG_MAC80211_LEDS --module CONFIG_CAN_SLCAN
+        echo "Nethunter wireless driver configs applied"
 
     - name: Add MemKernel module
       shell: bash
       run: |
-        set -euo pipefail
-        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
-        else
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        fi
         cd "$MSM"
-        curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s M br0k3n
+        echo "Setting up MemKernel module..."
+        curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s M br0k3n || {
+          echo "::warning::MemKernel setup failed — continuing without it"
+        }
 
     - name: Add rtw88 external modules
       shell: bash
       run: |
-        set -euo pipefail
-        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
+        REALTEK_DIR="$MSM/drivers/net/wireless/realtek"
+        if [ ! -d "$REALTEK_DIR" ]; then
+          echo "::warning::$REALTEK_DIR not found, skipping rtw88"
         else
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+          cd "$REALTEK_DIR"
+          rm -rf rtw88
+          git clone --depth=1 https://github.com/lwfinger/rtw88.git || {
+            echo "::warning::rtw88 clone failed, skipping"
+            exit 0
+          }
+          if grep -q 'CONFIG_RTW88' Makefile 2>/dev/null; then
+            sed -i 's/$(CONFIG_RTW88)/m/g' Makefile
+          else
+            echo 'obj-m += rtw88/' >> Makefile
+          fi
+          if [ -f Kconfig ]; then
+            sed -i '/^source "drivers\/net\/wireless\/realtek\/rtw88\/Kconfig"/d' Kconfig || true
+          fi
+          echo "rtw88 hooked into build"
         fi
-        cd "$MSM/drivers/net/wireless/realtek/"
-        rm -rf rtw88
-        git clone https://github.com/lwfinger/rtw88.git
-        sed -i 's/$(CONFIG_RTW88)/m/g' Makefile
-        sed -i '/^source "drivers\/net\/wireless\/realtek\/rtw88\/Kconfig"$/s/.*/ /' Kconfig
 
     - name: Detect Clang
       shell: bash
       run: |
         set -euo pipefail
-        KP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         CLANG_FOUND=false
-        for base in "$KP/prebuilts" "$KP/prebuilts-master"; do
+        for base in "$KERNEL_PLATFORM/prebuilts" "$KERNEL_PLATFORM/prebuilts-master"; do
           [ -d "$base/clang/host/linux-x86" ] || continue
           latest=$(ls -d "$base"/clang/host/linux-x86/clang-r*/ 2>/dev/null | sort -V | tail -n1 || true)
           if [ -n "$latest" ] && [ -x "$latest/bin/clang" ]; then
@@ -263,23 +277,18 @@ runs:
         if ! $CLANG_FOUND && command -v clang >/dev/null 2>&1; then
           CLANG_BIN="$(dirname "$(command -v clang)")"; CLANG_FOUND=true
         fi
-        $CLANG_FOUND || { echo "No clang found"; exit 1; }
+        $CLANG_FOUND || { echo "No clang toolchain found"; exit 1; }
         echo "CLANG_BIN_PATH=$CLANG_BIN" >> "$GITHUB_ENV"
+        echo "Detected: $("$CLANG_BIN/clang" --version | head -1)"
 
     - name: Build Kernel Modules
       shell: bash
       run: |
         set -euo pipefail
-        KERNEL_PLATFORM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        # SM8750 uses common, older SoCs use msm-kernel
-        if [ -d "$KERNEL_PLATFORM/msm-kernel" ]; then
-          MSM="$KERNEL_PLATFORM/msm-kernel"
-        else
-          MSM="$KERNEL_PLATFORM/common"
-        fi
         cd "$MSM"
         export PATH="${CLANG_BIN_PATH}:$PATH"
         export PATH="/usr/lib/ccache:$PATH"
+
         MAKE_FLAGS=(
           LLVM=1 LLVM_IAS=1 ARCH=arm64 SUBARCH=arm64
           LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm
@@ -287,33 +296,45 @@ runs:
           DEPMOD=depmod DTC=dtc STRIP=llvm-strip
           HOSTCC=clang HOSTCXX=clang++ CC="ccache clang"
         )
-        OUT=out
-        INSTALL_MOD_PATH="$MSM/out"
+
+        OUT="$MSM/out"
+        INSTALL_MOD_PATH="$OUT"
         mkdir -p "$OUT"
+
         make "${MAKE_FLAGS[@]}" O="$OUT" gki_defconfig
+
         ./scripts/config --file "$OUT/.config" \
-          --enable CONFIG_LTO_CLANG_THIN --enable CONFIG_LTO_CLANG \
+          --enable CONFIG_LTO_CLANG_THIN \
+          --enable CONFIG_LTO_CLANG \
           --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE \
           --disable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
-        echo "Building kernel modules..."
-        make "${MAKE_FLAGS[@]}" O=$OUT olddefconfig
-        make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" modules KCFLAGS="-Wno-error"
+
+        echo "Building kernel modules with $(nproc --all) threads..."
+        make "${MAKE_FLAGS[@]}" O="$OUT" olddefconfig
+        make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" KCFLAGS="-Wno-error" modules
         make -j$(nproc --all) "${MAKE_FLAGS[@]}" O="$OUT" INSTALL_MOD_PATH="$INSTALL_MOD_PATH" modules_install
 
-        cd "$KERNEL_PLATFORM"
-        MAKE_FLAGS+=(KERNEL_SRC="$KERNEL_PLATFORM/./msm-kernel")
-        OPLUS_FLAGS=(CHIPSET_COMPANY=QCOM OPLUS_VND_BUILD_PLATFORM="$SOC")
+        echo "In-tree modules built."
 
-        # OPLUS ext modules
-        if [ -f "$KERNEL_PLATFORM/oplus/config/modules.ext.$KERNEL_VER.oplus" ]; then
-          EXT_OPLUS=($(cat "$KERNEL_PLATFORM/oplus/config/modules.ext.$KERNEL_VER.oplus"))
-          for MODULE in "${EXT_OPLUS[@]}"; do
-            make -C "$MODULE" M="../$MODULE" -j$(nproc --all) "${MAKE_FLAGS[@]}" O=$MSM/out "${OPLUS_FLAGS[@]}" || true
-            make -C "$MODULE" M="../$MODULE" -j$(nproc --all) "${MAKE_FLAGS[@]}" O=$MSM/out "${OPLUS_FLAGS[@]}" INSTALL_MOD_PATH=$INSTALL_MOD_PATH modules_install || true
-          done
+        # --- Optional external vendor modules (only exist for SM8550 and older SoCs) ---
+        cd "$KERNEL_PLATFORM"
+        OPLUS_FLAGS=(CHIPSET_COMPANY=QCOM OPLUS_VND_BUILD_PLATFORM="$SOC")
+        EXT_MAKE_FLAGS=("${MAKE_FLAGS[@]}" KERNEL_SRC="$MSM")
+
+        OPLUS_MOD_LIST="$KERNEL_PLATFORM/oplus/config/modules.ext.${KERNEL_VER}.oplus"
+        if [ -f "$OPLUS_MOD_LIST" ]; then
+          echo "Building OPLUS ext modules..."
+          while IFS= read -r MODULE; do
+            [ -z "$MODULE" ] && continue
+            MODULE_ABS="$KERNEL_PLATFORM/$MODULE"
+            [ -d "$MODULE_ABS" ] || continue
+            make -C "$MODULE_ABS" -j$(nproc --all) "${EXT_MAKE_FLAGS[@]}" O="$OUT" "${OPLUS_FLAGS[@]}" modules || true
+            make -C "$MODULE_ABS" -j$(nproc --all) "${EXT_MAKE_FLAGS[@]}" O="$OUT" "${OPLUS_FLAGS[@]}" INSTALL_MOD_PATH="$INSTALL_MOD_PATH" modules_install || true
+          done < "$OPLUS_MOD_LIST"
+        else
+          echo "No OPLUS ext module list — skipping (expected for SM8750)"
         fi
 
-        # QCOM ext modules
         EXT_QCOM=(
           ../vendor/qcom/opensource/mmrm-driver
           ../vendor/qcom/opensource/mm-drivers/hw_fence
@@ -338,73 +359,79 @@ runs:
           ../vendor/qcom/opensource/wlan/platform
           ../vendor/qcom/opensource/bt-kernel
           ../vendor/qcom/opensource/wlan/qcacld-3.0
+          ../vendor/oplus/kernel/explorer
+          ../vendor/nxp/opensource/driver
+          ../vendor/st/opensource/driver
+          ../vendor/st/opensource/eSE-driver
         )
-        # Also try oplus-specific and nxp/st modules
-        for extra in "../vendor/oplus/kernel/explorer" "../vendor/nxp/opensource/driver" "../vendor/st/opensource/driver" "../vendor/st/opensource/eSE-driver"; do
-          if [ -d "$extra" ]; then
-            EXT_QCOM+=("$extra")
-          fi
-        done
 
+        QCOM_BUILT=0
         for MODULE in "${EXT_QCOM[@]}"; do
-          if [ -d "$MODULE" ]; then
-            make -C "$MODULE" M="../$MODULE" -j$(nproc --all) "${MAKE_FLAGS[@]}" O=$MSM/out "${OPLUS_FLAGS[@]}" modules || true
-            make -C "$MODULE" M="../$MODULE" -j$(nproc --all) "${MAKE_FLAGS[@]}" O=$MSM/out "${OPLUS_FLAGS[@]}" INSTALL_MOD_PATH=$INSTALL_MOD_PATH modules_install || true
-          fi
+          MODULE_ABS="$(realpath "$KERNEL_PLATFORM/$MODULE" 2>/dev/null || true)"
+          [ -n "$MODULE_ABS" ] && [ -d "$MODULE_ABS" ] || continue
+          echo "  Building QCOM ext: $MODULE"
+          make -C "$MODULE_ABS" -j$(nproc --all) "${EXT_MAKE_FLAGS[@]}" O="$OUT" "${OPLUS_FLAGS[@]}" modules || true
+          make -C "$MODULE_ABS" -j$(nproc --all) "${EXT_MAKE_FLAGS[@]}" O="$OUT" "${OPLUS_FLAGS[@]}" INSTALL_MOD_PATH="$INSTALL_MOD_PATH" modules_install || true
+          QCOM_BUILT=$((QCOM_BUILT+1))
         done
+        [ "$QCOM_BUILT" -eq 0 ] && echo "No QCOM ext vendor modules found (expected for SM8750)"
 
-    - name: Filter modules
+    - name: Collect and filter modules
       shell: bash
       run: |
         set -euo pipefail
-        if [ -d "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel" ]; then
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/msm-kernel"
-        else
-          MSM="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        fi
         OUT="$MSM/out"
-        UNAME=$(ls "$OUT/lib/modules/")
+        UNAME=$(ls "$OUT/lib/modules/" 2>/dev/null | head -1)
+        if [ -z "$UNAME" ]; then
+          echo "ERROR: No modules dir under $OUT/lib/modules/"
+          exit 1
+        fi
+        echo "Kernel uname: $UNAME"
         cd "$OUT"
         mkdir -p modules
         find lib/modules/"$UNAME" -type f -name '*.ko' -exec cp {} modules/ \;
-        echo "Total modules copied: $(find modules -type f -name '*.ko' | wc -l)"
+        TOTAL=$(find modules -type f -name '*.ko' | wc -l)
+        echo "Total .ko files: $TOTAL"
+        [ "$TOTAL" -gt 0 ] || { echo "ERROR: No .ko files built"; exit 1; }
         cd modules
-        curl -L -o default_modules.txt https://raw.githubusercontent.com/nullptr-t-oss/kernel_patches/refs/heads/main/default_modules.txt || true
-        if [ -f default_modules.txt ]; then
+        if curl -L --fail --silent -o default_modules.txt \
+          "https://raw.githubusercontent.com/nullptr-t-oss/kernel_patches/refs/heads/main/default_modules.txt"; then
+          REMOVED=0
           while IFS= read -r module; do
-            if [ -e "$module" ]; then
-              rm -f "$module"
-              echo "Removed module: $module"
-            fi
+            [ -n "$module" ] || continue
+            if [ -e "$module" ]; then rm -f "$module"; REMOVED=$((REMOVED+1)); fi
           done < default_modules.txt
+          echo "Excluded $REMOVED default modules"
+        else
+          echo "::warning::Could not fetch default_modules.txt — keeping all modules"
         fi
         cd ..
-        echo "Modules remaining after filtering: $(find modules -type f -name '*.ko' | wc -l)"
+        echo "Final module count: $(find modules -type f -name '*.ko' | wc -l)"
 
     - name: Create Kernel Modules zip
       id: create_zip
       shell: bash
       run: |
         set -euo pipefail
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        if [ -d "$CONFIG_DIR/kernel_platform/msm-kernel" ]; then
-          MSM="$CONFIG_DIR/kernel_platform/msm-kernel"
-        else
-          MSM="$CONFIG_DIR/kernel_platform/common"
-        fi
-        OUT="$MSM/out"
-        MODULES_SRC="$OUT/modules"
-        MODULES_ZIP="$CONFIG_DIR/artifacts/kernel_modules_${{ env.MODEL }}.zip"
-        mkdir -p "$CONFIG_DIR/artifacts"
+        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
+        mkdir -p "$ARTIFACTS_DIR"
+        MODULES_SRC="$MSM/out/modules"
+        MODULES_ZIP="$ARTIFACTS_DIR/kernel_modules_${MODEL}.zip"
+        KO_COUNT=$(find "$MODULES_SRC" -type f -name '*.ko' | wc -l)
+        [ "$KO_COUNT" -gt 0 ] || { echo "ERROR: No modules to zip"; exit 1; }
         find "$MODULES_SRC" -type f -name '*.ko' -print0 | xargs -0 zip -j "$MODULES_ZIP"
-        echo "Packaged kernel modules to $MODULES_ZIP"
+        echo "Packaged $KO_COUNT modules → $(basename "$MODULES_ZIP")"
+        echo "zip_name=$(basename "$MODULES_ZIP")" >> "$GITHUB_OUTPUT"
 
     - name: Final Build Summary
       shell: bash
       run: |
-        set -euo pipefail
         {
           echo "### Kernel Modules Build Summary"
+          echo "- Model: $MODEL"
+          echo "- Kernel: $KERNEL_FULL_VER"
+          echo "- Modules: $(find "$MSM/out/modules" -name '*.ko' 2>/dev/null | wc -l)"
+          echo ""
           echo "CCache Statistics:"
           echo "$(ccache -s -v)"
         } >> "$GITHUB_STEP_SUMMARY"
@@ -412,7 +439,7 @@ runs:
     - name: Cleanup old ccache
       shell: bash
       run: |
-        gh cache delete ccache-${{ env.CONFIG }}-modules-${{ env.KERNEL_FULL_VER }}- || true
+        gh cache delete "ccache-${{ env.CONFIG }}-modules-${{ env.KERNEL_FULL_VER }}-" || true
 
     - name: Upload Kernel Modules zip
       if: success() && steps.create_zip.conclusion == 'success'
