@@ -553,6 +553,36 @@ runs:
         echo "HMBIRD patches applied ✅"
         echo "::endgroup::"
 
+    - name: Add Droidspaces Support
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Adding Droidspaces support..."
+        cd "$CONFIG/kernel_platform/common"
+
+        # ABI-safe SYSVIPC patch (kernel 6.6/6.7/6.8 variant uses kabi padding)
+        patch -p1 --forward < "../../../kernel_patches/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch" || \
+          echo "::warning::SYSVIPC KABI patch already applied or not needed"
+
+        # Fix kernel panic when oplus_bsp_midas requests a null task in PID namespace
+        patch -p1 --forward < "../../../kernel_patches/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch" || \
+          echo "::warning::Ghost task patch already applied or not needed"
+
+        # Enable namespace isolation and POSIX features required by Droidspaces
+        ./scripts/config --file arch/arm64/configs/gki_defconfig \
+          --enable CONFIG_SYSVIPC \
+          --enable CONFIG_POSIX_MQUEUE \
+          --enable CONFIG_PID_NS \
+          --enable CONFIG_IPC_NS \
+          --enable CONFIG_DEVTMPFS \
+          --enable CONFIG_DEVTMPFS_MOUNT \
+          --enable CONFIG_NETFILTER_XT_TARGET_REJECT \
+          --enable CONFIG_NETFILTER_XT_TARGET_LOG \
+          --enable CONFIG_NETFILTER_XT_MATCH_RECENT
+
+        echo "Droidspaces support added ✅"
+        echo "::endgroup::"
+
     - name: Add Nethunter inline configs
       shell: bash
       run: |
