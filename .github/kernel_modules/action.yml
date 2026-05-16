@@ -407,6 +407,17 @@ runs:
         else
           echo "::warning::Could not fetch default_modules.txt — keeping all modules"
         fi
+        # cfg80211 and mac80211 are built into the kernel image (CONFIG_*=y).
+        # Never ship them as .ko — they would have mismatched symbol CRCs vs
+        # the running kernel, causing "disagrees about version of wiphy_new_nm".
+        # Vendor drivers (ath9k/mt76/rtw88) resolve these symbols from the
+        # kernel's built-in copy at insmod time.
+        for builtin_mod in cfg80211.ko mac80211.ko; do
+          if [ -e "modules/$builtin_mod" ]; then
+            rm -f "modules/$builtin_mod"
+            echo "Removed built-in module from ZIP: $builtin_mod"
+          fi
+        done
         cd ..
         echo "Final module count: $(find modules -type f -name '*.ko' | wc -l)"
 
