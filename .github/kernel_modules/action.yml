@@ -374,7 +374,9 @@ runs:
           make -C "$MODULE_ABS" -j$(nproc --all) "${EXT_MAKE_FLAGS[@]}" O="$OUT" "${OPLUS_FLAGS[@]}" INSTALL_MOD_PATH="$INSTALL_MOD_PATH" modules_install || true
           QCOM_BUILT=$((QCOM_BUILT+1))
         done
-        [ "$QCOM_BUILT" -eq 0 ] && echo "No QCOM ext vendor modules found (expected for SM8750)"
+        [ "$QCOM_BUILT" -eq 0 ] && echo "No QCOM ext vendor modules found (expected for SM8750)" || true
+        set -e  # restore errexit
+        true  # ensure step exits 0
 
     - name: Collect and filter modules
       shell: bash
