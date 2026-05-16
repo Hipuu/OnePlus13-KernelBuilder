@@ -480,6 +480,22 @@ runs:
           --enable CONFIG_TMPFS_POSIX_ACL
         echo "::endgroup::"
 
+    - name: Add CFG80211 and MAC80211 as built-in
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$CONFIG/kernel_platform/common"
+        # Build cfg80211 and mac80211 as built-in (=y) rather than modules (=m).
+        # This prevents symbol version CRC mismatches: when they are modules,
+        # the OEM/vendor cfg80211 loaded by the system can have different CRCs
+        # than our mac80211.ko, causing "disagrees about version of symbol
+        # wiphy_new_nm (err -22)". Built-in, they are always present in the
+        # kernel image with the exact CRCs that all dependent modules expect.
+        ./scripts/config --file arch/arm64/configs/gki_defconfig \
+          --enable CONFIG_CFG80211 \
+          --enable CONFIG_MAC80211
+        echo "cfg80211 and mac80211 set to built-in ✅"
+
     - name: Add BBR
       shell: bash
       run: |
