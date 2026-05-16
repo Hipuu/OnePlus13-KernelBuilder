@@ -422,8 +422,8 @@ runs:
         echo "Found init.c at $INIT_C"
         if grep -q "ksu_late_loaded" "$INIT_C" && ! grep -q "bool ksu_late_loaded" "$INIT_C"; then
           LAST_INC=$(grep -n '^#include' "$INIT_C" | tail -1 | cut -d: -f1)
-          sed -i "${LAST_INC}a\\extern bool ksu_late_loaded;" "$INIT_C"
-          echo "Injected extern bool ksu_late_loaded after line $LAST_INC"
+          sed -i "${LAST_INC}a\\bool ksu_late_loaded = false;" "$INIT_C"
+          echo "Injected bool ksu_late_loaded = false after line $LAST_INC"
         else
           echo "ksu_late_loaded OK"
         fi
