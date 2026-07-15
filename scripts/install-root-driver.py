@@ -18,6 +18,21 @@ from typing import Any
 VARIANTS = {"kernelsu", "kernelsu-next"}
 EXCLUDED_PARTS = {".git", ".cache", "__pycache__"}
 STAMP_NAME = ".op13-root-source.json"
+EXECUTABLE_PATHS = {
+    ".vscode/generate_compdb.py",
+    "build-all.sh",
+    "setup.sh",
+}
+EXPECTED_TREES = {
+    "kernelsu": {
+        "file_count": 91,
+        "tree_sha256": "4e9b2c14446e42afeab9f7cf07c34761df3c7c38dd9ef84d49f7c40421d8aa6b",
+    },
+    "kernelsu-next": {
+        "file_count": 92,
+        "tree_sha256": "4c27d35127e240f11bcf7cb4425f5f0b7a3ba1e4950bb985b04655fbf0b14934",
+    },
+}
 
 
 class InstallError(RuntimeError):
@@ -66,7 +81,10 @@ def tree_digest(source: Path, files: list[Path]) -> str:
     digest = hashlib.sha256()
     for path in files:
         relative = path.relative_to(source).as_posix().encode("utf-8")
-        mode = b"755" if path.stat().st_mode & stat.S_IXUSR else b"644"
+        relative_name = path.relative_to(source).as_posix()
+        mode = b"755" if relative_name in EXECUTABLE_PATHS else b"644"
+        if os.name != "nt" and bool(path.stat().st_mode & stat.S_IXUSR) != (mode == b"755"):
+            raise InstallError(f"root driver source mode changed: {relative_name}")
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
         digest.update(mode)
@@ -115,6 +133,13 @@ def install(workspace: Path, root_dir: Path, destination: Path, variant: str) ->
     if not files:
         raise InstallError("root kernel subtree has no files")
     tree_sha256 = tree_digest(source, files)
+    expected_tree = EXPECTED_TREES[variant]
+    if len(files) != expected_tree["file_count"] or tree_sha256 != expected_tree["tree_sha256"]:
+        raise InstallError(
+            f"{variant} final source tree changed: expected "
+            f"{expected_tree['file_count']} files/{expected_tree['tree_sha256']}, "
+            f"got {len(files)} files/{tree_sha256}"
+        )
     temporary = destination_resolved.parent / f".{destination_resolved.name}.tmp"
     if temporary.exists():
         raise InstallError(f"stale root driver temporary directory: {temporary}")

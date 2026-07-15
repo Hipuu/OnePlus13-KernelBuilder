@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -103,6 +104,49 @@ class ContextAndPatchTests(unittest.TestCase):
         series.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(BuildToolError, "unlocked dependency"):
             validate_series_documents(self.root, self.profiles, self.features, self.lock)
+
+    def test_pinned_patch_digest_is_checked_before_application(self) -> None:
+        source, context_path = self._context()
+        patch = self.root / "patches" / "common" / "pinned.patch"
+        patch.write_text(
+            "diff --git a/fixture.txt b/fixture.txt\n"
+            "--- a/fixture.txt\n"
+            "+++ b/fixture.txt\n"
+            "@@ -1 +1 @@\n"
+            "-before\n"
+            "+after\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        series = self.root / "patches" / "series" / "test.yml"
+        data = json.loads(series.read_text(encoding="utf-8"))
+        data["operations"] = [
+            {
+                "id": "pinned",
+                "type": "apply",
+                "path": "patches/common/pinned.patch",
+                "sha256": hashlib.sha256(b"different bytes").hexdigest(),
+                "cwd": ".",
+                "strip": 1,
+            }
+        ]
+        series.write_text(json.dumps(data), encoding="utf-8")
+
+        with self.assertRaisesRegex(BuildToolError, "patch digest mismatch"):
+            apply_patch_series(
+                root=self.root,
+                source_dir=source,
+                cache_root=self.root / ".cache" / "op13",
+                context_path=context_path,
+                profile=self.profiles["oos16"],
+                feature=self.features["test"],
+                lock=self.lock,
+                root_variant="none",
+                check_only=False,
+                smoke=False,
+                log_dir=self.root / "out" / "debug",
+            )
+        self.assertEqual((source / "fixture.txt").read_text(encoding="utf-8"), "before\n")
 
     def test_explicit_fuzz_uses_audited_patch_path_and_records_output(self) -> None:
         source, context_path = self._context()

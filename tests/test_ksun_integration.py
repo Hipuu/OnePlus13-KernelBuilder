@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,8 +31,35 @@ class KsunIntegrationTests(unittest.TestCase):
         fix_root.mkdir(parents=True)
         for name in HELPER.FIX_PATCHES:
             (fix_root / name).write_text(name + "\n", encoding="utf-8")
+        for checkout in (self.susfs, self.wild):
+            subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.invalid"], cwd=checkout, check=True
+            )
+            subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=checkout, check=True)
+        susfs_payload = HELPER._git_blob_bytes(self.susfs, HELPER.SUSFS_PATCH, "SUSFS")
+        self.susfs_hash_patch = mock.patch.object(
+            HELPER, "EXPECTED_SUSFS_SHA256", hashlib.sha256(susfs_payload).hexdigest()
+        )
+        self.fix_hash_patch = mock.patch.dict(
+            HELPER.EXPECTED_FIX_SHA256,
+            {
+                name: hashlib.sha256(
+                    HELPER._git_blob_bytes(
+                        self.wild, HELPER.WILD_FIX_DIR / name, f"Wild fix {name}"
+                    )
+                ).hexdigest()
+                for name in HELPER.FIX_PATCHES
+            },
+        )
+        self.susfs_hash_patch.start()
+        self.fix_hash_patch.start()
 
     def tearDown(self) -> None:
+        self.fix_hash_patch.stop()
+        self.susfs_hash_patch.stop()
         self.temporary.cleanup()
 
     def _make_rejects(self, rejects) -> None:
@@ -74,6 +103,15 @@ class KsunIntegrationTests(unittest.TestCase):
         residue.write_text("old\n", encoding="utf-8")
         with self.assertRaisesRegex(HELPER.IntegrationError, "not clean"):
             HELPER.integrate(self.ksun, self.susfs, self.wild)
+
+    def test_patch_command_disables_mismatch_backups(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="expected partial application")
+        with mock.patch.object(HELPER.subprocess, "run", return_value=completed) as run:
+            return_code, output = HELPER._run_patch(self.ksun, self.susfs / HELPER.SUSFS_PATCH)
+        command = run.call_args.args[0]
+        self.assertIn("--no-backup-if-mismatch", command)
+        self.assertEqual(return_code, 1)
+        self.assertEqual(output, "expected partial application")
 
 
 if __name__ == "__main__":

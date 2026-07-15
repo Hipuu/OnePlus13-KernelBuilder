@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -118,6 +120,12 @@ def _load_series(path: Path) -> tuple[str, list[dict[str, Any]]]:
                 raise BuildToolError(f"{where}: fuzz is supported only for apply operations")
             if not isinstance(fuzz, int) or isinstance(fuzz, bool) or fuzz < 0 or fuzz > 3:
                 raise BuildToolError(f"{where}: fuzz must be an integer from 0 through 3")
+        if "sha256" in operation:
+            expected_sha256 = operation["sha256"]
+            if operation_type not in {"apply", "git-apply"}:
+                raise BuildToolError(f"{where}: sha256 is supported only for patch operations")
+            if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                raise BuildToolError(f"{where}: sha256 must be a lowercase SHA-256 digest")
         operations.append(operation)
     return series_id, operations
 
@@ -241,6 +249,19 @@ def _operation_source(
     except ValueError as exc:
         raise BuildToolError(f"operation {operation['id']}: source escapes its dependency") from exc
     return source, base_dir
+
+
+def _git_blob_bytes(checkout: Path, relative: Path, operation_id: str) -> bytes:
+    revision = f"HEAD:{relative.as_posix()}"
+    result = subprocess.run(
+        ["git", "-C", str(checkout), "show", revision],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise BuildToolError(f"operation {operation_id}: failed to read pinned patch blob: {detail}")
+    return result.stdout
 
 
 def _source_target(source_dir: Path, operation: Mapping[str, Any], field: str) -> Path:
@@ -377,7 +398,7 @@ def _execute_operation(
     operation_type = str(operation["type"])
     record: dict[str, Any] = {"id": operation_id, "type": operation_type, "status": "checked" if check_only else "applied"}
     if operation_type in {"apply", "git-apply"}:
-        patch, _ = _operation_source(operation, root=root, cache_root=cache_root, lock=lock, base=base)
+        patch, patch_root = _operation_source(operation, root=root, cache_root=cache_root, lock=lock, base=base)
         cwd = _cwd(source_dir, operation)
         strip = operation.get("strip", 1)
         if not isinstance(strip, int) or isinstance(strip, bool) or strip < 0 or strip > 4:
@@ -389,57 +410,80 @@ def _execute_operation(
             raise BuildToolError(f"operation {operation_id}: patch is missing: {patch}")
         if not cwd.is_dir():
             raise BuildToolError(f"operation {operation_id}: source cwd is missing: {cwd}")
-        fuzz = operation.get("fuzz", 0)
-        if fuzz:
-            residues_before = {
-                path.resolve()
-                for pattern in ("*.rej", "*.orig")
-                for path in cwd.rglob(pattern)
-                if path.is_file()
-            }
-            command = [
-                _patch_utility(),
-                "--batch",
-                "--forward",
-                f"--fuzz={fuzz}",
-                "--no-backup-if-mismatch",
-                "--reject-file=-",
-                f"-p{strip}",
-                f"--input={patch}",
-            ]
-            preflight_output = _preflight_fuzzy_patch(
-                command,
-                patch=patch,
-                cwd=cwd,
-                strip=strip,
-                operation_id=operation_id,
-                runner=runner,
-            )
-            outputs = ["preflight replay:\n" + preflight_output]
-            if not check_only:
-                applied = runner.run(command, cwd=cwd, capture=True)
-                outputs.append((applied.stdout or "") + (applied.stderr or ""))
-            residues_after = {
-                path.resolve()
-                for pattern in ("*.rej", "*.orig")
-                for path in cwd.rglob(pattern)
-                if path.is_file()
-            }
-            new_residues = sorted(str(path) for path in residues_after - residues_before)
-            if new_residues:
+        temporary: tempfile.TemporaryDirectory[str] | None = None
+        patch_input = patch
+        dependency_id = operation.get("dependency")
+        try:
+            if isinstance(dependency_id, str) and lock.dependencies[dependency_id].kind == "git":
+                relative = patch.relative_to(patch_root)
+                payload = _git_blob_bytes(patch_root, relative, operation_id)
+                temporary = tempfile.TemporaryDirectory(prefix="op13-pinned-patch-")
+                patch_input = Path(temporary.name) / patch.name
+                patch_input.write_bytes(payload)
+                actual_sha256 = hashlib.sha256(payload).hexdigest()
+            else:
+                actual_sha256 = sha256_file(patch)
+            expected_sha256 = operation.get("sha256")
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
                 raise BuildToolError(
-                    f"operation {operation_id}: patch utility left reject/backup files: {new_residues}"
+                    f"operation {operation_id}: patch digest mismatch: "
+                    f"expected {expected_sha256}, got {actual_sha256}"
                 )
-            patch_output = "\n".join(part.strip() for part in outputs if part.strip())
-            if re.search(r"\bFAILED\b|saving rejects", patch_output, re.IGNORECASE):
-                raise BuildToolError(f"operation {operation_id}: patch output reported a rejected hunk")
-            record.update({"fuzz": fuzz, "patch_output": patch_output})
-        else:
-            runner.run(["git", "apply", "--check", f"-p{strip}", str(patch)], cwd=cwd)
-            if not check_only:
-                runner.run(["git", "apply", f"-p{strip}", str(patch)], cwd=cwd)
-        record.update({"path": str(patch), "sha256": sha256_file(patch), "cwd": str(cwd), "strip": strip})
-        return record
+            fuzz = operation.get("fuzz", 0)
+            if fuzz:
+                residues_before = {
+                    path.resolve()
+                    for pattern in ("*.rej", "*.orig")
+                    for path in cwd.rglob(pattern)
+                    if path.is_file()
+                }
+                command = [
+                    _patch_utility(),
+                    "--batch",
+                    "--forward",
+                    f"--fuzz={fuzz}",
+                    "--no-backup-if-mismatch",
+                    "--reject-file=-",
+                    f"-p{strip}",
+                    f"--input={patch_input}",
+                ]
+                preflight_output = _preflight_fuzzy_patch(
+                    command,
+                    patch=patch_input,
+                    cwd=cwd,
+                    strip=strip,
+                    operation_id=operation_id,
+                    runner=runner,
+                )
+                outputs = ["preflight replay:\n" + preflight_output]
+                if not check_only:
+                    applied = runner.run(command, cwd=cwd, capture=True)
+                    outputs.append((applied.stdout or "") + (applied.stderr or ""))
+                residues_after = {
+                    path.resolve()
+                    for pattern in ("*.rej", "*.orig")
+                    for path in cwd.rglob(pattern)
+                    if path.is_file()
+                }
+                new_residues = sorted(str(path) for path in residues_after - residues_before)
+                if new_residues:
+                    raise BuildToolError(
+                        f"operation {operation_id}: patch utility left reject/backup files: {new_residues}"
+                    )
+                patch_output = "\n".join(part.strip() for part in outputs if part.strip())
+                if re.search(r"\bFAILED\b|saving rejects", patch_output, re.IGNORECASE):
+                    raise BuildToolError(f"operation {operation_id}: patch output reported a rejected hunk")
+                record.update({"fuzz": fuzz, "patch_output": patch_output})
+            else:
+                git_apply = ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply"]
+                runner.run([*git_apply, "--check", f"-p{strip}", str(patch_input)], cwd=cwd)
+                if not check_only:
+                    runner.run([*git_apply, f"-p{strip}", str(patch_input)], cwd=cwd)
+            record.update({"path": str(patch), "sha256": actual_sha256, "cwd": str(cwd), "strip": strip})
+            return record
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
 
     if operation_type == "copy":
         source, _ = _operation_source(operation, root=root, cache_root=cache_root, lock=lock, base=base)

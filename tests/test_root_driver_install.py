@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("install_root_driver", ROOT / "scripts" / "install-root-driver.py")
@@ -25,8 +26,16 @@ class RootDriverInstallTests(unittest.TestCase):
         (kernel / "core").mkdir()
         (kernel / "core" / "main.c").write_text("int ksu;\n", encoding="utf-8")
         self.destination = self.workspace / "kernel_platform" / "common" / "drivers" / "kernelsu"
+        files = HELPER._source_files(kernel)
+        expected = {"file_count": len(files), "tree_sha256": HELPER.tree_digest(kernel, files)}
+        self.tree_patch = mock.patch.dict(
+            HELPER.EXPECTED_TREES,
+            {"kernelsu": expected, "kernelsu-next": expected},
+        )
+        self.tree_patch.start()
 
     def tearDown(self) -> None:
+        self.tree_patch.stop()
         self.temporary.cleanup()
 
     def test_install_records_variant_and_reproducible_tree_digest(self) -> None:

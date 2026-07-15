@@ -17,6 +17,7 @@ from lib.runtime import (
     REPO_INIT_STORAGE_FLAGS,
     REPO_SYNC_STORAGE_FLAGS,
     CommandRunner,
+    _fetch_git,
     _verify_git_checkout,
     assert_manifest_matches_lock,
     check_manifest_update,
@@ -168,6 +169,47 @@ class RuntimeAndCliTests(unittest.TestCase):
         ignored.write_text("ignored\n", encoding="utf-8")
         with self.assertRaisesRegex(BuildToolError, "modified, untracked, or ignored"):
             _verify_git_checkout(checkout, dependency, runner)
+
+    def test_new_git_dependency_is_materialized_with_lf_bytes(self) -> None:
+        origin = self.root / "line-ending-origin"
+        origin.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=origin, check=True)
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=origin, check=True)
+        subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=origin, check=True)
+        subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=origin, check=True)
+        tracked = origin / "series.patch"
+        tracked.write_bytes(b"first\nsecond\n")
+        subprocess.run(["git", "add", "series.patch"], cwd=origin, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=origin, check=True)
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=origin, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        url = str(origin.resolve())
+        dependency = Dependency(
+            id="line-endings",
+            kind="git",
+            url=url,
+            commit=commit,
+            ref=commit,
+            sha256=None,
+            required_for=("test",),
+            raw={},
+        )
+        checkout = self.root / "dependency-cache" / "line-endings"
+
+        _fetch_git(dependency, checkout, CommandRunner(verbose=False), offline=False)
+
+        self.assertEqual((checkout / "series.patch").read_bytes(), b"first\nsecond\n")
+        self.assertEqual(
+            subprocess.run(
+                ["git", "config", "--local", "core.autocrlf"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip(),
+            "false",
+        )
 
     def test_pipeline_scan_parses_python_instead_of_matching_diagnostic_text(self) -> None:
         scripts = self.root / "scripts"

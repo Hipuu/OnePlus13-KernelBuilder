@@ -10,6 +10,18 @@ Build target, optimization, and LTO are separate choices. The default GitHub
 Actions build is OOS 16, full features, KernelSU-Next, mixed output, O2, and
 Thin LTO.
 
+The pinned KernelSU and KernelSU-Next `kernel/include/uapi -> ../../uapi` Git
+links are explicit source contracts. The staging helper verifies each exact
+commit, link mode, blob, target, UAPI inventory, and clean checkout. It writes
+the driver from immutable Git blobs and materializes the pinned UAPI headers
+as regular files. Any other link or target stops the build; dependency links
+are never copied through blindly.
+
+After SUSFS integration, an exact preimage-checked transform pins the versions
+that upstream would derive from full Git history: KernelSU `32525` and
+KernelSU-Next `33214` / `v3.3.0`. The final 91-file or 92-file driver subtree
+must match its audited digest before it is installed into `common/drivers`.
+
 ## Reproducible inputs
 
 `dependencies/lock.yml` pins every dependency. Each release profile points to
@@ -17,6 +29,11 @@ a repository-owned file under `manifests/lockfiles/`; every project revision in
 those XML files is a full commit SHA. The original manifest URL, branch, file,
 and pinned manifest-repository revision remain in the profile for provenance
 and source monitoring.
+
+New Git dependency checkouts force `core.autocrlf=false` and `core.eol=lf`
+before materialization. Root-driver and patch consumers also read immutable
+Git blobs directly, so their bytes do not depend on the runner's host settings
+or an older restored worktree.
 
 `scripts/sync-sources.sh` must initialize from the locked manifest. After sync,
 the build records `repo manifest -r`, the lock file, and a build context. A

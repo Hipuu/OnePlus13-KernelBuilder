@@ -4,20 +4,46 @@
   "operations": [
     {
       "id": "stage-kernelsu",
-      "type": "copy",
-      "dependency": "kernelsu",
-      "path": "kernel",
+      "type": "exec",
+      "dependencies": ["kernelsu"],
       "cwd": ".",
-      "destination": "kernel_platform/KernelSU/kernel",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/stage-root-source.py",
+        "--workspace",
+        "{source_dir}",
+        "--source",
+        "{dependency_dir:kernelsu}",
+        "--destination",
+        "{source_dir}/kernel_platform/KernelSU",
+        "--variant",
+        "kernelsu"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU/.op13-root-stage.json"
+      ],
       "root_variants": ["kernelsu"]
     },
     {
       "id": "stage-kernelsu-next",
-      "type": "copy",
-      "dependency": "kernelsu_next",
-      "path": "kernel",
+      "type": "exec",
+      "dependencies": ["kernelsu_next"],
       "cwd": ".",
-      "destination": "kernel_platform/KernelSU-Next/kernel",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/stage-root-source.py",
+        "--workspace",
+        "{source_dir}",
+        "--source",
+        "{dependency_dir:kernelsu_next}",
+        "--destination",
+        "{source_dir}/kernel_platform/KernelSU-Next",
+        "--variant",
+        "kernelsu-next"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU-Next/.op13-root-stage.json"
+      ],
       "root_variants": ["kernelsu-next"]
     },
     {
@@ -25,6 +51,7 @@
       "type": "apply",
       "dependency": "susfs",
       "path": "kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch",
+      "sha256": "1be114c12dde6aa9f67b79db9eb88d19355af29aa1445e5e6361dad6f18d9a19",
       "cwd": "kernel_platform/KernelSU",
       "strip": 1,
       "feature": "root.susfs",
@@ -71,6 +98,44 @@
       ],
       "feature": "root.susfs",
       "root_variants": ["kernelsu", "kernelsu-next"]
+    },
+    {
+      "id": "pin-kernelsu-version",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/pin-root-version.py",
+        "--workspace",
+        "{source_dir}",
+        "--root-dir",
+        "{source_dir}/kernel_platform/KernelSU",
+        "--variant",
+        "kernelsu"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU/.op13-root-version.json"
+      ],
+      "root_variants": ["kernelsu"]
+    },
+    {
+      "id": "pin-kernelsu-next-version",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/pin-root-version.py",
+        "--workspace",
+        "{source_dir}",
+        "--root-dir",
+        "{source_dir}/kernel_platform/KernelSU-Next",
+        "--variant",
+        "kernelsu-next"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU-Next/.op13-root-version.json"
+      ],
+      "root_variants": ["kernelsu-next"]
     },
     {
       "id": "install-kernelsu-driver",

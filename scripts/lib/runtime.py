@@ -189,12 +189,16 @@ def _fetch_git(dependency: Dependency, destination: Path, runner: CommandRunner,
         raise BuildToolError(f"stale dependency temporary directory: {temporary}")
     if runner.dry_run:
         runner.run(["git", "init", str(temporary)])
+        runner.run(["git", "-C", str(temporary), "config", "--local", "core.autocrlf", "false"])
+        runner.run(["git", "-C", str(temporary), "config", "--local", "core.eol", "lf"])
         runner.run(["git", "-C", str(temporary), "remote", "add", "origin", dependency.url])
         runner.run(["git", "-C", str(temporary), "fetch", "--depth=1", "origin", str(dependency.commit)])
         runner.run(["git", "-C", str(temporary), "checkout", "--detach", str(dependency.commit)])
         return destination
     try:
         runner.run(["git", "init", str(temporary)])
+        runner.run(["git", "-C", str(temporary), "config", "--local", "core.autocrlf", "false"])
+        runner.run(["git", "-C", str(temporary), "config", "--local", "core.eol", "lf"])
         runner.run(["git", "-C", str(temporary), "remote", "add", "origin", dependency.url])
         runner.run(["git", "-C", str(temporary), "fetch", "--depth=1", "--no-tags", "origin", str(dependency.commit)])
         runner.run(["git", "-C", str(temporary), "checkout", "--detach", str(dependency.commit)])
