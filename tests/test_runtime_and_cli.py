@@ -18,6 +18,7 @@ from lib.runtime import (
     REPO_SYNC_STORAGE_FLAGS,
     CommandRunner,
     _verify_git_checkout,
+    assert_manifest_matches_lock,
     check_manifest_update,
     validate_resolved_manifest,
 )
@@ -69,6 +70,45 @@ class RuntimeAndCliTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(BuildToolError, "not pinned"):
             validate_resolved_manifest(path)
+
+    def test_manifest_lock_accepts_repo_root_path_spelling_alias(self) -> None:
+        locked = self.root / "locked-root.xml"
+        resolved = self.root / "resolved-root.xml"
+        locked.write_text(
+            f'<manifest><project name="root" path="./" revision="{PROJECT_COMMIT}" /></manifest>',
+            encoding="utf-8",
+        )
+        resolved.write_text(
+            f'<manifest><project name="root" path="." revision="{PROJECT_COMMIT}" /></manifest>',
+            encoding="utf-8",
+        )
+
+        assert_manifest_matches_lock(resolved, locked)
+
+    def test_manifest_path_canonicalization_is_narrow_and_duplicate_safe(self) -> None:
+        locked = self.root / "locked-subdirectory.xml"
+        resolved = self.root / "resolved-subdirectory.xml"
+        locked.write_text(
+            f'<manifest><project name="root" path="./kernel" revision="{PROJECT_COMMIT}" /></manifest>',
+            encoding="utf-8",
+        )
+        resolved.write_text(
+            f'<manifest><project name="root" path="kernel" revision="{PROJECT_COMMIT}" /></manifest>',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BuildToolError, "differs from its profile lock"):
+            assert_manifest_matches_lock(resolved, locked)
+
+        duplicate = self.root / "duplicate-root.xml"
+        duplicate.write_text(
+            "<manifest>"
+            f'<project name="a" path="." revision="{PROJECT_COMMIT}" />'
+            f'<project name="b" path="./" revision="{PROJECT_COMMIT}" />'
+            "</manifest>",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BuildToolError, "repeats checkout path"):
+            validate_resolved_manifest(duplicate)
 
     def test_repo_sync_is_shallow_and_storage_optimized(self) -> None:
         self.assertIn("--depth=1", REPO_INIT_STORAGE_FLAGS)

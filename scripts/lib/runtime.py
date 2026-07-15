@@ -274,6 +274,12 @@ def _repo_implementation_pin(lock: DependencyLock) -> tuple[str, str]:
     return url, commit
 
 
+def _canonical_manifest_checkout_path(checkout_path: str) -> str:
+    """Canonicalize the one repo-tool spelling alias present in locked manifests."""
+
+    return "." if checkout_path == "./" else checkout_path
+
+
 def validate_resolved_manifest(path: Path) -> int:
     try:
         tree = ET.parse(path)
@@ -289,6 +295,7 @@ def validate_resolved_manifest(path: Path) -> int:
         revision = project.get("revision")
         if not name or not checkout_path:
             raise BuildToolError("resolved manifest project is missing name/path")
+        checkout_path = _canonical_manifest_checkout_path(checkout_path)
         if checkout_path in seen_paths:
             raise BuildToolError(f"resolved manifest repeats checkout path {checkout_path}")
         seen_paths.add(checkout_path)
@@ -308,6 +315,7 @@ def _manifest_projects(path: Path) -> dict[tuple[str, str], str]:
         checkout_path = project.get("path") or name
         revision = project.get("revision")
         if name and checkout_path and revision:
+            checkout_path = _canonical_manifest_checkout_path(checkout_path)
             result[(name, checkout_path)] = revision
     return result
 
