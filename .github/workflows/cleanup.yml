@@ -1,0 +1,102 @@
+name: Remove stale Actions storage
+
+on:
+  schedule:
+    - cron: "29 20 * * 0"
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: Delete caches and artifacts older than this many days
+        required: true
+        default: "14"
+        type: choice
+        options:
+          - "7"
+          - "14"
+          - "30"
+
+permissions:
+  actions: write
+
+concurrency:
+  group: actions-storage-cleanup-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  remove-stale-storage:
+    name: Delete stale caches and artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RETENTION_DAYS: ${{ inputs.retention_days || '14' }}
+    steps:
+      - name: Remove caches older than the retention window
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RETENTION_DAYS" =~ ^(7|14|30)$ ]]; then
+            echo "unsupported retention window" >&2
+            exit 2
+          fi
+
+          cutoff=$(date -u -d "$RETENTION_DAYS days ago" +%s)
+          cache_list=$(mktemp)
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .key, .last_accessed_at, .size_in_bytes] | @tsv' \
+            > "$cache_list"
+
+          cache_deleted=0
+          cache_reclaimed=0
+          while IFS=$'\t' read -r cache_id cache_key last_accessed size_in_bytes; do
+            [[ -n "$cache_id" ]] || continue
+            last_accessed_epoch=$(date -u -d "$last_accessed" +%s)
+            if ((last_accessed_epoch >= cutoff)); then
+              continue
+            fi
+            echo "deleting cache $cache_id ($cache_key), last accessed $last_accessed"
+            gh api --method DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/caches/${cache_id}"
+            cache_deleted=$((cache_deleted + 1))
+            cache_reclaimed=$((cache_reclaimed + size_in_bytes))
+          done < "$cache_list"
+
+          artifact_list=$(mktemp)
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.id, .name, .created_at, .size_in_bytes] | @tsv' \
+            > "$artifact_list"
+
+          artifact_deleted=0
+          artifact_reclaimed=0
+          while IFS=$'\t' read -r artifact_id artifact_name created_at size_in_bytes; do
+            [[ -n "$artifact_id" ]] || continue
+            created_epoch=$(date -u -d "$created_at" +%s)
+            if ((created_epoch >= cutoff)); then
+              continue
+            fi
+            echo "deleting artifact $artifact_id ($artifact_name), created $created_at"
+            gh api --method DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            artifact_deleted=$((artifact_deleted + 1))
+            artifact_reclaimed=$((artifact_reclaimed + size_in_bytes))
+          done < "$artifact_list"
+
+          {
+            echo '## Actions storage cleanup'
+            echo
+            echo "- Retention window: ${RETENTION_DAYS} days"
+            echo "- Deleted caches: ${cache_deleted}"
+            echo "- Cache bytes reclaimed: ${cache_reclaimed}"
+            echo "- Deleted artifacts: ${artifact_deleted}"
+            echo "- Artifact bytes reclaimed: ${artifact_reclaimed}"
+          } >> "$GITHUB_STEP_SUMMARY"

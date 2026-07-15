@@ -1,0 +1,94 @@
+From 651047928be774edfd2502215f5fc46ffdf5747b Mon Sep 17 00:00:00 2001
+From: ztc1997 <dev@ztc1997.com>
+Date: Tue, 16 Apr 2024 12:11:15 +0800
+Subject: [PATCH] cpufreq: cap userspace scaling_min_freq requests
+
+Provide one cap per CPU-frequency policy.  Indexing by the policy's lead CPU
+keeps the mechanism topology-independent and avoids the unallocated
+cpumask_var_t storage in the original follow-up patch.
+
+Supersedes these sequential Wild_KSU patches at
+2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f:
+  common/add_limitation_scaling_min_freq.patch
+  common/re_write_limitation_scaling_min_freq.patch
+  common/use_unlikely_wrap_cpufreq.patch
+---
+ drivers/cpufreq/cpufreq.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -34,6 +34,9 @@
+ 
+ static LIST_HEAD(cpufreq_policy_list);
+ 
++static unsigned int scaling_min_freq_limit[NR_CPUS] = {
++	[0 ... NR_CPUS - 1] = INT_MAX,
++};
+ /* Macros to iterate over CPU policies */
+ #define for_each_suitable_policy(__policy, __active)			 \
+ 	list_for_each_entry(__policy, &cpufreq_policy_list, policy_list) \
+@@ -746,6 +749,13 @@ static ssize_t show_cpuinfo_max_freq(struct cpufreq_policy *policy, char *buf)
+ 	return sprintf(buf, "%u\n", max_freq);
+ }
+ 
++static ssize_t show_scaling_min_freq_limit(struct cpufreq_policy *policy,
++					   char *buf)
++{
++	return sysfs_emit(buf, "%u\n",
++			  READ_ONCE(scaling_min_freq_limit[policy->cpu]));
++}
++
+ show_one(cpuinfo_min_freq, cpuinfo.min_freq);
+ show_one(cpuinfo_transition_latency, cpuinfo.transition_latency);
+ show_one(scaling_min_freq, min);
+@@ -791,6 +801,20 @@ static ssize_t store_##file_name					\
+ 	return ret >= 0 ? count : ret;					\
+ }
+ 
++static ssize_t store_scaling_min_freq_limit(struct cpufreq_policy *policy,
++					    const char *buf, size_t count)
++{
++	unsigned int val;
++	int ret;
++
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	WRITE_ONCE(scaling_min_freq_limit[policy->cpu], val);
++	return count;
++}
++
+ store_one(scaling_min_freq, min);
+ store_one(scaling_max_freq, max);
+ 
+@@ -980,6 +1004,7 @@ cpufreq_freq_attr_ro(bios_limit);
+ cpufreq_freq_attr_ro(related_cpus);
+ cpufreq_freq_attr_ro(affected_cpus);
+ cpufreq_freq_attr_rw(scaling_min_freq);
++cpufreq_freq_attr_rw(scaling_min_freq_limit);
+ cpufreq_freq_attr_rw(scaling_max_freq);
+ cpufreq_freq_attr_rw(scaling_governor);
+ cpufreq_freq_attr_rw(scaling_setspeed);
+@@ -989,6 +1014,7 @@ static struct attribute *cpufreq_attrs[] = {
+ 	&cpuinfo_max_freq.attr,
+ 	&cpuinfo_transition_latency.attr,
+ 	&scaling_min_freq.attr,
++	&scaling_min_freq_limit.attr,
+ 	&scaling_max_freq.attr,
+ 	&affected_cpus.attr,
+ 	&related_cpus.attr,
+@@ -2631,6 +2657,9 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
+ 	new_data.min = freq_qos_read_value(&policy->constraints, FREQ_QOS_MIN);
+ 	new_data.max = freq_qos_read_value(&policy->constraints, FREQ_QOS_MAX);
+ 
++	new_data.min = min(new_data.min,
++			   READ_ONCE(scaling_min_freq_limit[policy->cpu]));
++
+ 	pr_debug("setting new policy for CPU %u: %u - %u kHz\n",
+ 		 new_data.cpu, new_data.min, new_data.max);
+ 
+-- 
+2.50.1

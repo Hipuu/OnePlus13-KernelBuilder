@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Hipuu/OnePlus13-KernelBuilder/raw/main/schemas/device.schema.json",
+  "title": "OnePlus kernel build device",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "device",
+    "name",
+    "vendor",
+    "codename",
+    "soc",
+    "soc_name",
+    "target",
+    "arch",
+    "kmi",
+    "official_build",
+    "source_layout"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "device": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "name": { "type": "string", "minLength": 1 },
+    "vendor": { "type": "string", "minLength": 1 },
+    "codename": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+    "soc": { "type": "string", "pattern": "^[A-Z0-9]+$" },
+    "soc_name": { "type": "string", "minLength": 1 },
+    "target": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+    "arch": { "const": "arm64" },
+    "kmi": { "type": "string", "pattern": "^android[0-9]+-[0-9]+\\.[0-9]+$" },
+    "official_build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["script", "args", "variant"],
+      "properties": {
+        "script": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "variant": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source_layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "common_kernel",
+        "vendor_kernel",
+        "modules_and_devicetree",
+        "defconfig"
+      ],
+      "properties": {
+        "common_kernel": { "$ref": "#/$defs/repositoryPath" },
+        "vendor_kernel": { "$ref": "#/$defs/repositoryPath" },
+        "modules_and_devicetree": { "$ref": "#/$defs/repositoryPath" },
+        "defconfig": { "$ref": "#/$defs/repositoryPath" }
+      }
+    }
+  },
+  "$defs": {
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    }
+  }
+}

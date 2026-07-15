@@ -1,0 +1,107 @@
+name: Monitor pinned upstream sources
+
+on:
+  schedule:
+    - cron: "43 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: source-monitor-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-upstream:
+    name: Check ${{ matrix.base }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        base:
+          - oos16
+          - oos15-global
+          - oos15-cn
+    env:
+      BASE: ${{ matrix.base }}
+      MONITOR_DIR: out/monitor
+    steps:
+      - name: Check out locked dependency metadata
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Compare upstream state with locks
+        id: source-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$MONITOR_DIR"
+          set +e
+          bash scripts/sync-sources.sh \
+            --base "$BASE" \
+            --check-only \
+            --output "$MONITOR_DIR"
+          status=$?
+          set -e
+
+          if ((status != 0 && status != 2)); then
+            echo "source monitor failed with status $status" >&2
+            exit "$status"
+          fi
+
+          changed=false
+          if ((status == 2)); then
+            changed=true
+          fi
+          if [[ "$changed" == true && ! -s "$MONITOR_DIR/source-changes.md" ]]; then
+            printf "# Upstream source change\n\n\`%s\` differs from its pinned state.\n" "$BASE" \
+              > "$MONITOR_DIR/source-changes.md"
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update tracking issue
+        if: steps.source-check.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          report="$MONITOR_DIR/source-changes.md"
+          digest=$(sha256sum "$report" | cut -d ' ' -f 1)
+          marker="<!-- source-monitor:${BASE}:${digest} -->"
+          title="[source-monitor] ${BASE} upstream changes"
+          body=$(mktemp)
+          {
+            printf '%s\n\n' "$marker"
+            cat "$report"
+            printf "\n\n---\nPinned repository revision: \`%s\`  \n" "$REVISION"
+            printf 'Monitor run: https://github.com/%s/actions/runs/%s\n' "$REPOSITORY" "$RUN_ID"
+            printf '\nThis report does not modify dependency locks.\n'
+          } > "$body"
+
+          issues=$(gh issue list --repo "$REPOSITORY" --state open --limit 100 --json number,title)
+          number=$(jq --arg title "$title" -r '.[] | select(.title == $title) | .number' <<< "$issues" | head -n 1)
+          if [[ -n "$number" ]]; then
+            history=$(gh issue view "$number" --repo "$REPOSITORY" --json body,comments \
+              --jq '[.body, (.comments[]?.body // "")] | join("\n")')
+            if grep -Fq "$marker" <<< "$history"; then
+              echo "change is already recorded in issue #$number"
+            else
+              gh issue comment "$number" --repo "$REPOSITORY" --body-file "$body"
+            fi
+          else
+            gh issue create --repo "$REPOSITORY" --title "$title" --body-file "$body"
+          fi
+
+      - name: Report unchanged source state
+        if: steps.source-check.outputs.changed != 'true'
+        shell: bash
+        run: echo "${BASE} remains aligned with dependency locks" >> "$GITHUB_STEP_SUMMARY"

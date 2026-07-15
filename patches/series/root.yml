@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "id": "root",
+  "operations": [
+    {
+      "id": "stage-kernelsu",
+      "type": "copy",
+      "dependency": "kernelsu",
+      "path": "kernel",
+      "cwd": ".",
+      "destination": "kernel_platform/KernelSU/kernel",
+      "root_variants": ["kernelsu"]
+    },
+    {
+      "id": "stage-kernelsu-next",
+      "type": "copy",
+      "dependency": "kernelsu_next",
+      "path": "kernel",
+      "cwd": ".",
+      "destination": "kernel_platform/KernelSU-Next/kernel",
+      "root_variants": ["kernelsu-next"]
+    },
+    {
+      "id": "patch-kernelsu-susfs",
+      "type": "apply",
+      "dependency": "susfs",
+      "path": "kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch",
+      "cwd": "kernel_platform/KernelSU",
+      "strip": 1,
+      "feature": "root.susfs",
+      "root_variants": ["kernelsu"]
+    },
+    {
+      "id": "patch-kernelsu-next-susfs",
+      "type": "exec",
+      "dependencies": ["susfs", "wild_kernel_patches"],
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-ksun-susfs.py",
+        "--ksun-dir",
+        "{source_dir}/kernel_platform/KernelSU-Next",
+        "--susfs-dir",
+        "{dependency_dir:susfs}",
+        "--wild-dir",
+        "{dependency_dir:wild_kernel_patches}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU-Next/.op13-susfs-integrated.json"
+      ],
+      "feature": "root.susfs",
+      "root_variants": ["kernelsu-next"]
+    },
+    {
+      "id": "patch-common-susfs",
+      "type": "exec",
+      "dependencies": ["susfs"],
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-kernel-susfs.py",
+        "--source-dir",
+        "{source_dir}/kernel_platform/common",
+        "--susfs-dir",
+        "{dependency_dir:susfs}",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/common/.op13-susfs-kernel.json"
+      ],
+      "feature": "root.susfs",
+      "root_variants": ["kernelsu", "kernelsu-next"]
+    },
+    {
+      "id": "install-kernelsu-driver",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/install-root-driver.py",
+        "--workspace",
+        "{source_dir}",
+        "--root-dir",
+        "{source_dir}/kernel_platform/KernelSU",
+        "--destination",
+        "{source_dir}/kernel_platform/common/drivers/kernelsu",
+        "--variant",
+        "kernelsu"
+      ],
+      "expected_outputs": [
+        "kernel_platform/common/drivers/kernelsu/.op13-root-source.json"
+      ],
+      "root_variants": ["kernelsu"]
+    },
+    {
+      "id": "install-kernelsu-next-driver",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/install-root-driver.py",
+        "--workspace",
+        "{source_dir}",
+        "--root-dir",
+        "{source_dir}/kernel_platform/KernelSU-Next",
+        "--destination",
+        "{source_dir}/kernel_platform/common/drivers/kernelsu",
+        "--variant",
+        "kernelsu-next"
+      ],
+      "expected_outputs": [
+        "kernel_platform/common/drivers/kernelsu/.op13-root-source.json"
+      ],
+      "root_variants": ["kernelsu-next"]
+    },
+    {
+      "id": "register-kernelsu-kconfig",
+      "type": "replace",
+      "target": "kernel_platform/common/drivers/Kconfig",
+      "find": "endmenu\n",
+      "replace": "source \"drivers/kernelsu/Kconfig\"\n\nendmenu\n",
+      "count": 1,
+      "root_variants": ["kernelsu", "kernelsu-next"]
+    },
+    {
+      "id": "register-kernelsu-makefile",
+      "type": "append",
+      "target": "kernel_platform/common/drivers/Makefile",
+      "lines": [
+        "obj-$(CONFIG_KSU) += kernelsu/"
+      ],
+      "root_variants": ["kernelsu", "kernelsu-next"]
+    }
+  ]
+}

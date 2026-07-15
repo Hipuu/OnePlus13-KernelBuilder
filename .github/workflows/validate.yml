@@ -1,0 +1,359 @@
+name: Validate repository and pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-validation:
+    name: Lint, schema, and dependency locks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check shell and Python syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' shell_files < <(find scripts -type f -name '*.sh' -print0)
+          ((${#shell_files[@]} > 0))
+          for script in "${shell_files[@]}"; do
+            bash -n "$script"
+          done
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --external-sources --severity=warning "${shell_files[@]}"
+          fi
+          python3 -m compileall -q scripts
+
+      - name: Validate device configuration schema
+        uses: dsanders11/json-schema-validate-action@eddf079f55830cc9a916a3c512ba9086240d2fea # v2.0.0
+        with:
+          schema: schemas/device.schema.json
+          files: configs/devices/*.yml
+          all-errors: true
+
+      - name: Validate OxygenOS profile schemas
+        uses: dsanders11/json-schema-validate-action@eddf079f55830cc9a916a3c512ba9086240d2fea # v2.0.0
+        with:
+          schema: schemas/profile.schema.json
+          files: configs/profiles/*.yml
+          all-errors: true
+
+      - name: Validate feature profile schemas
+        uses: dsanders11/json-schema-validate-action@eddf079f55830cc9a916a3c512ba9086240d2fea # v2.0.0
+        with:
+          schema: schemas/feature-profile.schema.json
+          files: configs/features/*.yml
+          all-errors: true
+
+      - name: Validate JSON-compatible metadata and dependency pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          failures = []
+          expected = [
+              pathlib.Path("dependencies/lock.yml"),
+              pathlib.Path("configs/devices/oneplus13.yml"),
+              pathlib.Path("configs/profiles/oos15-cn.yml"),
+              pathlib.Path("configs/profiles/oos15-global.yml"),
+              pathlib.Path("configs/profiles/oos16.yml"),
+              pathlib.Path("configs/features/wild.yml"),
+              pathlib.Path("configs/features/nethunter.yml"),
+              pathlib.Path("configs/features/full.yml"),
+          ]
+          for path in expected:
+              if not path.is_file():
+                  failures.append(f"missing required metadata: {path}")
+
+          metadata = [pathlib.Path("dependencies/lock.yml")]
+          metadata.extend(sorted(pathlib.Path("configs").rglob("*.yml")))
+          for path in metadata:
+              if not path.is_file():
+                  continue
+              try:
+                  value = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError) as exc:
+                  failures.append(f"{path}: not valid JSON-compatible YAML: {exc}")
+                  continue
+              if not isinstance(value, dict):
+                  failures.append(f"{path}: top-level value must be an object")
+
+          lock_path = pathlib.Path("dependencies/lock.yml")
+          if lock_path.is_file():
+              try:
+                  lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                  dependencies = lock.get("dependencies", {})
+                  if not isinstance(dependencies, dict) or not dependencies:
+                      failures.append("dependencies/lock.yml: dependencies must be a non-empty object")
+                  for name, dependency in dependencies.items():
+                      if not isinstance(dependency, dict):
+                          failures.append(f"dependency {name}: value must be an object")
+                          continue
+                      kind = dependency.get("kind")
+                      url = dependency.get("url", "")
+                      if not isinstance(url, str) or not url.startswith("https://"):
+                          failures.append(f"dependency {name}: URL must use HTTPS")
+                      if kind == "git":
+                          commit = dependency.get("commit", "")
+                          if not re.fullmatch(r"[0-9a-f]{40}", str(commit)):
+                              failures.append(f"dependency {name}: git commit must be a full SHA-1")
+                      elif kind in {"file", "archive", "release_asset"}:
+                          digest = dependency.get("sha256", "")
+                          if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+                              failures.append(f"dependency {name}: downloaded content needs a SHA-256")
+                      else:
+                          failures.append(f"dependency {name}: unsupported kind {kind!r}")
+              except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                  failures.append(f"dependencies/lock.yml: {exc}")
+
+          if failures:
+              print("\n".join(f"ERROR: {failure}" for failure in failures), file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      - name: Validate cross-file repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/validate.sh
+
+      - name: Enforce workflow pinning and credential policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          failures = []
+          workflows = sorted(pathlib.Path(".github/workflows").glob("*.yml"))
+          use_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
+          for path in workflows:
+              text = path.read_text(encoding="utf-8")
+              for use in use_pattern.findall(text):
+                  if use.startswith("./"):
+                      continue
+                  if "@" not in use:
+                      failures.append(f"{path}: action has no immutable ref: {use}")
+                      continue
+                  _, ref = use.rsplit("@", 1)
+                  if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                      failures.append(f"{path}: action ref is not a full commit SHA: {use}")
+              if path.name != "release.yml" and re.search(r"^\s*contents:\s*write\s*$", text, re.MULTILINE):
+                  failures.append(f"{path}: contents: write is reserved for release.yml")
+              if path.name != "cleanup.yml" and re.search(r"^\s*actions:\s*write\s*$", text, re.MULTILINE):
+                  failures.append(f"{path}: actions: write is reserved for cleanup.yml")
+
+          credential_patterns = [
+              re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+              re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+          ]
+          for path in pathlib.Path(".").rglob("*"):
+              if not path.is_file() or ".git" in path.parts:
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except (OSError, UnicodeDecodeError):
+                  continue
+              if any(pattern.search(text) for pattern in credential_patterns):
+                  failures.append(f"{path}: possible GitHub credential committed")
+
+          if failures:
+              print("\n".join(f"ERROR: {failure}" for failure in failures), file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+  patch-rehearsal:
+    name: Patch rehearsal (${{ matrix.base }})
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: static-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base: oos16
+            root: kernelsu-next
+          - base: oos15-global
+            root: kernelsu-next
+          - base: oos15-cn
+            root: kernelsu-next
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reclaim unused hosted-runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/debug
+          cleanup_log=out/debug/disk-cleanup.txt
+          : > "$cleanup_log"
+          df -h / > out/debug/disk-before-cleanup.txt
+          before_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          cleanup_paths=(
+            /usr/local/lib/android
+            /usr/share/dotnet
+            /opt/ghc
+            /usr/local/.ghcup
+            /usr/share/swift
+            /usr/local/swift
+            /opt/hostedtoolcache/CodeQL
+            /usr/local/share/powershell
+            /usr/local/share/vcpkg
+          )
+          for candidate in "${cleanup_paths[@]}"; do
+            if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+              printf 'absent\t%s\n' "$candidate" >> "$cleanup_log"
+              continue
+            fi
+            if [[ -L "$candidate" ]]; then
+              printf 'skipped-symlink\t%s\t%s\n' "$candidate" "$(readlink -- "$candidate")" \
+                >> "$cleanup_log"
+              continue
+            fi
+            resolved=$(realpath -e -- "$candidate")
+            if [[ "$resolved" != "$candidate" ]]; then
+              echo "cleanup path resolved outside its explicit allowlist entry: $candidate -> $resolved" >&2
+              exit 2
+            fi
+            size=$(sudo du -sh -- "$resolved" 2>/dev/null | cut -f 1 || true)
+            printf 'remove\t%s\t%s\n' "${size:-unknown}" "$resolved" >> "$cleanup_log"
+            sudo rm -rf --one-file-system -- "$resolved"
+          done
+          if command -v docker >/dev/null 2>&1; then
+            docker image prune --all --force >> "$cleanup_log" 2>&1 || true
+          fi
+          required_commands=(bash python3 jq gh git curl make patch sha256sum tar xz)
+          for required_command in "${required_commands[@]}"; do
+            command -v "$required_command" >> "$cleanup_log"
+          done
+          after_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          df -h / > out/debug/disk-after-cleanup.txt
+          reclaimed=$((after_available - before_available))
+          {
+            echo '## Patch rehearsal disk preparation'
+            echo
+            echo "- Available before cleanup: ${before_available} bytes"
+            echo "- Available after cleanup: ${after_available} bytes"
+            echo "- Net reclaimed: ${reclaimed} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          minimum_available=$((20 * 1024 * 1024 * 1024))
+          if ((after_available < minimum_available)); then
+            echo "less than 20 GiB is available for the locked source graph" >&2
+            exit 2
+          fi
+
+      - name: Synchronize locked sources
+        shell: bash
+        env:
+          BASE: ${{ matrix.base }}
+        run: |
+          set -euo pipefail
+          bash scripts/sync-sources.sh --base "$BASE" --output out/source
+
+      - name: Record locked source footprint
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          df -h / > out/debug/disk-after-source-sync.txt
+          du -sh out/source > out/debug/source-size.txt 2>&1 || true
+          {
+            echo '## Patch rehearsal source footprint'
+            echo
+            echo '```text'
+            cat out/debug/source-size.txt
+            df -h /
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply full patch series on disposable checkout
+        shell: bash
+        env:
+          BASE: ${{ matrix.base }}
+          ROOT_VARIANT: ${{ matrix.root }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/debug
+          bash scripts/apply-series.sh \
+            --base "$BASE" \
+            --profile full \
+            --root "$ROOT_VARIANT" \
+            --source-dir out/source \
+            --log out/debug
+
+      - name: Configure full mixed target on patched checkout
+        shell: bash
+        env:
+          BASE: ${{ matrix.base }}
+          ROOT_VARIANT: ${{ matrix.root }}
+        run: |
+          set -euo pipefail
+          bash scripts/configure.sh \
+            --base "$BASE" \
+            --profile full \
+            --root "$ROOT_VARIANT" \
+            --optimization O2 \
+            --lto thin \
+            --build-target mixed \
+            --source-dir out/source \
+            --output out/build
+
+      - name: Upload patch diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: patch-rehearsal-${{ matrix.base }}-${{ github.run_id }}
+          path: out/debug
+          if-no-files-found: warn
+          retention-days: 7
+
+  oos16-full-build:
+    name: OOS 16 full compile
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs:
+      - static-validation
+      - patch-rehearsal
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      base: oos16
+      root: kernelsu-next
+      profile: full
+      target: mixed
+      optimization: O2
+      lto: thin
+      clean: true
+      debug: true
+      pre_release: true
+      artifact_retention_days: 3

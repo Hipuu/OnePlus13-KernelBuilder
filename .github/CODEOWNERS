@@ -1,0 +1,5 @@
+# Default ownership for every repository path.
+* @Hipuu
+
+# Workflow changes always require the repository owner.
+/.github/workflows/** @Hipuu

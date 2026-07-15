@@ -1,0 +1,613 @@
+name: Build OnePlus 13 kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: OxygenOS source profile
+        required: true
+        default: oos16
+        type: choice
+        options:
+          - oos16
+          - oos15-global
+          - oos15-cn
+      root:
+        description: Root implementation
+        required: true
+        default: kernelsu-next
+        type: choice
+        options:
+          - kernelsu-next
+          - kernelsu
+          - none
+      profile:
+        description: Feature profile
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - wild
+          - nethunter
+      target:
+        description: Build output set
+        required: true
+        default: mixed
+        type: choice
+        options:
+          - kernel
+          - modules
+          - mixed
+      optimization:
+        description: Compiler optimization level
+        required: true
+        default: O2
+        type: choice
+        options:
+          - O2
+          - O3
+      lto:
+        description: Link-time optimization mode
+        required: true
+        default: thin
+        type: choice
+        options:
+          - thin
+          - full
+      clean:
+        description: Discard prior local build output
+        required: true
+        default: true
+        type: boolean
+      cache:
+        description: Restore and save the verified dependency-source cache when clean is false
+        required: true
+        default: true
+        type: boolean
+      debug:
+        description: Preserve verbose logs and symbols
+        required: true
+        default: false
+        type: boolean
+      pre_release:
+        description: Mark packages as pre-release output
+        required: true
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      base:
+        required: true
+        type: string
+      root:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      optimization:
+        required: true
+        type: string
+      lto:
+        required: true
+        type: string
+      clean:
+        required: true
+        type: boolean
+      cache:
+        required: false
+        default: true
+        type: boolean
+      debug:
+        required: true
+        type: boolean
+      pre_release:
+        required: true
+        type: boolean
+      kernel_artifact_run_id:
+        required: false
+        default: ""
+        type: string
+      branding:
+        required: false
+        default: ""
+        type: string
+      build_timestamp:
+        required: false
+        default: ""
+        type: string
+      artifact_retention_days:
+        required: false
+        default: 7
+        type: number
+    outputs:
+      package_artifact:
+        description: Name of the packaged build artifact
+        value: ${{ jobs.build.outputs.package_artifact }}
+      kernel_artifact:
+        description: Name of the reusable kernel build artifact
+        value: ${{ jobs.build.outputs.kernel_artifact }}
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ inputs.base }} / ${{ inputs.root }} / ${{ inputs.profile }} / ${{ inputs.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      package_artifact: ${{ steps.artifact-names.outputs.package }}
+      kernel_artifact: ${{ steps.artifact-names.outputs.kernel }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BASE: ${{ inputs.base }}
+      ROOT_VARIANT: ${{ inputs.root }}
+      PROFILE: ${{ inputs.profile }}
+      BUILD_TARGET: ${{ inputs.target }}
+      OPTIMIZATION: ${{ inputs.optimization }}
+      LTO_MODE: ${{ inputs.lto }}
+      CLEAN_BUILD: ${{ inputs.clean }}
+      DEBUG_BUILD: ${{ inputs.debug }}
+      PRE_RELEASE: ${{ inputs.pre_release }}
+      CACHE_ENABLED: ${{ inputs.cache }}
+      ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days || 7 }}
+      CALL_KERNEL_ARTIFACT_RUN_ID: ${{ inputs.kernel_artifact_run_id || vars.KERNEL_ARTIFACT_RUN_ID || '' }}
+      CALL_KERNEL_BRANDING: ${{ inputs.branding || vars.KERNEL_BRANDING || 'OnePlus13-KernelBuilder' }}
+      CALL_BUILD_TIMESTAMP: ${{ inputs.build_timestamp || vars.BUILD_TIMESTAMP || '' }}
+      SOURCE_DIR: out/source
+      BUILD_DIR: out/build
+      MODULE_DIR: out/build/modules
+      DIST_DIR: out/dist
+      DEBUG_DIR: out/debug
+      KERNEL_ARTIFACT_DIR: out/kernel-artifact
+      KERNEL_ARTIFACT_DOWNLOAD_DIR: out/kernel-artifact-download
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate inputs and runner tools
+        id: validated-inputs
+        run: |
+          set -euo pipefail
+          case "$BASE" in oos16|oos15-global|oos15-cn) ;; *) exit 2 ;; esac
+          case "$ROOT_VARIANT" in kernelsu-next|kernelsu|none) ;; *) exit 2 ;; esac
+          case "$PROFILE" in full|wild|nethunter) ;; *) exit 2 ;; esac
+          case "$BUILD_TARGET" in kernel|modules|mixed) ;; *) exit 2 ;; esac
+          case "$OPTIMIZATION" in O2|O3) ;; *) exit 2 ;; esac
+          case "$LTO_MODE" in thin|full) ;; *) exit 2 ;; esac
+          if [[ ! "$ARTIFACT_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]]; then
+            echo "artifact retention must be an integer from 1 through 90 days" >&2
+            exit 2
+          fi
+          kernel_artifact_run_id=$CALL_KERNEL_ARTIFACT_RUN_ID
+          kernel_branding=$CALL_KERNEL_BRANDING
+          build_timestamp=$CALL_BUILD_TIMESTAMP
+          if [[ -n "$kernel_artifact_run_id" && ! "$kernel_artifact_run_id" =~ ^[0-9]+$ ]]; then
+            echo "kernel artifact run ID must be numeric" >&2
+            exit 2
+          fi
+          if [[ "$kernel_artifact_run_id" == *$'\n'* || "$kernel_artifact_run_id" == *$'\r'* ||
+                "$kernel_branding" == *$'\n'* || "$kernel_branding" == *$'\r'* ||
+                "$build_timestamp" == *$'\n'* || "$build_timestamp" == *$'\r'* ]]; then
+            echo "build metadata values must be single-line strings" >&2
+            exit 2
+          fi
+          if [[ ! "$kernel_branding" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]; then
+            echo "branding must contain only letters, digits, dot, underscore, plus, or hyphen" >&2
+            exit 2
+          fi
+          {
+            echo "kernel_artifact_run_id=$kernel_artifact_run_id"
+            echo "kernel_branding=$kernel_branding"
+            echo "build_timestamp=$build_timestamp"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "KERNEL_ARTIFACT_RUN_ID=$kernel_artifact_run_id"
+            echo "KERNEL_BRANDING=$kernel_branding"
+            echo "BUILD_TIMESTAMP=$build_timestamp"
+          } >> "$GITHUB_ENV"
+          python3 --version
+          jq --version
+          mkdir -p "$SOURCE_DIR" "$BUILD_DIR" "$MODULE_DIR" "$DIST_DIR" "$DEBUG_DIR"
+          df -h > "$DEBUG_DIR/disk-before.txt"
+          {
+            echo "cache_enabled=$CACHE_ENABLED"
+            echo "clean_build=$CLEAN_BUILD"
+            echo 'cache_scope=verified dependency sources only'
+            echo 'kernel_lineage=versioned artifact only'
+          } > "$DEBUG_DIR/cache-statistics.txt"
+
+      - name: Reclaim unused hosted-runner disk
+        run: |
+          set -euo pipefail
+          cleanup_log="$DEBUG_DIR/disk-cleanup.txt"
+          : > "$cleanup_log"
+          df -h / > "$DEBUG_DIR/disk-before-cleanup.txt"
+          du -sh "$GITHUB_WORKSPACE" >> "$cleanup_log"
+          before_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          cleanup_paths=(
+            /usr/local/lib/android
+            /usr/share/dotnet
+            /opt/ghc
+            /usr/local/.ghcup
+            /usr/share/swift
+            /usr/local/swift
+            /opt/hostedtoolcache/CodeQL
+            /usr/local/share/powershell
+            /usr/local/share/vcpkg
+          )
+          for candidate in "${cleanup_paths[@]}"; do
+            if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+              printf 'absent\t%s\n' "$candidate" >> "$cleanup_log"
+              continue
+            fi
+            if [[ -L "$candidate" ]]; then
+              printf 'skipped-symlink\t%s\t%s\n' "$candidate" "$(readlink -- "$candidate")" \
+                >> "$cleanup_log"
+              continue
+            fi
+            resolved=$(realpath -e -- "$candidate")
+            if [[ "$resolved" != "$candidate" ]]; then
+              echo "cleanup path resolved outside its explicit allowlist entry: $candidate -> $resolved" >&2
+              exit 2
+            fi
+            size=$(sudo du -sh -- "$resolved" 2>/dev/null | cut -f 1 || true)
+            printf 'remove\t%s\t%s\n' "${size:-unknown}" "$resolved" >> "$cleanup_log"
+            sudo rm -rf --one-file-system -- "$resolved"
+          done
+          if command -v docker >/dev/null 2>&1; then
+            docker image prune --all --force >> "$cleanup_log" 2>&1 || true
+          fi
+          required_commands=(bash python3 jq gh git curl make patch depmod zip unzip sha256sum tar xz zstd)
+          for required_command in "${required_commands[@]}"; do
+            command -v "$required_command" >> "$cleanup_log"
+          done
+          after_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          df -h / > "$DEBUG_DIR/disk-after-cleanup.txt"
+          reclaimed=$((after_available - before_available))
+          {
+            echo '## Hosted-runner disk preparation'
+            echo
+            echo "- Available before cleanup: ${before_available} bytes"
+            echo "- Available after cleanup: ${after_available} bytes"
+            echo "- Net reclaimed: ${reclaimed} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          minimum_available=$((35 * 1024 * 1024 * 1024))
+          if ((after_available < minimum_available)); then
+            echo "less than 35 GiB is available for the locked source graph and kernel build" >&2
+            exit 2
+          fi
+
+      - name: Resolve artifact names
+        id: artifact-names
+        run: |
+          set -euo pipefail
+          kernel_target=$BUILD_TARGET
+          if [[ "$kernel_target" == modules ]]; then
+            # Modules use the same fragment scope as a mixed build.  A
+            # kernel-only target intentionally omits module-scope fragments
+            # and therefore is not a compatible prerequisite.
+            kernel_target=mixed
+          fi
+          echo "kernel=kernel-build-${BASE}-${ROOT_VARIANT}-${PROFILE}-${kernel_target}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
+          echo "package=packages-${BASE}-${ROOT_VARIANT}-${PROFILE}-${BUILD_TARGET}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore verified dependency-source cache
+        id: dependency-cache
+        if: inputs.cache && !inputs.clean
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/op13
+          key: op13-dependencies-v2-${{ runner.os }}-${{ hashFiles('dependencies/lock.yml') }}-${{ hashFiles(format('configs/profiles/{0}.yml', inputs.base)) }}-${{ hashFiles(format('configs/features/{0}.yml', inputs.profile)) }}-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}
+
+      - name: Record dependency cache result
+        if: always()
+        env:
+          CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+          CACHE_KEY: op13-dependencies-v2-${{ runner.os }}-${{ hashFiles('dependencies/lock.yml') }}-${{ hashFiles(format('configs/profiles/{0}.yml', inputs.base)) }}-${{ hashFiles(format('configs/features/{0}.yml', inputs.profile)) }}-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          {
+            echo "cache_hit=${CACHE_HIT:-skipped}"
+            echo "cache_key=$CACHE_KEY"
+          } >> "$DEBUG_DIR/cache-statistics.txt"
+
+      - name: Resolve modules-only kernel artifact
+        id: kernel-artifact
+        if: inputs.target == 'modules'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ steps.validated-inputs.outputs.kernel_artifact_run_id }}
+          ARTIFACT_NAME: ${{ steps.artifact-names.outputs.kernel }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          response=$(gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f name="$ARTIFACT_NAME" \
+            -F per_page=100)
+          run_id=$(jq -r \
+            --arg sha "$CURRENT_SHA" \
+            --arg requested "$REQUESTED_RUN_ID" '
+              [.artifacts[]
+                | select(
+                    .expired == false and
+                    .workflow_run != null and
+                    .workflow_run.head_sha == $sha and
+                    ($requested == "" or (.workflow_run.id | tostring) == $requested)
+                  )]
+              | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty
+            ' <<< "$response")
+          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "no unexpired ${ARTIFACT_NAME} artifact was found for ${CURRENT_SHA}; run a matching mixed build first" >&2
+            exit 2
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download matching kernel artifact
+        if: inputs.target == 'modules'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.artifact-names.outputs.kernel }}
+          path: out/kernel-artifact-download
+          run-id: ${{ steps.kernel-artifact.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore reusable kernel output
+        if: inputs.target == 'modules'
+        run: |
+          set -euo pipefail
+          test -s "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst"
+          test -s "$KERNEL_ARTIFACT_DOWNLOAD_DIR/SHA256SUMS"
+          (
+            cd "$KERNEL_ARTIFACT_DOWNLOAD_DIR"
+            sha256sum --check SHA256SUMS
+          )
+          tar --zstd -tf "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
+            > "$DEBUG_DIR/kernel-artifact-files.txt"
+          if grep -Eq '(^/|(^|/)\.\.(/|$))' "$DEBUG_DIR/kernel-artifact-files.txt"; then
+            echo 'kernel artifact contains a path outside the build directory' >&2
+            exit 2
+          fi
+          tar --zstd --extract \
+            --file="$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
+            --directory="$BUILD_DIR" \
+            --no-same-owner
+          test -s "$BUILD_DIR/.config"
+          test -s "$BUILD_DIR/Module.symvers"
+          test -s "$BUILD_DIR/System.map"
+          test -s "$BUILD_DIR/.op13/build-context.json"
+          rm -f -- \
+            "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
+            "$KERNEL_ARTIFACT_DOWNLOAD_DIR/SHA256SUMS"
+
+      - name: Synchronize locked sources
+        run: |
+          set -euo pipefail
+          bash scripts/sync-sources.sh \
+            --base "$BASE" \
+            --output "$SOURCE_DIR"
+
+      - name: Record locked source footprint
+        if: always()
+        run: |
+          set -uo pipefail
+          df -h / > "$DEBUG_DIR/disk-after-source-sync.txt"
+          du -sh "$SOURCE_DIR" > "$DEBUG_DIR/source-size.txt" 2>&1 || true
+          {
+            echo '## Locked source footprint'
+            echo
+            echo '```text'
+            cat "$DEBUG_DIR/source-size.txt"
+            df -h /
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply selected patch series
+        run: |
+          set -euo pipefail
+          bash scripts/apply-series.sh \
+            --base "$BASE" \
+            --profile "$PROFILE" \
+            --root "$ROOT_VARIANT" \
+            --source-dir "$SOURCE_DIR" \
+            --log "$DEBUG_DIR"
+
+      - name: Configure kernel and modules
+        run: |
+          set -euo pipefail
+          bash scripts/configure.sh \
+            --base "$BASE" \
+            --profile "$PROFILE" \
+            --root "$ROOT_VARIANT" \
+            --optimization "$OPTIMIZATION" \
+            --lto "$LTO_MODE" \
+            --build-target "$BUILD_TARGET" \
+            --source-dir "$SOURCE_DIR" \
+            --output "$BUILD_DIR"
+
+      - name: Build kernel
+        if: inputs.target != 'modules'
+        run: |
+          set -euo pipefail
+          args=(--source-dir "$SOURCE_DIR" --output "$BUILD_DIR")
+          [[ "$CLEAN_BUILD" == true ]] && args+=(--clean)
+          [[ "$DEBUG_BUILD" == true ]] && args+=(--debug)
+          bash scripts/build-kernel.sh "${args[@]}"
+
+      - name: Build external modules
+        if: inputs.target == 'modules' || inputs.target == 'mixed'
+        run: |
+          set -euo pipefail
+          args=(
+            --source-dir "$SOURCE_DIR"
+            --kernel-output "$BUILD_DIR"
+            --output "$MODULE_DIR"
+          )
+          # A modules-only artifact is produced from a prior mixed build and
+          # therefore already contains module staging.  Always replace that
+          # staging so stale modules cannot leak into the new package.
+          if [[ "$CLEAN_BUILD" == true || "$BUILD_TARGET" == modules ]]; then
+            args+=(--clean)
+          fi
+          [[ "$DEBUG_BUILD" == true ]] && args+=(--debug)
+          bash scripts/build-modules.sh "${args[@]}"
+
+      - name: Verify configuration and outputs
+        run: |
+          set -euo pipefail
+          bash scripts/verify.sh \
+            --base "$BASE" \
+            --profile "$PROFILE" \
+            --root "$ROOT_VARIANT" \
+            --build-target "$BUILD_TARGET" \
+            --output "$BUILD_DIR"
+
+      - name: Package build outputs
+        run: |
+          set -euo pipefail
+          args=(
+            --base "$BASE"
+            --profile "$PROFILE"
+            --root "$ROOT_VARIANT"
+            --build-target "$BUILD_TARGET"
+            --input "$BUILD_DIR"
+            --output "$DIST_DIR"
+          )
+          [[ "$DEBUG_BUILD" == true ]] && args+=(--debug)
+          [[ "$PRE_RELEASE" == true ]] && args+=(--pre-release)
+          bash scripts/package.sh "${args[@]}"
+
+      - name: Generate package checksums
+        run: |
+          set -euo pipefail
+          test -n "$(find "$DIST_DIR" -type f -print -quit)"
+          (
+            cd "$DIST_DIR"
+            checksum_file=SHA256SUMS
+            checksum_temporary=${checksum_file}.tmp
+            trap 'rm -f "$checksum_temporary"' EXIT
+            mapfile -d '' package_files < <(
+              find . -type f ! -name "$checksum_file" ! -name "$checksum_temporary" -print0 \
+                | LC_ALL=C sort -z
+            )
+            ((${#package_files[@]} > 0))
+            : > "$checksum_temporary"
+            for package_file in "${package_files[@]}"; do
+              sha256sum "$package_file" >> "$checksum_temporary"
+            done
+            mv "$checksum_temporary" "$checksum_file"
+            trap - EXIT
+            sha256sum --check "$checksum_file"
+          )
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "$DEBUG_DIR"
+          df -h > "$DEBUG_DIR/disk-after.txt"
+          du -sh out/* > "$DEBUG_DIR/output-sizes.txt" 2>&1 || true
+          find out -type f \( -name '*.rej' -o -name '*.orig' \) -print \
+            > "$DEBUG_DIR/patch-rejects.txt" 2>/dev/null || true
+          find out -type f \( -name '*.log' -o -name '*.txt' \) -print0 \
+            | xargs -0 -r grep -H -E -i 'warning:|error:' \
+            > "$DEBUG_DIR/warnings.txt" 2>/dev/null || true
+          {
+            echo '## Final build footprint'
+            echo
+            echo '```text'
+            cat "$DEBUG_DIR/output-sizes.txt"
+            df -h /
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release source checkout before kernel archive
+        if: success() && inputs.target != 'modules'
+        run: |
+          set -euo pipefail
+          if [[ -d "$SOURCE_DIR/.op13" ]]; then
+            cp -a "$SOURCE_DIR/.op13" "$DEBUG_DIR/source-context"
+          fi
+          workspace_root=$(realpath -e -- "$GITHUB_WORKSPACE")
+          source_root=$(realpath -e -- "$SOURCE_DIR")
+          if [[ "$source_root" != "$workspace_root/out/source" ]]; then
+            echo "source cleanup resolved outside the expected workspace path: $source_root" >&2
+            exit 2
+          fi
+          rm -rf --one-file-system -- "$source_root"
+          df -h / > "$DEBUG_DIR/disk-after-source-release.txt"
+
+      - name: Archive reusable kernel output
+        if: success() && inputs.target != 'modules'
+        run: |
+          set -euo pipefail
+          test ! -e "$KERNEL_ARTIFACT_DIR"
+          mkdir -p "$KERNEL_ARTIFACT_DIR"
+          ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd \
+            --create \
+            --file="$KERNEL_ARTIFACT_DIR/kernel-build.tar.zst" \
+            --directory="$BUILD_DIR" \
+            --exclude='./modules' \
+            .
+          (
+            cd "$KERNEL_ARTIFACT_DIR"
+            sha256sum kernel-build.tar.zst > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Upload reusable kernel output
+        if: success() && inputs.target != 'modules'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-names.outputs.kernel }}
+          path: out/kernel-artifact
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload packages
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact-names.outputs.package }}
+          path: out/dist
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload debug evidence
+        if: always() && (inputs.debug || failure())
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: debug-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}-${{ inputs.target }}-${{ inputs.optimization }}-${{ inputs.lto }}-${{ github.run_id }}
+          path: |
+            out/debug
+            out/source/.op13
+            out/build/.op13
+            out/build/.config
+            out/build/vmlinux
+            out/build/System.map
+            out/build/Module.symvers
+            out/build/modules
+            out/dist/SHA256SUMS
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}

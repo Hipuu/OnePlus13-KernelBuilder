@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "id": "nethunter",
+  "integration_contract": {
+    "rtw88": {
+      "dependency": "rtw88",
+      "feature": "nethunter.wifi_rtw88",
+      "mode": "official-oneplus-external-module-helper",
+      "source_subdir": ".",
+      "consumer": "scripts/lib/build.py:build_external_modules",
+      "notes": "The module builder copies the verified locked checkout, generates the pinned OnePlus build.config with kernel_platform/build/brunch, and invokes the official kernel_platform/build/build_module.sh helper with the preserved kernel kit and Module.symvers. Only emitted .ko files are staged; vermagic and depmod -e are checked. Dependency helper binaries, signing keys, and setup targets are neither executed nor packaged."
+    },
+    "memkernel": {
+      "dependency": "memkernel",
+      "feature": "nethunter.memkernel",
+      "mode": "official-kleaf-in-tree-module-output",
+      "destination": "kernel_platform/common/drivers/memkernel",
+      "consumer": "scripts/lib/build.py:build_external_modules",
+      "notes": "Only MIT-licensed, auditable source and kbuild metadata are copied. The upstream setup script is deliberately excluded because it downloads mutable source and randomizes driver identifiers. CONFIG_MEMKERNEL=m is mapped to drivers/memkernel/memkernel.ko and appended to the locked common Kleaf arm64 module_implicit_outs (both 4 KiB and 16 KiB-page companion targets on OOS 16); the full-preimage-pinned MSM dist exports the final mixed modules_staging_archive, and the audited output is extracted to its declared path without a separate in-tree module rebuild."
+    }
+  },
+  "operations": [
+    {
+      "id": "copy-memkernel-comm-header",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/comm.h",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/comm.h",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-entry-source",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/entry.c",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/entry.c",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-kconfig",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/Kconfig",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/Kconfig",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-makefile",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/Makefile",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/Makefile",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-memory-source",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/memory.c",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/memory.c",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-memory-header",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/memory.h",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/memory.h",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-process-source",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/process.c",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/process.c",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "copy-memkernel-process-header",
+      "type": "copy",
+      "dependency": "memkernel",
+      "path": "kernel/process.h",
+      "cwd": ".",
+      "destination": "kernel_platform/common/drivers/memkernel/process.h",
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "register-memkernel-kconfig",
+      "type": "replace",
+      "target": "kernel_platform/common/drivers/Kconfig",
+      "find": "endmenu\n",
+      "replace": "source \"drivers/memkernel/Kconfig\"\n\nendmenu\n",
+      "count": 1,
+      "feature": "nethunter.memkernel"
+    },
+    {
+      "id": "register-memkernel-makefile",
+      "type": "append",
+      "target": "kernel_platform/common/drivers/Makefile",
+      "lines": [
+        "obj-$(CONFIG_MEMKERNEL) += memkernel/"
+      ],
+      "feature": "nethunter.memkernel"
+    }
+  ]
+}

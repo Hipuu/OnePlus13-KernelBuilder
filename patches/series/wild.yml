@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "id": "wild",
+  "operations": [
+    {
+      "id": "hmbird-fengchi-oneplus13",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path_by_base": {
+        "oos15-cn": "oneplus/hmbird/deprecated/fengchi_OP13_A15.patch",
+        "oos15-global": "oneplus/hmbird/fengchi_OP13-CPH_A15.patch",
+        "oos16": "oneplus/hmbird/fengchi_OP13_A16.patch"
+      },
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "fuzz": 1,
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
+      "id": "hmbird-device-tree-overwriter",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "oneplus/hmbird/overwriter.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "fuzz": 1,
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
+      "id": "hmbird-ogki-device-tree-config",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "oneplus/hmbird/hmbird_config.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
+      "id": "module-overlay-source-only",
+      "type": "apply",
+      "path": "patches/oneplus13/0001-module-overlay-source-only.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "oneplus.module_overlay_interception"
+    },
+    {
+      "id": "ntsync-android15-6.6-compat",
+      "type": "apply",
+      "path": "patches/oneplus13/0002-ntsync-android15-6.6-wiring.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "oneplus.ntsync"
+    },
+    {
+      "id": "ntsync-implementation",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/ntsync/ntsync_base.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "oneplus.ntsync"
+    },
+    {
+      "id": "unicode-normalization-bypass-fix",
+      "type": "apply",
+      "path": "patches/oneplus13/0003-unicode-normalization-fix.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "oneplus.unicode_fix"
+    },
+    {
+      "id": "optimized-generic-memory-operations",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/optimized_mem_operations.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "compact-file-structure-alignment",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/file_struct_8bytes_align.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "lower-vfs-cache-pressure",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/reduce_cache_pressure.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "oryon-copy-prefetch",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/mem_opt_prefetch.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.oryon"
+    },
+    {
+      "id": "oryon-memcmp",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/optimise_memcmp.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.oryon"
+    },
+    {
+      "id": "integer-square-root",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/int_sqrt.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "disable-cache-hot-buddy",
+      "type": "apply",
+      "path": "patches/oneplus13/0005-disable-cache-hot-buddy-oneplus-6.6.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "increase-socket-memory-packets",
+      "type": "apply",
+      "path": "patches/oneplus13/0004-increase-sk-mem-packets-oneplus-6.6.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.memory"
+    },
+    {
+      "id": "f2fs-shorter-gc-sleep",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/reduce_gc_thread_sleep_time.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.io"
+    },
+    {
+      "id": "f2fs-less-congestion",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/f2fs_reduce_congestion.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.io"
+    },
+    {
+      "id": "f2fs-larger-min-fsync-window",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/f2fs_enlarge_min_fsync_blocks.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.io"
+    },
+    {
+      "id": "ext4-longer-default-commit-age",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/increase_ext4_default_commit_age.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.io"
+    },
+    {
+      "id": "shorter-alarm-wakeup-window",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/minimise_wakeup_time.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "bounded-wakelock-timeout",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/add_timeout_wakelocks_globally.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "shorter-freeze-timeout",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/reduce_freeze_timeout.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "cpufreq-minimum-limit-hook",
+      "type": "apply",
+      "path": "patches/oneplus13/0006-cpufreq-minimum-limit-oneplus-6.6.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "scheduler-cpu-scan-order",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/adjust_cpu_scan_order.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "avoid-extra-s2idle-wakeups",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/avoid_extra_s2idle_wake_attempts.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "reduce-pci-pme-wakeups",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/reduce_pci_pme_wakeups.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "silence-irq-cpu-hotplug-logspam",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/silence_irq_cpu_logspam.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "silence-system-logspam",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/silence_system_logspam.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "performance.scheduler"
+    },
+    {
+      "id": "force-tcp-nodelay",
+      "type": "apply",
+      "dependency": "wild_kernel_patches",
+      "path": "common/force_tcp_nodelay.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "feature": "network.bbr"
+    }
+  ]
+}

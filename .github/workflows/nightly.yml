@@ -1,0 +1,57 @@
+name: Nightly compatibility builds
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nightly-build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: OOS 16 full / KernelSU-Next
+            base: oos16
+            root: kernelsu-next
+            profile: full
+            target: mixed
+            optimization: O3
+            lto: full
+          - name: OOS 15 Global full / KernelSU-Next
+            base: oos15-global
+            root: kernelsu-next
+            profile: full
+            target: mixed
+            optimization: O2
+            lto: thin
+          - name: OOS 15 China compatibility / KernelSU
+            base: oos15-cn
+            root: kernelsu
+            profile: full
+            target: mixed
+            optimization: O2
+            lto: thin
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      base: ${{ matrix.base }}
+      root: ${{ matrix.root }}
+      profile: ${{ matrix.profile }}
+      target: ${{ matrix.target }}
+      optimization: ${{ matrix.optimization }}
+      lto: ${{ matrix.lto }}
+      clean: false
+      cache: true
+      debug: true
+      pre_release: true
+      artifact_retention_days: 2

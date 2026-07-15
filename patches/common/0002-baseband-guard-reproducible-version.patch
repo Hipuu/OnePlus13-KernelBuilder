@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OnePlus13 KernelBuilder <noreply@users.noreply.github.com>
+Date: Tue, 14 Jul 2026 00:00:00 +0700
+Subject: [PATCH] bbg: make build provenance independent of a Git checkout
+
+The dependency fetcher verifies the complete Baseband Guard commit before
+copying its source into the kernel tree without the upstream .git directory.
+Record that locked revision directly so Kbuild never performs Git commands or
+labels a reproducible build as "unknown".
+
+Upstream-source: https://github.com/vc-teahouse/Baseband-guard
+Upstream-commit: cef0daaef94d46022e1f8883ba7a30dfab849dbe
+License: GPL-2.0-only
+---
+ Makefile | 21 ++-------------------
+ 1 file changed, 2 insertions(+), 19 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 28ef776..ed74dc2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,25 +21,8 @@ else
+   $(shell mv $(objtree)/flask.h $(objtree)/av_permissions.h $(objtree)/security/selinux)
+ endif
+ 
+-GIT_BIN := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin git
+-
+-ifeq ($(findstring $(srctree),$(src)),$(srctree))
+-  BBG_DIR := $(src)
+-else
+-  BBG_DIR := $(srctree)/$(src)
+-endif
+-
+-$(shell cd $(BBG_DIR) && test -f .git/shallow && $(GIT_BIN) fetch --unshallow)
+-
+-REPO_LINK := $(shell cd $(BBG_DIR) && $(GIT_BIN) remote get-url origin 2>/dev/null)
+-COMMIT_SHA := $(shell cd $(BBG_DIR) && $(GIT_BIN) rev-parse --short=8 HEAD 2>/dev/null)
+-
+-ifeq ($(strip $(REPO_LINK)),)
+-  REPO_LINK := unknown
+-endif
+-ifeq ($(strip $(COMMIT_SHA)),)
+-  COMMIT_SHA := unknown
+-endif
++REPO_LINK := https://github.com/vc-teahouse/Baseband-guard
++COMMIT_SHA := cef0daaef94d46022e1f8883ba7a30dfab849dbe
+ 
+ ifeq ($(shell grep -q "file_ioctl_compat" $(srctree)/include/linux/lsm_hook_defs.h $(srctree)/include/linux/lsm_hooks.h 2>/dev/null && echo true),true)
+     ccflags-y += -DBB_HAS_IOCTL_COMPAT
+-- 
+2.50.1

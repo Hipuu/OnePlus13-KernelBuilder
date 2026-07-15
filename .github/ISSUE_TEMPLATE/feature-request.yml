@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a kernel, module, packaging, or build-system feature.
+title: "[feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Use case
+      description: Explain the concrete device or build use case this feature serves.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired configuration, output, or workflow behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - Kernel configuration
+        - KernelSU or SUSFS
+        - OnePlus or performance features
+        - NetHunter or external modules
+        - Packaging
+        - GitHub Actions or build tooling
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References and compatibility notes
+      description: Link upstream commits or documentation and identify affected OxygenOS bases.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and requests for this feature.
+          required: true
+        - label: I identified any required source or binary and its license.
+          required: false

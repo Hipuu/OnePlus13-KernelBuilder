@@ -1,0 +1,29 @@
+{
+  "$schema": "../../schemas/profile.schema.json",
+  "schema_version": 1,
+  "id": "oos15-global",
+  "label": "OxygenOS 15 Global",
+  "device": "oneplus13",
+  "target": "sun",
+  "arch": "arm64",
+  "kmi": "android15-6.6",
+  "os": {
+    "name": "OxygenOS",
+    "major": 15,
+    "region": "global"
+  },
+  "manifest": {
+    "url": "https://github.com/OnePlusOSS/kernel_manifest.git",
+    "branch": "oneplus/sm8750",
+    "file": "oneplus_13_global.xml",
+    "revision": "f8e50677874c65b6da41057d2f39be7b4ef3c08a"
+  },
+  "locked_manifest": "manifests/lockfiles/oos15-global.xml",
+  "build": {
+    "variant": "perf"
+  },
+  "compatibility": {
+    "susfs": "supported",
+    "raw_partition_images": false
+  }
+}

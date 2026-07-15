@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Hipuu/OnePlus13-KernelBuilder/raw/main/schemas/profile.schema.json",
+  "title": "OnePlus kernel release profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "id",
+    "label",
+    "device",
+    "target",
+    "arch",
+    "kmi",
+    "os",
+    "manifest",
+    "locked_manifest",
+    "build",
+    "compatibility"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "label": { "type": "string", "minLength": 1 },
+    "device": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "target": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+    "arch": { "const": "arm64" },
+    "kmi": { "type": "string", "pattern": "^android[0-9]+-[0-9]+\\.[0-9]+$" },
+    "os": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "major", "region"],
+      "properties": {
+        "name": { "const": "OxygenOS" },
+        "major": { "type": "integer", "enum": [15, 16] },
+        "region": { "type": "string", "enum": ["china", "global", "unified"] }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "branch", "file", "revision"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "branch": { "const": "oneplus/sm8750" },
+        "file": {
+          "type": "string",
+          "enum": ["oneplus_13.xml", "oneplus_13_global.xml", "oneplus_13_b.xml"]
+        },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "locked_manifest": {
+      "type": "string",
+      "enum": [
+        "manifests/lockfiles/oos15-cn.xml",
+        "manifests/lockfiles/oos15-global.xml",
+        "manifests/lockfiles/oos16.xml"
+      ]
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant"],
+      "properties": {
+        "variant": { "const": "perf" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["susfs", "raw_partition_images"],
+      "properties": {
+        "susfs": { "type": "string", "enum": ["supported", "experimental"] },
+        "raw_partition_images": { "const": false }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "id": { "const": "oos15-cn" } },
+        "required": ["id"]
+      },
+      "then": {
+        "properties": {
+          "os": {
+            "properties": {
+              "major": { "const": 15 },
+              "region": { "const": "china" }
+            }
+          },
+          "manifest": { "properties": { "file": { "const": "oneplus_13.xml" } } },
+          "locked_manifest": { "const": "manifests/lockfiles/oos15-cn.xml" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "id": { "const": "oos15-global" } },
+        "required": ["id"]
+      },
+      "then": {
+        "properties": {
+          "os": {
+            "properties": {
+              "major": { "const": 15 },
+              "region": { "const": "global" }
+            }
+          },
+          "manifest": { "properties": { "file": { "const": "oneplus_13_global.xml" } } },
+          "locked_manifest": { "const": "manifests/lockfiles/oos15-global.xml" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "id": { "const": "oos16" } },
+        "required": ["id"]
+      },
+      "then": {
+        "properties": {
+          "kmi": { "const": "android15-6.6" },
+          "os": { "properties": { "major": { "const": 16 } } },
+          "manifest": { "properties": { "file": { "const": "oneplus_13_b.xml" } } },
+          "locked_manifest": { "const": "manifests/lockfiles/oos16.xml" },
+          "compatibility": { "properties": { "susfs": { "const": "experimental" } } }
+        }
+      }
+    }
+  ]
+}

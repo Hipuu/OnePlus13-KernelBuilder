@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Build and installation discussions
+    url: https://github.com/Hipuu/OnePlus13-KernelBuilder/discussions
+    about: Ask usage questions and share device-testing results.
+  - name: Private security report
+    url: https://github.com/Hipuu/OnePlus13-KernelBuilder/security/advisories/new
+    about: Report a vulnerability without disclosing it publicly.

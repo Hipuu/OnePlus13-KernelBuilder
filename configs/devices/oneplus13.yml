@@ -1,0 +1,24 @@
+{
+  "$schema": "../../schemas/device.schema.json",
+  "schema_version": 1,
+  "device": "oneplus13",
+  "name": "OnePlus 13",
+  "vendor": "OnePlus",
+  "codename": "dodge",
+  "soc": "SM8750",
+  "soc_name": "Snapdragon 8 Elite",
+  "target": "sun",
+  "arch": "arm64",
+  "kmi": "android15-6.6",
+  "official_build": {
+    "script": "kernel_platform/oplus/build/oplus_build_kernel.sh",
+    "args": ["sun", "perf"],
+    "variant": "perf"
+  },
+  "source_layout": {
+    "common_kernel": "kernel_platform/common",
+    "vendor_kernel": "kernel_platform/msm-kernel",
+    "modules_and_devicetree": ".",
+    "defconfig": "kernel_platform/msm-kernel/arch/arm64/configs/vendor/sun_perf.config"
+  }
+}

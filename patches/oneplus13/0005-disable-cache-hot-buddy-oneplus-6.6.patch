@@ -1,0 +1,29 @@
+From 34cbc8868949d7281aa4c5914a33afe7dd504a91 Mon Sep 17 00:00:00 2001
+From: Sultan Alsawaf <sultan@kerneltoast.com>
+Date: Sat, 17 Aug 2024 22:55:01 -0700
+Subject: [PATCH] sched/fair: disable CACHE_HOT_BUDDY for the DSU
+
+Rebased for the Android 15 6.6 scheduler feature layout used by the locked
+OnePlus 13 sources.
+
+Upstream-patch: Wild_KSU common/disable_cache_hot_buddy.patch at
+  2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f
+Original-signed-off-by: Sultan Alsawaf <sultan@kerneltoast.com>
+---
+ kernel/sched/features.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/sched/features.h b/kernel/sched/features.h
+--- a/kernel/sched/features.h
++++ b/kernel/sched/features.h
+@@ -19,7 +19,7 @@ SCHED_FEAT(NEXT_BUDDY, false)
+  * Consider buddies to be cache hot, decreases the likeliness of a
+  * cache buddy being migrated away, increases cache locality.
+  */
+-SCHED_FEAT(CACHE_HOT_BUDDY, true)
++SCHED_FEAT(CACHE_HOT_BUDDY, false)
+ 
+ /*
+  * Allow wakeup-time preemption of the current task:
+-- 
+2.50.1

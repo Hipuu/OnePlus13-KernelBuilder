@@ -1,0 +1,40 @@
+# Build and source trees
+/out/
+/source/
+/.cache/
+/.repo/
+
+# Generated artifacts and logs
+/artifacts/
+*.img
+*.zip
+*.tar
+*.tar.gz
+*.log
+*.rej
+*.orig
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python and editor state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+.idea/
+.vscode/
+*.swp
+*~
+
+# Platform files
+.DS_Store
+Thumbs.db
+desktop.ini

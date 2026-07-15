@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Hipuu/OnePlus13-KernelBuilder/packaging/stock-metadata/schema.json",
+  "title": "OnePlus 13 stock partition metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "base",
+    "ota_build",
+    "region",
+    "source_package_sha256",
+    "partitions",
+    "round_trip_verified",
+    "device_boot_verified"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "base": { "enum": ["oos15-cn", "oos15-global", "oos16"] },
+    "ota_build": { "type": "string", "minLength": 1 },
+    "region": { "enum": ["CN", "GLOBAL", "MULTI"] },
+    "source_package_sha256": { "$ref": "#/$defs/sha256" },
+    "partitions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/partition" }
+    },
+    "round_trip_verified": { "const": true },
+    "device_boot_verified": { "const": true },
+    "verified_by": { "type": "string", "minLength": 1 },
+    "verified_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "partition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "sha256"],
+      "properties": {
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "header_version": { "type": "integer", "minimum": 0 },
+        "partition_name": { "type": "string", "minLength": 1 },
+        "avb_algorithm": { "type": "string", "minLength": 1 },
+        "cmdline_sha256": { "$ref": "#/$defs/sha256" },
+        "bootconfig_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

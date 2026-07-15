@@ -1,0 +1,94 @@
+name: Build failure
+description: Report a reproducible local or GitHub Actions build failure.
+title: "[build]: "
+labels:
+  - build
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, device identifiers, and other private data from logs before attaching them.
+  - type: input
+    id: revision
+    attributes:
+      label: Repository revision
+      description: Commit SHA or release tag used for the build.
+      placeholder: 0123456789abcdef...
+    validations:
+      required: true
+  - type: dropdown
+    id: base
+    attributes:
+      label: OxygenOS base
+      options:
+        - oos16
+        - oos15-global
+        - oos15-cn
+    validations:
+      required: true
+  - type: dropdown
+    id: root
+    attributes:
+      label: Root implementation
+      options:
+        - kernelsu-next
+        - kernelsu
+        - none
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Feature profile
+      options:
+        - full
+        - wild
+        - nethunter
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Build target
+      options:
+        - kernel
+        - modules
+        - mixed
+        - monolithic
+    validations:
+      required: true
+  - type: input
+    id: run
+    attributes:
+      label: GitHub Actions run
+      description: Link the failed run when the failure occurred in Actions.
+      placeholder: https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/...
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or workflow inputs
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: Failure excerpt
+      description: Include the first relevant error and enough surrounding context to identify the failing stage.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic artifacts
+      description: Link or attach build-context.json, final config, patch log, and compiler log where available.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I used a clean checkout or selected the clean-build option.
+          required: true
+        - label: I removed credentials and private device data from the report.
+          required: true

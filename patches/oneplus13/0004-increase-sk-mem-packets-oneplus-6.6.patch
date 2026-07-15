@@ -1,0 +1,30 @@
+From 7bbbfde1a4a30eee07ce837bc80e7137a4387357 Mon Sep 17 00:00:00 2001
+From: Colin Ian King <colin.i.king@intel.com>
+Date: Wed, 24 Apr 2024 16:45:47 +0100
+Subject: [PATCH] net: sock: increase default number of _SK_MEM_PACKETS to 1024
+
+Rebased for the Android 15 6.6 OnePlus tree, where the derived limits are
+named SK_WMEM_MAX and SK_RMEM_MAX rather than SK_WMEM_DEFAULT and
+SK_RMEM_DEFAULT.
+
+Upstream-patch: Wild_KSU common/increase_sk_mem_packets.patch at
+  2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f
+Original-signed-off-by: Colin Ian King <colin.i.king@intel.com>
+---
+ include/net/sock.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/net/sock.h b/include/net/sock.h
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -2965,7 +2965,7 @@ void sk_get_meminfo(const struct sock *sk, u32 *meminfo);
+  * platforms.  This makes socket queueing behavior and performance
+  * not depend upon such differences.
+  */
+-#define _SK_MEM_PACKETS		256
++#define _SK_MEM_PACKETS		1024
+ #define _SK_MEM_OVERHEAD	SKB_TRUESIZE(256)
+ #define SK_WMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+ #define SK_RMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+-- 
+2.50.1

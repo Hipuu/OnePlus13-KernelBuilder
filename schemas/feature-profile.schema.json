@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Hipuu/OnePlus13-KernelBuilder/raw/main/schemas/feature-profile.schema.json",
+  "title": "OnePlus kernel feature profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "id",
+    "label",
+    "description",
+    "root",
+    "feature_flags",
+    "patch_series",
+    "kconfig_fragments",
+    "required_symbols",
+    "external_modules",
+    "defaults"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "enum": ["wild", "nethunter", "full"] },
+    "label": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supported_variants", "default_variant"],
+      "properties": {
+        "supported_variants": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["kernelsu", "kernelsu-next"] }
+        },
+        "default_variant": { "type": "string", "enum": ["kernelsu", "kernelsu-next"] }
+      }
+    },
+    "feature_flags": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" },
+      "properties": {
+        "artifact.raw_partition_images": { "const": false }
+      },
+      "minProperties": 52,
+      "maxProperties": 52,
+      "propertyNames": {
+        "enum": [
+          "root.kernelsu",
+          "root.kernelsu_next",
+          "root.susfs",
+          "oneplus.hmbird_fengchi_scx",
+          "oneplus.baseband_guard",
+          "oneplus.module_overlay_interception",
+          "oneplus.droidspaces",
+          "oneplus.ntsync",
+          "oneplus.rust_binder",
+          "oneplus.tmpfs_xattr_acl",
+          "oneplus.unicode_fix",
+          "oneplus.fake_config",
+          "performance.oryon",
+          "performance.memory",
+          "performance.io",
+          "performance.scheduler",
+          "performance.optimization_o2_o3",
+          "performance.lto_thin_full",
+          "network.bbr",
+          "network.bbrv3",
+          "network.qdisc_cake",
+          "network.qdisc_pie",
+          "network.qdisc_fq",
+          "network.ttl_hl",
+          "network.ip_set",
+          "network.ipv6_nat",
+          "nethunter.usb_bluetooth_hci",
+          "nethunter.sdr_airspy",
+          "nethunter.sdr_hackrf",
+          "nethunter.can_core",
+          "nethunter.can_vcan",
+          "nethunter.can_slcan",
+          "nethunter.can_usb",
+          "nethunter.usb_serial",
+          "nethunter.wifi_ath",
+          "nethunter.wifi_mt76",
+          "nethunter.wifi_rtw88",
+          "nethunter.memkernel",
+          "build.kernel_only",
+          "build.modules_only",
+          "build.mixed",
+          "build.monolithic",
+          "build.cache",
+          "build.debug",
+          "build.custom_branding",
+          "build.custom_timestamp",
+          "artifact.image",
+          "artifact.anykernel3",
+          "artifact.module_zip",
+          "artifact.wireless_firmware",
+          "artifact.debug_bundle",
+          "artifact.raw_partition_images"
+        ]
+      },
+      "required": [
+        "root.kernelsu",
+        "root.kernelsu_next",
+        "root.susfs",
+        "oneplus.hmbird_fengchi_scx",
+        "oneplus.baseband_guard",
+        "oneplus.module_overlay_interception",
+        "oneplus.droidspaces",
+        "oneplus.ntsync",
+        "oneplus.rust_binder",
+        "oneplus.tmpfs_xattr_acl",
+        "oneplus.unicode_fix",
+        "oneplus.fake_config",
+        "performance.oryon",
+        "performance.memory",
+        "performance.io",
+        "performance.scheduler",
+        "performance.optimization_o2_o3",
+        "performance.lto_thin_full",
+        "network.bbr",
+        "network.bbrv3",
+        "network.qdisc_cake",
+        "network.qdisc_pie",
+        "network.qdisc_fq",
+        "network.ttl_hl",
+        "network.ip_set",
+        "network.ipv6_nat",
+        "nethunter.usb_bluetooth_hci",
+        "nethunter.sdr_airspy",
+        "nethunter.sdr_hackrf",
+        "nethunter.can_core",
+        "nethunter.can_vcan",
+        "nethunter.can_slcan",
+        "nethunter.can_usb",
+        "nethunter.usb_serial",
+        "nethunter.wifi_ath",
+        "nethunter.wifi_mt76",
+        "nethunter.wifi_rtw88",
+        "nethunter.memkernel",
+        "build.kernel_only",
+        "build.modules_only",
+        "build.mixed",
+        "build.monolithic",
+        "build.cache",
+        "build.debug",
+        "build.custom_branding",
+        "build.custom_timestamp",
+        "artifact.image",
+        "artifact.anykernel3",
+        "artifact.module_zip",
+        "artifact.wireless_firmware",
+        "artifact.debug_bundle",
+        "artifact.raw_partition_images"
+      ]
+    },
+    "patch_series": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repositoryPath" }
+    },
+    "kconfig_fragments": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "scope", "required"],
+        "properties": {
+          "path": { "$ref": "#/$defs/repositoryPath" },
+          "scope": { "type": "string", "enum": ["common", "modules"] },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "required_symbols": {
+      "type": "object",
+      "propertyNames": { "pattern": "^CONFIG_[A-Za-z0-9_]+$" },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^(y|m|n|[0-9]+)$"
+      }
+    },
+    "external_modules": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["optimization", "lto"],
+      "properties": {
+        "optimization": { "type": "string", "enum": ["O2", "O3"] },
+        "lto": { "type": "string", "enum": ["thin", "full"] }
+      }
+    }
+  },
+  "$defs": {
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    }
+  }
+}

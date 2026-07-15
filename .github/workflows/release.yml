@@ -1,0 +1,307 @@
+name: Rebuild and publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create
+        required: true
+        type: string
+      base:
+        description: OxygenOS source profile
+        required: true
+        default: oos16
+        type: choice
+        options:
+          - oos16
+          - oos15-global
+          - oos15-cn
+      root:
+        description: Root implementation
+        required: true
+        default: kernelsu-next
+        type: choice
+        options:
+          - kernelsu-next
+          - kernelsu
+          - none
+      profile:
+        description: Feature profile
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - wild
+          - nethunter
+      target:
+        description: Build output set
+        required: true
+        default: mixed
+        type: choice
+        options:
+          - kernel
+          - modules
+          - mixed
+      optimization:
+        description: Compiler optimization level
+        required: true
+        default: O2
+        type: choice
+        options:
+          - O2
+          - O3
+      lto:
+        description: Link-time optimization mode
+        required: true
+        default: thin
+        type: choice
+        options:
+          - thin
+          - full
+      clean:
+        description: Request a clean rebuild
+        required: true
+        default: true
+        type: boolean
+      debug:
+        description: Preserve debug evidence and symbols
+        required: true
+        default: true
+        type: boolean
+      pre_release:
+        description: Publish as a GitHub pre-release
+        required: true
+        default: true
+        type: boolean
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release-inputs:
+    name: Validate release metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "tag contains unsupported characters" >&2
+            exit 2
+          fi
+
+  module-kernel-prerequisite:
+    name: Build modules-compatible kernel prerequisite
+    if: inputs.target == 'modules'
+    needs: validate-release-inputs
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      base: ${{ inputs.base }}
+      root: ${{ inputs.root }}
+      profile: ${{ inputs.profile }}
+      target: mixed
+      optimization: ${{ inputs.optimization }}
+      lto: ${{ inputs.lto }}
+      clean: true
+      debug: false
+      pre_release: true
+      artifact_retention_days: 1
+
+  rebuild:
+    name: Rebuild from locked inputs
+    needs:
+      - validate-release-inputs
+      - module-kernel-prerequisite
+    if: >-
+      always() &&
+      needs.validate-release-inputs.result == 'success' &&
+      (needs.module-kernel-prerequisite.result == 'success' ||
+      needs.module-kernel-prerequisite.result == 'skipped')
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      base: ${{ inputs.base }}
+      root: ${{ inputs.root }}
+      profile: ${{ inputs.profile }}
+      target: ${{ inputs.target }}
+      optimization: ${{ inputs.optimization }}
+      lto: ${{ inputs.lto }}
+      clean: ${{ inputs.clean }}
+      debug: ${{ inputs.debug }}
+      pre_release: ${{ inputs.pre_release }}
+      kernel_artifact_run_id: ${{ inputs.target == 'modules' && format('{0}', github.run_id) || '' }}
+      artifact_retention_days: 1
+
+  publish:
+    name: Approve and publish ${{ inputs.tag }}
+    needs: rebuild
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ inputs.tag }}
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      TAG: ${{ inputs.tag }}
+      PRE_RELEASE: ${{ inputs.pre_release }}
+      BASE: ${{ inputs.base }}
+      ROOT_VARIANT: ${{ inputs.root }}
+      PROFILE: ${{ inputs.profile }}
+      BUILD_TARGET: ${{ inputs.target }}
+      OPTIMIZATION: ${{ inputs.optimization }}
+      LTO_MODE: ${{ inputs.lto }}
+      CLEAN_BUILD: ${{ inputs.clean }}
+      DEBUG_BUILD: ${{ inputs.debug }}
+      KERNEL_BRANDING: ${{ vars.KERNEL_BRANDING || 'OnePlus13-KernelBuilder' }}
+      BUILD_TIMESTAMP: ${{ vars.BUILD_TIMESTAMP || '' }}
+    steps:
+      - name: Download rebuilt packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.rebuild.outputs.package_artifact }}
+          path: release-assets
+
+      - name: Verify build checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release-assets/SHA256SUMS
+          (
+            cd release-assets
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Generate in-toto provenance and release checksums
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          root = pathlib.Path("release-assets")
+          provenance_path = root / "provenance.intoto.jsonl"
+          checksum_path = root / "RELEASE_SHA256SUMS"
+
+          def digest(path):
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      value.update(block)
+              return value.hexdigest()
+
+          subjects = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file() and path not in {provenance_path, checksum_path}:
+                  subjects.append({
+                      "name": path.relative_to(root).as_posix(),
+                      "digest": {"sha256": digest(path)},
+                  })
+
+          repository = os.environ["REPOSITORY"]
+          revision = os.environ["REVISION"]
+          statement = {
+              "_type": "https://in-toto.io/Statement/v1",
+              "subject": subjects,
+              "predicateType": "https://slsa.dev/provenance/v1",
+              "predicate": {
+                  "buildDefinition": {
+                      "buildType": f"https://github.com/{repository}/.github/workflows/release.yml",
+                      "externalParameters": {
+                          "tag": os.environ["TAG"],
+                          "base": os.environ["BASE"],
+                          "root": os.environ["ROOT_VARIANT"],
+                          "profile": os.environ["PROFILE"],
+                          "target": os.environ["BUILD_TARGET"],
+                          "optimization": os.environ["OPTIMIZATION"],
+                          "lto": os.environ["LTO_MODE"],
+                          "clean": os.environ["CLEAN_BUILD"],
+                          "debug": os.environ["DEBUG_BUILD"],
+                          "preRelease": os.environ["PRE_RELEASE"],
+                          "branding": os.environ["KERNEL_BRANDING"],
+                          "buildTimestamp": os.environ["BUILD_TIMESTAMP"],
+                      },
+                      "internalParameters": {
+                          "runId": os.environ["RUN_ID"],
+                          "runAttempt": os.environ["RUN_ATTEMPT"],
+                      },
+                      "resolvedDependencies": [{
+                          "uri": f"git+https://github.com/{repository}@{revision}",
+                          "digest": {"gitCommit": revision},
+                      }],
+                  },
+                  "runDetails": {
+                      "builder": {
+                          "id": f"https://github.com/{repository}/actions/runs/{os.environ['RUN_ID']}"
+                      },
+                      "metadata": {
+                          "invocationId": f"{os.environ['RUN_ID']}/{os.environ['RUN_ATTEMPT']}"
+                      },
+                  },
+              },
+          }
+          provenance_path.write_text(
+              json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+
+          files = [path for path in sorted(root.rglob("*")) if path.is_file() and path != checksum_path]
+          checksum_path.write_text(
+              "".join(f"{digest(path)}  {path.relative_to(root).as_posix()}\n" for path in files),
+              encoding="utf-8",
+          )
+          PY
+          (
+            cd release-assets
+            sha256sum --check RELEASE_SHA256SUMS
+          )
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: release-assets/**
+          show-summary: true
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title=$TAG
+          mapfile -d '' assets < <(find release-assets -type f -print0 | LC_ALL=C sort -z)
+          ((${#assets[@]} > 0))
+          args=(
+            release create "$TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "$title"
+            --generate-notes
+          )
+          [[ "$PRE_RELEASE" == true ]] && args+=(--prerelease)
+          gh "${args[@]}" "${assets[@]}"

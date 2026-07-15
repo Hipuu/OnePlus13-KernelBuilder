@@ -1,0 +1,63 @@
+name: Kernel bug
+description: Report a reproducible runtime problem on a OnePlus 13.
+title: "[bug]: "
+labels:
+  - bug
+body:
+  - type: input
+    id: build
+    attributes:
+      label: Build identifier
+      description: Release tag, commit SHA, or GitHub Actions run URL.
+    validations:
+      required: true
+  - type: dropdown
+    id: firmware
+    attributes:
+      label: Installed firmware family
+      options:
+        - OxygenOS 16
+        - OxygenOS 15 Global
+        - OxygenOS 15 China
+    validations:
+      required: true
+  - type: input
+    id: firmware-version
+    attributes:
+      label: Exact firmware version
+      placeholder: CPH2653_16.0.0.xxx(EX01)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed result and the result you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Boot ...
+        2. Enable ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach dmesg, pstore/console-ramoops, or logcat files. Remove device identifiers and private data first.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: The kernel and all module/DLKM artifacts came from the same build.
+          required: true
+        - label: I can reproduce this on the matching firmware family.
+          required: true
+        - label: I removed credentials and private device data from attached logs.
+          required: true

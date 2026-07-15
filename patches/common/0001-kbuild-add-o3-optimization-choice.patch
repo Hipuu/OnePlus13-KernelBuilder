@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OnePlus13 KernelBuilder <noreply@users.noreply.github.com>
+Date: Tue, 14 Jul 2026 00:00:00 +0700
+Subject: [PATCH] kbuild: add an explicit O3 optimization choice
+
+Keep the stock O2 default while exposing an opt-in O3 configuration.  This
+lets the orchestrator select O2 or O3 without silently appending conflicting
+compiler flags.
+
+---
+ Makefile     | 7 +++++--
+ init/Kconfig | 7 +++++++
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 000000000000..000000000000 100644
+--- a/Makefile
++++ b/Makefile
+@@ -822,9 +822,12 @@ endif # need-config
+ 
+ KBUILD_CFLAGS	+= -fno-delete-null-pointer-checks
+ 
+-ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
++ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
++KBUILD_CFLAGS += -O3
++KBUILD_RUSTFLAGS += -Copt-level=3
++else ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+ KBUILD_CFLAGS += -O2
+ KBUILD_RUSTFLAGS += -Copt-level=2
+-else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
++else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
+ KBUILD_CFLAGS += -Os
+ KBUILD_RUSTFLAGS += -Copt-level=s
+ endif
+diff --git a/init/Kconfig b/init/Kconfig
+index 000000000000..000000000000 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1410,6 +1410,13 @@ config CC_OPTIMIZE_FOR_PERFORMANCE
+ 	  with the "-O2" compiler flag for best performance and most
+ 	  helpful compile-time warnings.
+ 
++config CC_OPTIMIZE_FOR_PERFORMANCE_O3
++	bool "Optimize more aggressively (-O3)"
++	help
++	  Build the kernel with the compiler's more aggressive "-O3" setting.
++	  This is opt-in; the stock-compatible O2 setting remains the default.
++	  Validate boot behavior and performance on the target firmware.
++
+ config CC_OPTIMIZE_FOR_SIZE
+ 	bool "Optimize for size (-Os)"
+ 	help
+-- 
+2.50.1

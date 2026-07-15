@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-14T00:00:00Z",
+  "platform": {
+    "device": "OnePlus 13",
+    "codename": "dodge",
+    "soc": "SM8750",
+    "target": "sun",
+    "architecture": "arm64",
+    "kmi": "android15-6.6"
+  },
+  "policy": {
+    "allow_mutable_checkout": false,
+    "require_full_git_commit": true,
+    "require_archive_sha256": true,
+    "allow_pipe_to_shell": false
+  },
+  "dependencies": {
+    "repo_launcher": {
+      "kind": "file",
+      "url": "https://storage.googleapis.com/git-repo-downloads/repo-2.54",
+      "version": "2.54",
+      "sha256": "6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e4d7fef688833b5",
+      "repo_url": "https://gerrit.googlesource.com/git-repo",
+      "repo_ref": "refs/tags/v2.54",
+      "repo_commit": "97dc5c1bd9527c2abe2183b16a4b7ef037dc34a7",
+      "license": "Apache-2.0",
+      "required_for": ["source-sync"]
+    },
+    "oneplus_manifest": {
+      "kind": "git",
+      "url": "https://github.com/OnePlusOSS/kernel_manifest.git",
+      "ref": "f8e50677874c65b6da41057d2f39be7b4ef3c08a",
+      "commit": "f8e50677874c65b6da41057d2f39be7b4ef3c08a",
+      "license": "SEE-UPSTREAM",
+      "required_for": ["source-sync", "source-monitor"]
+    },
+    "kernelsu": {
+      "kind": "git",
+      "url": "https://github.com/tiann/KernelSU.git",
+      "ref": "refs/tags/v3.2.5",
+      "commit": "b0bc817b4e966aa6aa830834eaf6ef765d821d40",
+      "license": "GPL-2.0-only",
+      "required_for": ["root-ksu"]
+    },
+    "kernelsu_next": {
+      "kind": "git",
+      "url": "https://github.com/KernelSU-Next/KernelSU-Next.git",
+      "ref": "refs/tags/v3.3.0",
+      "commit": "3b18216f71df189ab3d1b1ce0bdb21be1268e771",
+      "license": "GPL-2.0-only",
+      "required_for": ["root-ksun"]
+    },
+    "susfs": {
+      "kind": "git",
+      "url": "https://gitlab.com/simonpunk/susfs4ksu.git",
+      "ref": "e7b28525f69ca5864bed7db51f77663f5adfe218",
+      "commit": "e7b28525f69ca5864bed7db51f77663f5adfe218",
+      "version": "v2.2.0",
+      "license": "GPL-2.0-only",
+      "required_for": ["susfs"]
+    },
+    "wild_kernel_patches": {
+      "kind": "git",
+      "url": "https://github.com/WildKernels/kernel_patches.git",
+      "ref": "2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f",
+      "commit": "2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f",
+      "license": "SEE-UPSTREAM",
+      "required_for": ["wild", "hmbird", "droidspaces", "networking"]
+    },
+    "emberheart_kernel_patches": {
+      "kind": "git",
+      "url": "https://github.com/nullptr-t-oss/kernel_patches.git",
+      "ref": "cbab20875a0ca781dec9629026425992d1307612",
+      "commit": "cbab20875a0ca781dec9629026425992d1307612",
+      "license": "SEE-UPSTREAM",
+      "required_for": ["nethunter", "modules"]
+    },
+    "baseband_guard": {
+      "kind": "git",
+      "url": "https://github.com/vc-teahouse/Baseband-guard.git",
+      "ref": "cef0daaef94d46022e1f8883ba7a30dfab849dbe",
+      "commit": "cef0daaef94d46022e1f8883ba7a30dfab849dbe",
+      "license": "GPL-2.0-only",
+      "required_for": ["baseband-guard"]
+    },
+    "rtw88": {
+      "kind": "git",
+      "url": "https://github.com/lwfinger/rtw88.git",
+      "ref": "a56bcd26e770257612a0803249cbd4095fc6feca",
+      "commit": "a56bcd26e770257612a0803249cbd4095fc6feca",
+      "license": "GPL-2.0-only",
+      "required_for": ["nethunter", "modules"]
+    },
+    "memkernel": {
+      "kind": "git",
+      "url": "https://github.com/Poko-Apps/MemKernel.git",
+      "ref": "556891806e7907c135574f398d2a20ca0e7ff27e",
+      "commit": "556891806e7907c135574f398d2a20ca0e7ff27e",
+      "license": "MIT",
+      "required_for": ["nethunter", "modules"]
+    },
+    "anykernel3": {
+      "kind": "git",
+      "url": "https://github.com/osm0sis/AnyKernel3.git",
+      "ref": "1c9a500dd4aa8081952523126e97eb155aed941b",
+      "commit": "1c9a500dd4aa8081952523126e97eb155aed941b",
+      "license": "GPL-2.0-only",
+      "required_for": ["package-anykernel3"]
+    },
+    "nethunter_wireless_firmware": {
+      "kind": "release_asset",
+      "url": "https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware/releases/download/v2.0.6-r1/Nethunter-Wireless-Firmware-v2.0.6-r1.zip",
+      "repository": "https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware.git",
+      "ref": "refs/tags/v2.0.6-r1",
+      "commit": "069a455ddeed4967f4d0ec59299cde0bd116d6a7",
+      "version": "v2.0.6-r1",
+      "sha256": "872dc926dce84d22cb2496d2d5a49a62d3974a6064ef6b341c9469df3debecb3",
+      "license": "SEE-UPSTREAM",
+      "required_for": ["nethunter", "release"]
+    }
+  }
+}
