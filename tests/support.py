@@ -103,6 +103,7 @@ def make_repository(root: Path, *, external_modules: list[str] | None = None) ->
                 "script": "kernel_platform/oplus/build/oplus_build_kernel.sh",
                 "args": ["sun", "perf"],
                 "variant": "perf",
+                "cache_dir": "bazel-cache",
             },
             "source_layout": {
                 "common_kernel": "kernel_platform/common",

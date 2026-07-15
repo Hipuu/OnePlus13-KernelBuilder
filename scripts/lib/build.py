@@ -192,6 +192,26 @@ def _official_build_paths(source_dir: Path, device: Device) -> tuple[Path, Path]
     return official_output, kernel_kit
 
 
+def _official_cache_path(source_dir: Path, device: Device) -> Path:
+    """Return the device-declared Bazel cache after containing it in kernel_platform."""
+
+    kernel_platform = source_dir / "kernel_platform"
+    relative = Path(device.official_cache_dir)
+    candidate = kernel_platform / relative
+    cursor = kernel_platform
+    if cursor.is_symlink():
+        raise BuildToolError(f"refusing symlinked official build cache component: {cursor}")
+    for component in relative.parts:
+        cursor /= component
+        if cursor.is_symlink():
+            raise BuildToolError(f"refusing symlinked official build cache component: {cursor}")
+    resolved_kernel_platform = kernel_platform.resolve()
+    resolved = candidate.resolve()
+    if not _inside(resolved, resolved_kernel_platform) or resolved == resolved_kernel_platform:
+        raise BuildToolError(f"refusing unsafe official build cache path: {resolved}")
+    return candidate
+
+
 def _run_kconfig_make(
     runner: CommandRunner,
     common_kernel: Path,
@@ -478,12 +498,15 @@ def _inside(path: Path, root: Path) -> bool:
 
 def _clean_official_output(source_dir: Path, output_dir: Path, device: Device, *, clean: bool) -> None:
     candidate = (source_dir / "kernel_platform" / "out").resolve()
+    cache_dir = _official_cache_path(source_dir, device)
     if not _inside(candidate, source_dir) or candidate == source_dir.resolve():
         raise BuildToolError("refusing to clean an unsafe source output path")
     if _inside(output_dir, candidate):
         raise BuildToolError("build output must not be nested in the cleaned source output")
     if clean and candidate.exists():
         shutil.rmtree(candidate)
+    if clean and cache_dir.exists():
+        shutil.rmtree(cache_dir)
     official_output, kernel_kit = _official_build_paths(source_dir, device)
     generated_paths = (official_output / "dist", kernel_kit)
     for generated in generated_paths:

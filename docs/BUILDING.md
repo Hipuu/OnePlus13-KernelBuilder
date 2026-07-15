@@ -73,10 +73,27 @@ From the Actions page, run **Build OnePlus 13 kernel** and select:
 | `debug` | boolean | `false` |
 | `pre_release` | boolean | `true` |
 
-Cached Actions mode is `clean=false` and `cache=true`. The cache key includes
-the runner OS; dependency-lock, base-profile, and feature-profile hashes; and
-the selected base, root, and feature profile. Only `.cache/op13` is cached;
-source/output trees, `Module.symvers`, and kernel lineage metadata are excluded.
+Cached Actions mode is `clean=false` and `cache=true`. Verified dependency
+sources remain in `.cache/op13`. Kernel and mixed builds also restore the
+device-declared `kernel_platform/bazel-cache` after locked source sync and save
+it immediately after successful kernel compilation. Clean builds delete that
+local Bazel cache and never restore or save it; modules-only builds do not use
+a module-work cache and continue to consume a versioned kernel artifact.
+
+The Bazel cache selector includes runner OS and architecture, base, root,
+feature profile, optimization, and LTO. Its final key adds one canonical hash
+over locked manifests, dependency locks, configs, schemas, patches, and root /
+build scripts. A selector-scoped restore prefix can reuse individual Bazel
+actions after one of those checked-in inputs changes, while Bazel still keys
+the actions by their exact inputs. Debug `cache-statistics.txt` records the
+requested and matched keys, pre/post sizes, threshold, eligibility, and save
+outcome.
+
+The uncompressed save threshold defaults to exactly `7516192768` bytes (7
+GiB). Set the repository variable `OP13_COMPILE_CACHE_MAX_BYTES` to another
+positive decimal byte count to tune it. An absent, empty, exact-hit, failed,
+or oversized cache is not saved. Source trees, `Module.symvers`, and kernel
+lineage metadata remain excluded from Actions cache storage.
 
 Set optional repository variables `KERNEL_BRANDING` and `BUILD_TIMESTAMP` for
 single-line build metadata. A manual modules-only build resolves the newest
@@ -143,6 +160,14 @@ A full local mixed build follows the same stages as Actions:
 
 ```bash
 mkdir -p out/source out/build out/build/modules out/debug out/dist
+
+KERNELSU_COMMIT='FULL_LOWERCASE_40_CHARACTER_KERNELSU_SHA'
+SUSFS_COMMIT='FULL_LOWERCASE_40_CHARACTER_SUSFS_SHA'
+python3 scripts/op13.py resolve-root-lock \
+  --root kernelsu-next \
+  --kernelsu-commit "$KERNELSU_COMMIT" \
+  --susfs-commit "$SUSFS_COMMIT" \
+  > out/debug/root-selection.json
 
 bash scripts/sync-sources.sh \
   --base oos16 \

@@ -31,8 +31,29 @@ class ConfigurationTests(unittest.TestCase):
     def test_fixture_repository_is_valid_and_preserves_mixed_case_symbol(self) -> None:
         summary = validate_repository(self.root)
         self.assertEqual(summary["target"], "sun")
-        _, _, _, features = discover_configs(self.root)
+        device, _, _, features = discover_configs(self.root)
+        self.assertEqual(device.official_cache_dir, "bazel-cache")
         self.assertEqual(features["test"].required_symbols["CONFIG_MT76x0U"], "m")
+
+    def test_official_build_cache_must_be_kernel_platform_relative(self) -> None:
+        path = self.root / "configs" / "devices" / "oneplus13.yml"
+        for invalid in (
+            "../bazel-cache",
+            "/tmp/bazel-cache",
+            ".",
+            r"C:\\tmp",
+            "cache//nested",
+            "cache/./nested",
+            "cache/../../.git",
+        ):
+            with self.subTest(invalid=invalid):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["official_build"]["cache_dir"] = invalid
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(BuildToolError, "cache.*kernel-platform-relative"):
+                    discover_configs(self.root)
+                data["official_build"]["cache_dir"] = "bazel-cache"
+                path.write_text(json.dumps(data), encoding="utf-8")
 
     def test_git_dependency_requires_full_commit(self) -> None:
         path = self.root / "dependencies" / "lock.yml"
@@ -111,8 +132,16 @@ class ConfigurationTests(unittest.TestCase):
         lock = self._load_root_lock()
         with self.assertRaisesRegex(BuildToolError, "not the audited lock"):
             resolve_root_selection(lock, "kernelsu-next", "a" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "not the audited lock"):
+            resolve_root_selection(lock, "kernelsu-next", "4" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "not the audited lock"):
+            resolve_root_selection(lock, "kernelsu", "5" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "not the audited lock"):
+            resolve_root_selection(lock, "kernelsu-next", "5" * 40, "7" * 40)
         with self.assertRaisesRegex(BuildToolError, "lowercase 40-character SHA"):
             resolve_root_selection(lock, "kernelsu-next", "A" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "lowercase 40-character SHA"):
+            resolve_root_selection(lock, "kernelsu-next", "5" * 40, "A" * 40)
         with self.assertRaisesRegex(BuildToolError, "lowercase 40-character SHA"):
             resolve_root_selection(lock, "kernelsu-next", "short", "8" * 40)
 

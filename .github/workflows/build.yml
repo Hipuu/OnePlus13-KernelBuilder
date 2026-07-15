@@ -71,7 +71,7 @@ on:
         default: true
         type: boolean
       cache:
-        description: Restore and save the verified dependency-source cache when clean is false
+        description: Restore verified dependencies and the audited Bazel cache when clean is false
         required: true
         default: true
         type: boolean
@@ -182,6 +182,7 @@ jobs:
       DEBUG_BUILD: ${{ inputs.debug }}
       PRE_RELEASE: ${{ inputs.pre_release }}
       CACHE_ENABLED: ${{ inputs.cache }}
+      COMPILE_CACHE_MAX_BYTES: ${{ vars.OP13_COMPILE_CACHE_MAX_BYTES || '7516192768' }}
       ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days || 7 }}
       CALL_KERNEL_ARTIFACT_RUN_ID: ${{ inputs.kernel_artifact_run_id || vars.KERNEL_ARTIFACT_RUN_ID || '' }}
       CALL_KERNEL_BRANDING: ${{ inputs.branding || vars.KERNEL_BRANDING || 'OnePlus13-KernelBuilder' }}
@@ -220,6 +221,10 @@ jobs:
             echo "artifact retention must be an integer from 1 through 90 days" >&2
             exit 2
           fi
+          if [[ ! "$COMPILE_CACHE_MAX_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "OP13_COMPILE_CACHE_MAX_BYTES must be a positive decimal byte count" >&2
+            exit 2
+          fi
           kernel_artifact_run_id=$CALL_KERNEL_ARTIFACT_RUN_ID
           kernel_branding=$CALL_KERNEL_BRANDING
           build_timestamp=$CALL_BUILD_TIMESTAMP
@@ -253,7 +258,9 @@ jobs:
           {
             echo "cache_enabled=$CACHE_ENABLED"
             echo "clean_build=$CLEAN_BUILD"
-            echo 'cache_scope=verified dependency sources only'
+            echo "compile_cache_max_bytes=$COMPILE_CACHE_MAX_BYTES"
+            echo 'dependency_cache_scope=verified dependency sources'
+            echo 'compile_cache_scope=official device Bazel cache only'
             echo 'kernel_lineage=versioned artifact only'
           } > "$DEBUG_DIR/cache-statistics.txt"
 
@@ -332,6 +339,47 @@ jobs:
           echo "kernel=kernel-build-${BASE}-${ROOT_VARIANT}-${PROFILE}-${kernel_target}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
           echo "package=packages-${BASE}-${ROOT_VARIANT}-${PROFILE}-${BUILD_TARGET}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve audited compile cache identity
+        id: compile-cache-identity
+        env:
+          COMPILE_CACHE_INPUT_HASH: ${{ hashFiles('manifests/lockfiles/**', 'dependencies/lock.yml', 'configs/**', 'schemas/**', 'patches/**', 'scripts/**') }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$COMPILE_CACHE_INPUT_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "canonical compile-cache input hash is missing" >&2
+            exit 2
+          fi
+          cache_dir=$(jq -er '.official_build.cache_dir | select(type == "string")' \
+            configs/devices/oneplus13.yml)
+          if [[ ! "$cache_dir" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+            echo "official build cache directory is not kernel-platform-relative" >&2
+            exit 2
+          fi
+          IFS=/ read -r -a cache_parts <<< "$cache_dir"
+          for cache_part in "${cache_parts[@]}"; do
+            if [[ "$cache_part" == "." || "$cache_part" == ".." ]]; then
+              echo "official build cache directory contains a traversal segment" >&2
+              exit 2
+            fi
+          done
+          cache_path="$SOURCE_DIR/kernel_platform/$cache_dir"
+          restore_prefix="op13-bazel-v1-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${BASE}-${ROOT_VARIANT}-${PROFILE}-${OPTIMIZATION}-${LTO_MODE}-"
+          cache_key="${restore_prefix}${COMPILE_CACHE_INPUT_HASH}"
+          {
+            echo "path=$cache_path"
+            echo "relative=$cache_dir"
+            echo "key=$cache_key"
+            echo "restore-prefix=$restore_prefix"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "compile_cache_path=$cache_path"
+            echo "compile_cache_input_hash=$COMPILE_CACHE_INPUT_HASH"
+            echo "compile_cache_key=$cache_key"
+            echo "compile_cache_restore_prefix=$restore_prefix"
+          } >> "$DEBUG_DIR/cache-statistics.txt"
+
       - name: Restore verified dependency-source cache
         id: dependency-cache
         if: inputs.cache && !inputs.clean
@@ -348,8 +396,8 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "cache_hit=${CACHE_HIT:-skipped}"
-            echo "cache_key=$CACHE_KEY"
+            echo "dependency_cache_hit=${CACHE_HIT:-skipped}"
+            echo "dependency_cache_key=$CACHE_KEY"
           } >> "$DEBUG_DIR/cache-statistics.txt"
 
       - name: Resolve modules-only kernel artifact
@@ -430,6 +478,75 @@ jobs:
             --base "$BASE" \
             --output "$SOURCE_DIR"
 
+      - name: Validate compile cache filesystem path
+        if: inputs.cache && !inputs.clean && inputs.target != 'modules'
+        env:
+          CACHE_PATH: ${{ steps.compile-cache-identity.outputs.path }}
+          CACHE_RELATIVE: ${{ steps.compile-cache-identity.outputs.relative }}
+        run: |
+          set -euo pipefail
+          kernel_platform="$SOURCE_DIR/kernel_platform"
+          test -d "$kernel_platform"
+          current=$kernel_platform
+          if [[ -L "$current" ]]; then
+            echo "kernel_platform must not be a symlink when using compile cache" >&2
+            exit 2
+          fi
+          IFS=/ read -r -a cache_parts <<< "$CACHE_RELATIVE"
+          for cache_part in "${cache_parts[@]}"; do
+            current="$current/$cache_part"
+            if [[ -L "$current" ]]; then
+              echo "compile cache path contains a symlink component: $current" >&2
+              exit 2
+            fi
+          done
+          resolved_base=$(realpath -e -- "$kernel_platform")
+          resolved_cache=$(realpath -m -- "$CACHE_PATH")
+          case "$resolved_cache" in
+            "$resolved_base"/*) ;;
+            *)
+              echo "compile cache path escapes kernel_platform" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Restore audited Bazel compile cache
+        id: compile-cache-restore
+        if: inputs.cache && !inputs.clean && inputs.target != 'modules'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.compile-cache-identity.outputs.path }}
+          key: ${{ steps.compile-cache-identity.outputs.key }}
+          restore-keys: |
+            ${{ steps.compile-cache-identity.outputs.restore-prefix }}
+
+      - name: Record compile cache restore and pre-build size
+        if: always()
+        env:
+          CACHE_ACTIVE: ${{ inputs.cache && !inputs.clean && inputs.target != 'modules' }}
+          CACHE_HIT: ${{ steps.compile-cache-restore.outputs.cache-hit }}
+          CACHE_OUTCOME: ${{ steps.compile-cache-restore.outcome }}
+          CACHE_PRIMARY_KEY: ${{ steps.compile-cache-restore.outputs.cache-primary-key }}
+          CACHE_MATCHED_KEY: ${{ steps.compile-cache-restore.outputs.cache-matched-key }}
+          CACHE_PATH: ${{ steps.compile-cache-identity.outputs.path }}
+        run: |
+          set -euo pipefail
+          cache_bytes=0
+          cache_human=absent
+          if [[ -d "$CACHE_PATH" ]]; then
+            cache_bytes=$(du --summarize --bytes -- "$CACHE_PATH" | cut -f1)
+            cache_human=$(du -sh -- "$CACHE_PATH" | cut -f1)
+          fi
+          {
+            echo "compile_cache_active=$CACHE_ACTIVE"
+            echo "compile_cache_restore_outcome=${CACHE_OUTCOME:-skipped}"
+            echo "compile_cache_restore_hit=${CACHE_HIT:-skipped}"
+            echo "compile_cache_restore_primary_key=${CACHE_PRIMARY_KEY:-none}"
+            echo "compile_cache_restore_matched_key=${CACHE_MATCHED_KEY:-none}"
+            echo "compile_cache_pre_bytes=$cache_bytes"
+            echo "compile_cache_pre_human=$cache_human"
+          } >> "$DEBUG_DIR/cache-statistics.txt"
+
       - name: Record locked source footprint
         if: always()
         run: |
@@ -476,6 +593,75 @@ jobs:
           [[ "$CLEAN_BUILD" == true ]] && args+=(--clean)
           [[ "$DEBUG_BUILD" == true ]] && args+=(--debug)
           bash scripts/build-kernel.sh "${args[@]}"
+
+      - name: Measure audited Bazel cache for save
+        id: compile-cache-size
+        if: always() && inputs.cache && !inputs.clean && inputs.target != 'modules'
+        env:
+          CACHE_HIT: ${{ steps.compile-cache-restore.outputs.cache-hit }}
+          CACHE_PATH: ${{ steps.compile-cache-identity.outputs.path }}
+          UPSTREAM_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          limit_bytes=$COMPILE_CACHE_MAX_BYTES
+          cache_bytes=0
+          cache_human=absent
+          save=false
+          reason=missing
+          if [[ -d "$CACHE_PATH" ]]; then
+            cache_bytes=$(du --summarize --bytes -- "$CACHE_PATH" | cut -f1)
+            cache_human=$(du -sh -- "$CACHE_PATH" | cut -f1)
+            reason=empty
+          fi
+          if [[ "$UPSTREAM_STATUS" != success ]]; then
+            reason=upstream-failure
+          elif [[ "${CACHE_HIT:-false}" == true ]]; then
+            reason=exact-hit
+          elif ((cache_bytes == 0)); then
+            reason=empty
+          elif ! python3 -c \
+            'import sys; raise SystemExit(0 if int(sys.argv[1]) <= int(sys.argv[2]) else 1)' \
+            "$cache_bytes" "$limit_bytes"; then
+            reason=oversize
+          else
+            save=true
+            reason=eligible
+          fi
+          {
+            echo "save=$save"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "compile_cache_post_bytes=$cache_bytes"
+            echo "compile_cache_post_human=$cache_human"
+            echo "compile_cache_limit_bytes=$limit_bytes"
+            echo "compile_cache_save_eligible=$save"
+            echo "compile_cache_save_reason=$reason"
+          } >> "$DEBUG_DIR/cache-statistics.txt"
+
+      - name: Save audited Bazel compile cache
+        id: compile-cache-save
+        if: success() && inputs.cache && !inputs.clean && inputs.target != 'modules' && steps.compile-cache-size.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.compile-cache-identity.outputs.path }}
+          key: ${{ steps.compile-cache-identity.outputs.key }}
+
+      - name: Record compile cache save result
+        if: always()
+        env:
+          SAVE_OUTCOME: ${{ steps.compile-cache-save.outcome }}
+          SAVE_ELIGIBLE: ${{ steps.compile-cache-size.outputs.save }}
+          SAVE_REASON: ${{ steps.compile-cache-size.outputs.reason }}
+          SAVE_KEY: ${{ steps.compile-cache-identity.outputs.key }}
+        run: |
+          set -euo pipefail
+          {
+            echo "compile_cache_save_outcome=${SAVE_OUTCOME:-skipped}"
+            echo "compile_cache_save_eligible=${SAVE_ELIGIBLE:-skipped}"
+            echo "compile_cache_save_reason=${SAVE_REASON:-skipped}"
+            echo "compile_cache_save_key=$SAVE_KEY"
+          } >> "$DEBUG_DIR/cache-statistics.txt"
 
       - name: Build external modules
         if: inputs.target == 'modules' || inputs.target == 'mixed'

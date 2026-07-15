@@ -84,9 +84,14 @@ artifact, or use the numeric run ID in the repository variable
 `KERNEL_ARTIFACT_RUN_ID`. They never assume that a cache contains a compatible
 `Module.symvers`, and strict lineage validation still applies.
 
-For cached compilation, dispatch with `clean=false` and `cache=true`. The cache
-contains verified dependency data only; source/output trees and kernel lineage
-artifacts are excluded.
+For cached compilation, dispatch with `clean=false` and `cache=true`. Actions
+stores verified dependency data and, for kernel/mixed targets only, the
+device-declared Bazel cache. Its key covers every build selector plus a
+canonical hash of manifests, locks, configs, patches, and build scripts. The
+uncompressed Bazel cache save limit defaults to 7 GiB; override it with the
+positive decimal-byte repository variable `OP13_COMPILE_CACHE_MAX_BYTES`.
+Clean builds and modules-only builds never restore or save this compile cache;
+source trees and kernel lineage artifacts remain excluded.
 
 ## Outputs
 

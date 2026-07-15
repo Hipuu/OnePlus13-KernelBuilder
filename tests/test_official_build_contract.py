@@ -7,6 +7,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,8 @@ from lib.build import (
     _external_module_commands,
     _build_epoch,
     _official_build_paths,
+    _official_cache_path,
+    _clean_official_output,
     _validate_official_module_payload_records,
     _verify_official_module_payload,
     MAX_BUILD_EPOCH,
@@ -48,6 +51,61 @@ class OfficialBuildContractTests(unittest.TestCase):
             self.source / "kernel_platform" / "out" / "msm-kernel-sun-perf",
         )
         self.assertEqual(kernel_kit, self.source / "device" / "qcom" / "sun-kernel")
+        self.assertEqual(
+            _official_cache_path(self.source, self.device),
+            self.source / "kernel_platform" / "bazel-cache",
+        )
+
+    def test_clean_flag_is_the_only_way_to_delete_official_bazel_cache(self) -> None:
+        official_output, kernel_kit = _official_build_paths(self.source, self.device)
+        cache_dir = _official_cache_path(self.source, self.device)
+        retained_host_output = self.source / "kernel_platform" / "out" / "host-cache"
+        for directory in (official_output / "dist", kernel_kit, cache_dir, retained_host_output):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "marker").write_text("fixture\n", encoding="utf-8")
+
+        _clean_official_output(
+            self.source,
+            self.root / "out" / "build",
+            self.device,
+            clean=False,
+        )
+        self.assertTrue((cache_dir / "marker").is_file())
+        self.assertTrue((retained_host_output / "marker").is_file())
+        self.assertFalse((official_output / "dist").exists())
+        self.assertFalse(kernel_kit.exists())
+
+        _clean_official_output(
+            self.source,
+            self.root / "out" / "build",
+            self.device,
+            clean=True,
+        )
+        self.assertFalse(cache_dir.exists())
+        self.assertFalse((self.source / "kernel_platform" / "out").exists())
+
+    def test_official_cache_rejects_symlinked_ancestor_without_deleting_target(self) -> None:
+        kernel_platform = self.source / "kernel_platform"
+        real_parent = kernel_platform / "real-cache-parent"
+        nested_target = real_parent / "nested"
+        nested_target.mkdir(parents=True)
+        marker = nested_target / "marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        link = kernel_platform / "cache-link"
+        try:
+            link.symlink_to(real_parent, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+        nested_device = replace(self.device, official_cache_dir="cache-link/nested")
+
+        with self.assertRaisesRegex(BuildToolError, "symlinked official build cache component"):
+            _clean_official_output(
+                self.source,
+                self.root / "out" / "build",
+                nested_device,
+                clean=True,
+            )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
 
     def test_external_module_plan_uses_only_pinned_helper(self) -> None:
         commands = _external_module_commands(

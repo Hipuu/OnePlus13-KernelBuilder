@@ -34,7 +34,7 @@
     "official_build": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["script", "args", "variant"],
+      "required": ["script", "args", "variant", "cache_dir"],
       "properties": {
         "script": { "type": "string", "minLength": 1 },
         "args": {
@@ -42,7 +42,12 @@
           "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         },
-        "variant": { "type": "string", "minLength": 1 }
+        "variant": { "type": "string", "minLength": 1 },
+        "cache_dir": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+)*$",
+          "not": { "enum": [".", ".."] }
+        }
       }
     },
     "source_layout": {

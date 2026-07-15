@@ -155,6 +155,7 @@ class Device:
     kmi: str
     official_script: str
     official_args: tuple[str, ...]
+    official_cache_dir: str
     common_kernel: str
     vendor_kernel: str
     modules_and_devicetree: str
@@ -237,6 +238,7 @@ def load_device(path: Path) -> Device:
         kmi=_string(raw.get("kmi"), f"{path}:kmi"),
         official_script=_string(official.get("script"), f"{path}:official_build.script"),
         official_args=args,
+        official_cache_dir=_string(official.get("cache_dir"), f"{path}:official_build.cache_dir"),
         common_kernel=_string(layout.get("common_kernel"), f"{path}:source_layout.common_kernel"),
         vendor_kernel=_string(layout.get("vendor_kernel"), f"{path}:source_layout.vendor_kernel"),
         modules_and_devicetree=_string(layout.get("modules_and_devicetree"), f"{path}:source_layout.modules_and_devicetree"),
@@ -251,6 +253,18 @@ def load_device(path: Path) -> Device:
         )
     if device.official_script.startswith("/") or ".." in Path(device.official_script).parts:
         raise BuildToolError(f"{path}: official build script must be repository-relative")
+    cache_path = Path(device.official_cache_dir)
+    cache_parts = device.official_cache_dir.split("/")
+    if (
+        cache_path.is_absolute()
+        or any(part in {".", ".."} for part in cache_parts)
+        or re.fullmatch(
+            r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*",
+            device.official_cache_dir,
+        )
+        is None
+    ):
+        raise BuildToolError(f"{path}: official build cache must be kernel-platform-relative")
     if device.official_args[:2] != (TARGET, "perf"):
         raise BuildToolError(f"{path}: official build args must begin with ['sun', 'perf']")
     return device
