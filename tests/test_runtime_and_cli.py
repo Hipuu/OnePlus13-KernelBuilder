@@ -15,9 +15,11 @@ from lib.config import Dependency, discover_configs
 from lib.errors import BuildToolError, SourceChanged
 from lib.runtime import (
     REPO_INIT_STORAGE_FLAGS,
+    REPO_SYNC_NETWORK_JOBS,
     REPO_SYNC_STORAGE_FLAGS,
     CommandRunner,
     _fetch_git,
+    _repo_sync_job_flags,
     _verify_git_checkout,
     assert_manifest_matches_lock,
     check_manifest_update,
@@ -116,6 +118,13 @@ class RuntimeAndCliTests(unittest.TestCase):
         self.assertIn("--no-tags", REPO_INIT_STORAGE_FLAGS)
         self.assertIn("--optimized-fetch", REPO_SYNC_STORAGE_FLAGS)
         self.assertIn("--detach", REPO_SYNC_STORAGE_FLAGS)
+        self.assertEqual(REPO_SYNC_NETWORK_JOBS, 1)
+        self.assertEqual(
+            _repo_sync_job_flags(4),
+            ("--jobs-network", "1", "--jobs-checkout", "4", "-j", "4"),
+        )
+        with self.assertRaisesRegex(BuildToolError, "jobs must be positive"):
+            _repo_sync_job_flags(0)
 
     def test_cached_git_dependency_must_be_byte_clean(self) -> None:
         checkout = self.root / "dependency-checkout"

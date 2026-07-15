@@ -29,6 +29,16 @@ the reject inventory, the hook-mode result, and the final driver tree have
 independent fingerprints, so a mismatched KernelSU/SUSFS pair fails before
 configuration or compilation.
 
+SUSFS v2.2.0 no longer defines the older `HAS_MAGIC_MOUNT`, automatic bind-
+mount, `TRY_UMOUNT`, overlay, or `SUS_SU` Kconfig switches that the reference
+workflow still appends. Those unknown names are deliberately omitted here;
+`olddefconfig` would otherwise discard them while making the build appear to
+enable features that are absent from the locked patch. The requested SUSFS
+surface is the exact Kconfig surface produced by the audited v2.2.0 patch.
+Configuration is resolved with the locked common tree's declared Clang
+toolchain, and `scripts/config --keep-case` preserves mixed-case symbols such
+as the MT76 USB drivers.
+
 The currently audited root commits are KernelSU
 `b0bc817b4e966aa6aa830834eaf6ef765d821d40`, KernelSU-Next
 `3b18216f71df189ab3d1b1ce0bdb21be1268e771`, and SUSFS
@@ -94,6 +104,13 @@ GiB). Set the repository variable `OP13_COMPILE_CACHE_MAX_BYTES` to another
 positive decimal byte count to tune it. An absent, empty, exact-hit, failed,
 or oversized cache is not saved. Source trees, `Module.symvers`, and kernel
 lineage metadata remain excluded from Actions cache storage.
+
+The locked source graph occupies roughly 57–60 GiB on the hosted runner. Before
+sync/build jobs, Actions removes the unused hosted tool cache and other explicit
+runner-image paths, then requires at least 100 GiB free. Repo keeps network
+fetches serial (`--jobs-network 1`) to bound temporary pack-file usage while
+retaining the requested parallelism for local checkouts. This avoids transient
+disk exhaustion without changing any locked revision or checked-out content.
 
 Set optional repository variables `KERNEL_BRANDING` and `BUILD_TIMESTAMP` for
 single-line build metadata. A manual modules-only build resolves the newest

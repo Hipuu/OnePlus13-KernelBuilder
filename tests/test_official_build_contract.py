@@ -15,12 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from lib.build import (
+    _config_command,
     _configure_common_gki_defconfig,
     _copy_declared_dist_module_payload,
     _external_module_commands,
     _build_epoch,
     _official_build_paths,
     _official_cache_path,
+    _kconfig_toolchain_env,
     _clean_official_output,
     _validate_official_module_payload_records,
     _verify_official_module_payload,
@@ -242,6 +244,32 @@ class OfficialBuildContractTests(unittest.TestCase):
 
     def test_common_gki_defconfig_is_canonicalized_for_kleaf(self) -> None:
         common = self.source / self.device.common_kernel
+        (common / "build.config.constants").parent.mkdir(parents=True, exist_ok=True)
+        (common / "build.config.constants").write_text(
+            "CLANG_VERSION=r-test\n", encoding="utf-8"
+        )
+        clang_bin = (
+            self.source
+            / "kernel_platform"
+            / "prebuilts"
+            / "clang"
+            / "host"
+            / "linux-x86"
+            / "clang-r-test"
+            / "bin"
+        )
+        clang_bin.mkdir(parents=True)
+        for tool in (
+            "clang",
+            "ld.lld",
+            "llvm-ar",
+            "llvm-nm",
+            "llvm-objcopy",
+            "llvm-objdump",
+            "llvm-readelf",
+            "llvm-strip",
+        ):
+            (clang_bin / tool).write_text("fixture\n", encoding="utf-8")
         source_defconfig = common / "arch" / "arm64" / "configs" / "gki_defconfig"
         source_defconfig.parent.mkdir(parents=True)
         source_defconfig.write_text("CONFIG_TEST=y\n", encoding="utf-8")
@@ -250,10 +278,13 @@ class OfficialBuildContractTests(unittest.TestCase):
         config_tool.write_text("#!/bin/sh\n", encoding="utf-8")
         metadata = self.root / "out" / "build" / ".op13"
         targets: list[str] = []
+        make_environments: list[dict[str, str]] = []
 
-        def fake_run(argv, **_kwargs):
+        def fake_run(argv, **kwargs):
             target = str(argv[-1])
             targets.append(target)
+            if target in {"olddefconfig", "savedefconfig", "gki_defconfig"}:
+                make_environments.append(dict(kwargs["env"]))
             output_arg = next(str(value) for value in argv if str(value).startswith("O="))
             output = Path(output_arg[2:])
             if target == "savedefconfig":
@@ -276,6 +307,43 @@ class OfficialBuildContractTests(unittest.TestCase):
         self.assertEqual(
             targets,
             ["olddefconfig", "savedefconfig", "gki_defconfig", "olddefconfig"],
+        )
+        self.assertEqual(len(make_environments), 4)
+        for environment in make_environments:
+            self.assertEqual(environment["LLVM"], "1")
+            self.assertEqual(environment["LLVM_IAS"], "1")
+            self.assertEqual(Path(environment["PATH"].split(os.pathsep)[0]), clang_bin)
+            self.assertEqual(
+                Path(environment["KCONFIG_CONFIG"]),
+                (metadata / "config-work" / ".config").resolve(),
+            )
+
+    def test_kconfig_toolchain_rejects_an_incomplete_locked_clang_checkout(self) -> None:
+        common = self.source / self.device.common_kernel
+        common.mkdir(parents=True)
+        (common / "build.config.constants").write_text(
+            "CLANG_VERSION=r-test\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(BuildToolError, "toolchain is incomplete"):
+            _kconfig_toolchain_env(self.source, self.device)
+
+    def test_scripts_config_preserves_mixed_case_kconfig_symbols(self) -> None:
+        command = _config_command(
+            Path("scripts/config"),
+            Path("out/.config"),
+            "CONFIG_MT76x0U",
+            "m",
+        )
+        self.assertEqual(
+            command,
+            [
+                str(Path("scripts/config")),
+                "--file",
+                str(Path("out/.config")),
+                "--keep-case",
+                "--module",
+                "CONFIG_MT76x0U",
+            ],
         )
 
     def test_kernel_build_forces_recompile_and_records_two_configs(self) -> None:

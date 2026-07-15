@@ -36,6 +36,22 @@ REPO_SYNC_STORAGE_FLAGS = (
     "--optimized-fetch",
     "--prune",
 )
+REPO_SYNC_NETWORK_JOBS = 1
+
+
+def _repo_sync_job_flags(jobs: int) -> tuple[str, ...]:
+    """Limit concurrent fetch packs while retaining parallel local checkouts."""
+
+    if jobs < 1:
+        raise BuildToolError("jobs must be positive")
+    return (
+        "--jobs-network",
+        str(REPO_SYNC_NETWORK_JOBS),
+        "--jobs-checkout",
+        str(jobs),
+        "-j",
+        str(jobs),
+    )
 
 
 class CommandRunner:
@@ -501,9 +517,8 @@ def sync_sources(
                 str(launcher),
                 "sync",
                 *REPO_SYNC_STORAGE_FLAGS,
+                *_repo_sync_job_flags(jobs),
                 "--fail-fast",
-                "-j",
-                str(jobs),
             ],
             cwd=source_dir,
         )

@@ -46,6 +46,7 @@ ROOT_VARIANTS = {"kernelsu", "kernelsu-next", "none"}
 BRANDING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 SYMBOL_LINE_RE = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 SYMBOL_UNSET_RE = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
+CLANG_VERSION_RE = re.compile(r"^CLANG_VERSION=([A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
 MAX_BUILD_EPOCH = int(datetime(2107, 12, 31, 23, 59, 58, tzinfo=timezone.utc).timestamp())
 
 
@@ -160,7 +161,11 @@ def _config_command(config_tool: Path, config_path: Path, symbol: str, value: st
         action = ["--set-val", symbol, value]
     else:
         raise BuildToolError(f"unsupported Kconfig value for {symbol}: {value!r}")
-    return [str(config_tool), "--file", str(config_path), *action]
+    # scripts/config upper-cases symbols unless --keep-case precedes them.
+    # Several audited in-tree symbols (for example CONFIG_MT76x0U) contain a
+    # lower-case character, so the default behavior silently writes an unknown
+    # CONFIG_MT76X0U entry that olddefconfig then discards.
+    return [str(config_tool), "--file", str(config_path), "--keep-case", *action]
 
 
 def _fragment_paths(root: Path, feature: FeatureProfile, build_target: str) -> list[Path]:
@@ -218,11 +223,61 @@ def _run_kconfig_make(
     config_output: Path,
     arch: str,
     target: str,
+    toolchain_env: Mapping[str, str],
 ) -> None:
+    env = dict(toolchain_env)
+    env["KCONFIG_CONFIG"] = str((config_output / ".config").resolve())
     runner.run(
         ["make", "-C", str(common_kernel), f"O={config_output}", f"ARCH={arch}", target],
-        env={"KCONFIG_CONFIG": str((config_output / ".config").resolve())},
+        env=env,
     )
+
+
+def _kconfig_toolchain_env(source_dir: Path, device: Device) -> dict[str, str]:
+    """Resolve the exact Clang toolchain declared by the locked common tree."""
+
+    common_kernel = source_dir / device.common_kernel
+    constants = common_kernel / "build.config.constants"
+    if not constants.is_file():
+        raise BuildToolError(f"locked Clang version declaration is missing: {constants}")
+    matches = [
+        match.group(1)
+        for line in constants.read_text(encoding="utf-8").splitlines()
+        if (match := CLANG_VERSION_RE.fullmatch(line)) is not None
+    ]
+    if len(matches) != 1:
+        raise BuildToolError("locked common tree must declare exactly one CLANG_VERSION")
+    clang_bin = (
+        source_dir
+        / "kernel_platform"
+        / "prebuilts"
+        / "clang"
+        / "host"
+        / "linux-x86"
+        / f"clang-{matches[0]}"
+        / "bin"
+    )
+    required_tools = (
+        "clang",
+        "ld.lld",
+        "llvm-ar",
+        "llvm-nm",
+        "llvm-objcopy",
+        "llvm-objdump",
+        "llvm-readelf",
+        "llvm-strip",
+    )
+    missing = [tool for tool in required_tools if not (clang_bin / tool).is_file()]
+    if missing:
+        raise BuildToolError(
+            "locked Clang toolchain is incomplete: " + ", ".join(sorted(missing))
+        )
+    inherited_path = os.environ.get("PATH", "")
+    return {
+        "LLVM": "1",
+        "LLVM_IAS": "1",
+        "PATH": str(clang_bin) + (os.pathsep + inherited_path if inherited_path else ""),
+    }
 
 
 def _configure_common_gki_defconfig(
@@ -256,13 +311,28 @@ def _configure_common_gki_defconfig(
     requested_config = config_output / ".config"
     shutil.copy2(source_defconfig, requested_config)
     runner = CommandRunner()
+    toolchain_env = _kconfig_toolchain_env(source_dir, device)
     for fragment in fragments:
         for symbol, value in parse_fragment(fragment).items():
             runner.run(_config_command(config_tool, requested_config, symbol, value), cwd=common_kernel)
     for symbol, value in forced.items():
         runner.run(_config_command(config_tool, requested_config, symbol, value), cwd=common_kernel)
-    _run_kconfig_make(runner, common_kernel, config_output, device.arch, "olddefconfig")
-    _run_kconfig_make(runner, common_kernel, config_output, device.arch, "savedefconfig")
+    _run_kconfig_make(
+        runner,
+        common_kernel,
+        config_output,
+        device.arch,
+        "olddefconfig",
+        toolchain_env,
+    )
+    _run_kconfig_make(
+        runner,
+        common_kernel,
+        config_output,
+        device.arch,
+        "savedefconfig",
+        toolchain_env,
+    )
     saved_defconfig = config_output / "defconfig"
     if not saved_defconfig.is_file():
         raise BuildToolError("savedefconfig did not produce a canonical GKI defconfig")
@@ -271,8 +341,22 @@ def _configure_common_gki_defconfig(
     # Recreate the full config exactly as Kleaf will: load the now-canonical
     # source gki_defconfig, then resolve defaults once more.
     requested_config.unlink(missing_ok=True)
-    _run_kconfig_make(runner, common_kernel, config_output, device.arch, "gki_defconfig")
-    _run_kconfig_make(runner, common_kernel, config_output, device.arch, "olddefconfig")
+    _run_kconfig_make(
+        runner,
+        common_kernel,
+        config_output,
+        device.arch,
+        "gki_defconfig",
+        toolchain_env,
+    )
+    _run_kconfig_make(
+        runner,
+        common_kernel,
+        config_output,
+        device.arch,
+        "olddefconfig",
+        toolchain_env,
+    )
     if not requested_config.is_file():
         raise BuildToolError("Kleaf GKI defconfig did not produce a full .config")
     return requested_config, source_defconfig

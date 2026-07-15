@@ -232,7 +232,7 @@ jobs:
             /usr/local/.ghcup
             /usr/share/swift
             /usr/local/swift
-            /opt/hostedtoolcache/CodeQL
+            /opt/hostedtoolcache
             /usr/local/share/powershell
             /usr/local/share/vcpkg
           )
@@ -272,9 +272,9 @@ jobs:
             echo "- Available after cleanup: ${after_available} bytes"
             echo "- Net reclaimed: ${reclaimed} bytes"
           } >> "$GITHUB_STEP_SUMMARY"
-          minimum_available=$((20 * 1024 * 1024 * 1024))
+          minimum_available=$((100 * 1024 * 1024 * 1024))
           if ((after_available < minimum_available)); then
-            echo "less than 20 GiB is available for the locked source graph" >&2
+            echo "less than 100 GiB is available for the locked source graph" >&2
             exit 2
           fi
 
@@ -333,6 +333,23 @@ jobs:
             --build-target mixed \
             --source-dir out/source \
             --output out/build
+
+      - name: Collect failed Kconfig diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/debug
+          if [[ -f out/build/.op13/config-work/.config ]]; then
+            cp out/build/.op13/config-work/.config out/debug/resolved-kconfig.txt
+          fi
+          if [[ -f out/build/.op13/config-request.json ]]; then
+            cp out/build/.op13/config-request.json out/debug/config-request.json
+          fi
+          if [[ -f out/source/kernel_platform/common/arch/arm64/configs/gki_defconfig ]]; then
+            cp out/source/kernel_platform/common/arch/arm64/configs/gki_defconfig \
+              out/debug/canonical-gki-defconfig.txt
+          fi
 
       - name: Upload patch diagnostics
         if: failure()
