@@ -105,6 +105,7 @@ jobs:
     if: inputs.target == 'modules'
     needs: validate-release-inputs
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/build.yml
     with:

@@ -42,6 +42,12 @@ jobs:
           fi
           python3 -m compileall -q scripts
 
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests
+
       - name: Validate device configuration schema
         uses: dsanders11/json-schema-validate-action@eddf079f55830cc9a916a3c512ba9086240d2fea # v2.0.0
         with:
@@ -344,6 +350,7 @@ jobs:
       - static-validation
       - patch-rehearsal
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/build.yml
     with:
