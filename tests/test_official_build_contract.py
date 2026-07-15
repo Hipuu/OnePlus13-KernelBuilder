@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -130,6 +131,56 @@ class OfficialBuildContractTests(unittest.TestCase):
                 self.device.common_kernel,
                 str(MAX_BUILD_EPOCH + 1),
             )
+
+    def test_build_epoch_resolves_configured_timestamp_before_source_epoch(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "BUILD_TIMESTAMP": "2026-07-14T12:00:00Z",
+                "SOURCE_DATE_EPOCH": "1",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                _build_epoch(self.source, self.device.common_kernel, None),
+                1784030400,
+            )
+            self.assertEqual(
+                _build_epoch(self.source, self.device.common_kernel, "123"),
+                123,
+            )
+
+    def test_build_epoch_validates_source_date_epoch_as_an_integer(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"BUILD_TIMESTAMP": "", "SOURCE_DATE_EPOCH": "456"},
+            clear=False,
+        ):
+            self.assertEqual(
+                _build_epoch(self.source, self.device.common_kernel, " "),
+                456,
+            )
+        with patch.dict(
+            os.environ,
+            {"BUILD_TIMESTAMP": "", "SOURCE_DATE_EPOCH": "not-an-epoch"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(BuildToolError, "SOURCE_DATE_EPOCH.*epoch integer"):
+                _build_epoch(self.source, self.device.common_kernel, None)
+
+    def test_fake_config_patch_uses_only_the_resolved_source_epoch(self) -> None:
+        fake_config_patch = (
+            ROOT / "patches" / "common" / "0006-fake-config-oneplus-6.6.patch"
+        ).read_text(encoding="utf-8")
+        self.assertNotRegex(fake_config_patch, r"\$\(shell\s+date\b")
+        self.assertIn(
+            "SOURCE_DATE_EPOCH is required for reproducible fake-config builds",
+            fake_config_patch,
+        )
+        self.assertIn(
+            'CFLAGS_configs.o += -D__FORCE_REBUILD__="$(SOURCE_DATE_EPOCH)"',
+            fake_config_patch,
+        )
 
     def test_common_gki_defconfig_is_canonicalized_for_kleaf(self) -> None:
         common = self.source / self.device.common_kernel
@@ -264,6 +315,11 @@ class OfficialBuildContractTests(unittest.TestCase):
         self.assertEqual(captured_env["RECOMPILE_KERNEL"], "1")
         self.assertEqual(captured_env["COPY_NEEDED"], "1")
         self.assertEqual(captured_env["LTO"], "thin")
+        self.assertEqual(captured_env["SOURCE_DATE_EPOCH"], "123")
+        self.assertEqual(
+            captured_env["KBUILD_BUILD_TIMESTAMP"],
+            "Thu Jan 01 00:02:03 UTC 1970",
+        )
         self.assertNotIn("KCONFIG_CONFIG", captured_env)
         self.assertNotIn("DIST_DIR", captured_env)
         self.assertEqual((output / ".config").read_text(encoding="utf-8"), "CONFIG_TEST=y\n")

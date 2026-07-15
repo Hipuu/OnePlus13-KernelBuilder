@@ -29,6 +29,10 @@ EXPECTED_REJECTS = {
 }
 REFERENCE_REPOSITORY = "Hipuu/OnePlus_KernelSU_SUSFS"
 REFERENCE_COMMIT = "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c"
+EXPECTED_KSUN_COMMIT = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
+EXPECTED_SUSFS_COMMIT = "e7b28525f69ca5864bed7db51f77663f5adfe218"
+EXPECTED_WILD_COMMIT = "2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f"
+STAGE_STAMP = ".op13-root-stage.json"
 FIX_PATCHES = (
     "fix_Kbuild.patch",
     "fix_init.c.patch",
@@ -144,6 +148,37 @@ def _git_blob_bytes(checkout: Path, relative: Path, label: str) -> bytes:
     return result.stdout
 
 
+def _git_head(checkout: Path, label: str) -> str:
+    if not (checkout / ".git").exists():
+        raise IntegrationError(f"{label} checkout lacks Git metadata: {checkout}")
+    result = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--verify", "HEAD"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    head = result.stdout.strip()
+    if result.returncode != 0 or len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
+        detail = result.stderr.strip() or head
+        raise IntegrationError(f"failed to resolve pinned {label} commit: {detail}")
+    return head
+
+
+def _stage_commit(ksun: Path) -> str:
+    stamp = _require_file(ksun / STAGE_STAMP, "KernelSU-Next stage stamp")
+    try:
+        document = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IntegrationError(f"KernelSU-Next stage stamp is invalid: {stamp}") from exc
+    if not isinstance(document, dict) or document.get("variant") != "kernelsu-next":
+        raise IntegrationError("KernelSU-Next stage provenance changed")
+    commit = document.get("source_commit")
+    if not isinstance(commit, str):
+        raise IntegrationError("KernelSU-Next stage commit is absent")
+    return commit
+
+
 def _run_patch_payload(tree: Path, payload: bytes, filename: str) -> tuple[int, str]:
     with tempfile.TemporaryDirectory(prefix="op13-ksun-patch-") as temporary_name:
         patch_file = Path(temporary_name) / filename
@@ -172,6 +207,17 @@ def integrate(ksun_dir: Path, susfs_dir: Path, wild_dir: Path, stamp: Path | Non
     ksun = _require_directory(ksun_dir, "KernelSU-Next")
     susfs = _require_directory(susfs_dir, "SUSFS")
     wild = _require_directory(wild_dir, "Wild patch")
+    ksun_commit = _stage_commit(ksun)
+    susfs_commit = _git_head(susfs, "SUSFS")
+    wild_commit = _git_head(wild, "Wild patch")
+    expected_commits = {
+        "KernelSU-Next": (ksun_commit, EXPECTED_KSUN_COMMIT),
+        "SUSFS": (susfs_commit, EXPECTED_SUSFS_COMMIT),
+        "Wild patch": (wild_commit, EXPECTED_WILD_COMMIT),
+    }
+    for label, (actual, expected) in expected_commits.items():
+        if actual != expected:
+            raise IntegrationError(f"{label} commit changed: expected {expected}, got {actual}")
     stamp_path = (stamp.resolve() if stamp is not None else ksun / ".op13-susfs-integrated.json")
     try:
         stamp_path.relative_to(ksun)
@@ -259,6 +305,11 @@ def integrate(ksun_dir: Path, susfs_dir: Path, wild_dir: Path, stamp: Path | Non
             "repository": REFERENCE_REPOSITORY,
             "commit": REFERENCE_COMMIT,
             "patch_order": [SUSFS_PATCH.name, *FIX_PATCHES],
+        },
+        "inputs": {
+            "kernelsu_next_commit": ksun_commit,
+            "susfs_commit": susfs_commit,
+            "wild_patches_commit": wild_commit,
         },
         "patch_tool": version,
         "base_patch": {

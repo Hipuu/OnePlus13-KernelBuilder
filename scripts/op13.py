@@ -21,6 +21,7 @@ from lib.config import (
     SECRET_PATTERNS,
     discover_configs,
     load_dependency_lock,
+    resolve_root_selection,
     select_feature,
     select_profile,
     validate_repository,
@@ -112,6 +113,20 @@ def command_fetch(args: argparse.Namespace) -> None:
         offline=args.offline,
     )
     _print(state)
+
+
+def command_resolve_root(args: argparse.Namespace) -> None:
+    root = args.repo_root.resolve()
+    lock_path = args.lock.resolve() if args.lock else root / "dependencies" / "lock.yml"
+    lock = load_dependency_lock(lock_path)
+    _print(
+        resolve_root_selection(
+            lock,
+            args.root,
+            requested_kernelsu_commit=args.kernelsu_commit,
+            requested_susfs_commit=args.susfs_commit,
+        )
+    )
 
 
 def command_sync(args: argparse.Namespace) -> None:
@@ -291,6 +306,21 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--offline", action="store_true", help="verify cache without network")
     fetch.add_argument("--dry-run", action="store_true")
     fetch.set_defaults(handler=command_fetch)
+
+    resolve_root = subparsers.add_parser(
+        "resolve-root-lock",
+        help="resolve optional KernelSU/SUSFS commit assertions against the audited lock",
+    )
+    _add_repo_root(resolve_root)
+    resolve_root.add_argument("--lock", type=_path)
+    resolve_root.add_argument(
+        "--root",
+        required=True,
+        choices=("kernelsu", "kernelsu-next", "none"),
+    )
+    resolve_root.add_argument("--kernelsu-commit", default="")
+    resolve_root.add_argument("--susfs-commit", default="")
+    resolve_root.set_defaults(handler=command_resolve_root)
 
     sync = subparsers.add_parser("sync-sources", help="sync an exact official OnePlus source lock")
     _add_repo_root(sync)

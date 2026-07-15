@@ -462,6 +462,53 @@ def _orchestrator_identity() -> dict[str, Any]:
     }
 
 
+def _portable_repository_path(path: Path, root: Path, *, role: str) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise BuildToolError(f"{role} is outside the repository root: {path}") from exc
+
+
+def _dependency_inventory(lock: DependencyLock) -> list[dict[str, Any]]:
+    """Return the immutable dependency identity recorded in release metadata."""
+
+    records: list[dict[str, Any]] = []
+    for dependency_id, dependency in sorted(lock.dependencies.items()):
+        record: dict[str, Any] = {
+            "id": dependency_id,
+            "kind": dependency.kind,
+            "required_for": sorted(dependency.required_for),
+        }
+        if dependency.ref is not None:
+            record["ref"] = dependency.ref
+        version = dependency.raw.get("version")
+        if isinstance(version, str) and version:
+            record["version"] = version
+        if dependency.kind == "git":
+            record["source"] = {
+                "uri": dependency.url,
+                "commit": dependency.commit,
+            }
+        else:
+            record["resource"] = {
+                "uri": dependency.url,
+                "sha256": dependency.sha256,
+            }
+            source_uri = dependency.raw.get("repository") or dependency.raw.get("repo_url")
+            source_commit = dependency.commit or dependency.raw.get("repo_commit")
+            if source_uri is not None:
+                if not isinstance(source_uri, str) or not isinstance(source_commit, str):
+                    raise BuildToolError(
+                        f"dependency {dependency_id} has incomplete source provenance"
+                    )
+                record["source"] = {
+                    "uri": source_uri,
+                    "commit": source_commit,
+                }
+        records.append(record)
+    return records
+
+
 def package_build(
     *,
     root: Path,
@@ -595,8 +642,24 @@ def package_build(
     shutil.copy2(Path(context["manifest"]["resolved_path"]), manifest_copy)
     records.append(record_for_file(manifest_copy, role="resolved-manifest"))
     provenance_path = output_dir / "BUILD-MANIFEST.json"
+    source = dict(context["manifest"])
+    source["locked_path"] = _portable_repository_path(
+        profile.locked_manifest,
+        root,
+        role="locked OnePlus manifest",
+    )
+    source["resolved_path"] = manifest_copy.name
+    dependency_lock = {
+        "path": _portable_repository_path(
+            lock.source_path,
+            root,
+            role="dependency lock",
+        ),
+        "sha256": sha256_file(lock.source_path),
+        "canonical_sha256": context["dependency_lock"]["sha256"],
+    }
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "builder": _orchestrator_identity(),
         "device": profile.device,
         "target": profile.target,
@@ -607,10 +670,12 @@ def package_build(
         "feature_profile": feature.id,
         "root_variant": root_variant,
         "build_target": build_target,
+        "debug": bool(debug),
         "pre_release": bool(pre_release),
         "smoke": bool(smoke),
-        "source": context["manifest"],
-        "dependency_lock": context["dependency_lock"],
+        "source": source,
+        "dependency_lock": dependency_lock,
+        "dependencies": _dependency_inventory(lock),
         "patches": context["patches"],
         "configuration": context["configuration"],
         "kernel": context["kernel"],

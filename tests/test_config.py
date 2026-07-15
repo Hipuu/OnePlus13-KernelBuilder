@@ -9,7 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from lib.config import discover_configs, load_dependency_lock, load_json_yaml, validate_repository
+from lib.config import (
+    discover_configs,
+    load_dependency_lock,
+    load_json_yaml,
+    resolve_root_selection,
+    validate_repository,
+)
 from lib.errors import BuildToolError
 from tests.support import make_repository
 
@@ -71,6 +77,52 @@ class ConfigurationTests(unittest.TestCase):
         path.write_text("schema_version: 1\n", encoding="utf-8")
         with self.assertRaisesRegex(BuildToolError, "JSON-compatible YAML"):
             load_json_yaml(path)
+
+    def _load_root_lock(self):
+        path = self.root / "dependencies" / "lock.yml"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["dependencies"]["susfs"] = {
+            "kind": "git",
+            "url": "https://example.com/susfs.git",
+            "commit": "8" * 40,
+            "required_for": ["susfs"],
+        }
+        data["dependencies"]["wild_kernel_patches"] = {
+            "kind": "git",
+            "url": "https://example.com/wild.git",
+            "commit": "9" * 40,
+            "required_for": ["wild"],
+        }
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return load_dependency_lock(path)
+
+    def test_root_commit_assertions_resolve_only_the_audited_pair(self) -> None:
+        lock = self._load_root_lock()
+        classic = resolve_root_selection(lock, "kernelsu", "4" * 40, "8" * 40)
+        self.assertEqual(classic["root"]["dependency"], "kernelsu")
+        self.assertEqual(classic["root"]["commit"], "4" * 40)
+        self.assertNotIn("compatibility_patches", classic)
+        next_selection = resolve_root_selection(lock, "kernelsu-next")
+        self.assertEqual(next_selection["root"]["commit"], "5" * 40)
+        self.assertEqual(next_selection["susfs"]["commit"], "8" * 40)
+        self.assertEqual(next_selection["compatibility_patches"]["commit"], "9" * 40)
+
+    def test_root_commit_assertions_reject_unreviewed_or_noncanonical_shas(self) -> None:
+        lock = self._load_root_lock()
+        with self.assertRaisesRegex(BuildToolError, "not the audited lock"):
+            resolve_root_selection(lock, "kernelsu-next", "a" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "lowercase 40-character SHA"):
+            resolve_root_selection(lock, "kernelsu-next", "A" * 40, "8" * 40)
+        with self.assertRaisesRegex(BuildToolError, "lowercase 40-character SHA"):
+            resolve_root_selection(lock, "kernelsu-next", "short", "8" * 40)
+
+    def test_root_none_rejects_unused_commit_assertions(self) -> None:
+        lock = self._load_root_lock()
+        selection = resolve_root_selection(lock, "none")
+        self.assertIsNone(selection["root"])
+        self.assertIsNone(selection["susfs"])
+        with self.assertRaisesRegex(BuildToolError, "root=none"):
+            resolve_root_selection(lock, "none", "4" * 40, "")
 
 
 if __name__ == "__main__":

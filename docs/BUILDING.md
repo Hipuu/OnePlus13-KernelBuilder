@@ -29,6 +29,14 @@ the reject inventory, the hook-mode result, and the final driver tree have
 independent fingerprints, so a mismatched KernelSU/SUSFS pair fails before
 configuration or compilation.
 
+The currently audited root commits are KernelSU
+`b0bc817b4e966aa6aa830834eaf6ef765d821d40`, KernelSU-Next
+`3b18216f71df189ab3d1b1ce0bdb21be1268e771`, and SUSFS
+`e7b28525f69ca5864bed7db51f77663f5adfe218`. A different requested commit
+must be introduced as a lock update together with its source-tree, patch,
+version, and final-driver fingerprints; it is not accepted as an unchecked
+runtime override.
+
 ## Reproducible inputs
 
 `dependencies/lock.yml` pins every dependency. Each release profile points to
@@ -54,6 +62,8 @@ From the Actions page, run **Build OnePlus 13 kernel** and select:
 | --- | --- | --- |
 | `base` | `oos16`, `oos15-global`, `oos15-cn` | `oos16` |
 | `root` | `kernelsu-next`, `kernelsu`, `none` | `kernelsu-next` |
+| `kernelsu_commit` | optional lowercase 40-character lock assertion | locked selection |
+| `susfs_commit` | optional lowercase 40-character lock assertion | locked SUSFS |
 | `profile` | `full`, `wild`, `nethunter` | `full` |
 | `target` | `kernel`, `modules`, `mixed` | `mixed` |
 | `optimization` | `O2`, `O3` | `O2` |
@@ -79,6 +89,8 @@ Dispatch from an authenticated GitHub CLI session:
 gh workflow run build.yml --repo Hipuu/OnePlus13-KernelBuilder \
   -f base=oos15-global \
   -f root=kernelsu \
+  -f kernelsu_commit=b0bc817b4e966aa6aa830834eaf6ef765d821d40 \
+  -f susfs_commit=e7b28525f69ca5864bed7db51f77663f5adfe218 \
   -f profile=wild \
   -f target=kernel \
   -f optimization=O2 \
@@ -89,10 +101,16 @@ gh workflow run build.yml --repo Hipuu/OnePlus13-KernelBuilder \
   -f pre_release=true
 ```
 
+The two commit fields are assertions, not unchecked checkout overrides. A
+blank value resolves to `dependencies/lock.yml`; a supplied value must be the
+exact full commit for the selected root variant and locked SUSFS revision.
+Any other value stops before source synchronization and requires a reviewed
+lock plus compatibility-fingerprint update.
+
 The `release.yml` workflow requires `tag`, then base, root, profile, target,
-optimization, LTO, clean, debug, and pre-release inputs. GitHub's dispatch cap
-leaves out a separate cache input: the called build defaults cache on, while
-the release default `clean=true` skips restoration. Publishing occurs only
+optimization, LTO, clean, debug, and pre-release inputs. Release rebuilds use
+the checked-in dependency lock; the called build defaults cache on, while the
+release default `clean=true` skips restoration. Publishing occurs only
 through the `release` environment; configure its reviewer/protection rules in
 the repository settings before publishing. A modules-only release creates a
 matching kernel prerequisite in the same workflow run.
@@ -184,6 +202,14 @@ Set optional branding before configuration/build:
 export KERNEL_BRANDING='OnePlus13-KernelBuilder'
 export BUILD_TIMESTAMP='2026-07-14T12:00:00Z'
 ```
+
+`BUILD_TIMESTAMP` accepts a timezone-qualified RFC3339 value or an epoch
+integer. When it is unset, `SOURCE_DATE_EPOCH` accepts an epoch integer; when
+both are unset, the builder uses the locked common-kernel commit timestamp.
+The resolved value is exported as `SOURCE_DATE_EPOCH` and drives Kbuild's
+timestamp, fake-config rebuild marker, and deterministic package timestamps.
+The fake-config patch deliberately fails if it is built outside this flow
+without `SOURCE_DATE_EPOCH`; it never reads the runner's wall clock.
 
 Use `--dry-run` or `--smoke` on supported stages to inspect the resolved plan
 without doing a full compile. A modules-only local build must point at a

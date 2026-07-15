@@ -32,6 +32,10 @@ MANIFEST_FILES = {
     "oos15-global": "oneplus_13_global.xml",
     "oos16": "oneplus_13_b.xml",
 }
+ROOT_DEPENDENCY_IDS = {
+    "kernelsu": "kernelsu",
+    "kernelsu-next": "kernelsu_next",
+}
 
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -474,6 +478,89 @@ def load_dependency_lock(path: Path) -> DependencyLock:
         raise BuildToolError(f"{path}: oneplus_manifest must pin the official repository")
     digest = sha256_bytes(canonical_json_bytes(raw))
     return DependencyLock(dependencies, digest, path.resolve(), raw)
+
+
+def resolve_root_selection(
+    lock: DependencyLock,
+    root_variant: str,
+    requested_kernelsu_commit: str | None = None,
+    requested_susfs_commit: str | None = None,
+) -> dict[str, Any]:
+    """Resolve optional workflow commit assertions against the audited lock."""
+
+    requested = {
+        "KernelSU": "" if requested_kernelsu_commit is None else requested_kernelsu_commit,
+        "SUSFS": "" if requested_susfs_commit is None else requested_susfs_commit,
+    }
+    for label, value in requested.items():
+        if not isinstance(value, str) or value != value.strip():
+            raise BuildToolError(f"{label} commit assertion must be a single trimmed string")
+    if root_variant == "none":
+        if any(requested.values()):
+            raise BuildToolError("root=none does not accept KernelSU or SUSFS commit assertions")
+        return {
+            "schema_version": 1,
+            "root_variant": "none",
+            "dependency_lock_sha256": lock.digest,
+            "root": None,
+            "susfs": None,
+        }
+    dependency_id = ROOT_DEPENDENCY_IDS.get(root_variant)
+    if dependency_id is None:
+        raise BuildToolError(f"unsupported root variant {root_variant!r}")
+    required_ids = {dependency_id, "susfs"}
+    if root_variant == "kernelsu-next":
+        required_ids.add("wild_kernel_patches")
+    missing = sorted(required_ids - set(lock.dependencies))
+    if missing:
+        raise BuildToolError(f"root compatibility dependencies are absent: {', '.join(missing)}")
+
+    root_dependency = lock.dependencies[dependency_id]
+    susfs_dependency = lock.dependencies["susfs"]
+    if root_dependency.kind != "git" or not is_full_commit(root_dependency.commit):
+        raise BuildToolError(f"dependency {dependency_id} lacks an immutable Git commit")
+    if susfs_dependency.kind != "git" or not is_full_commit(susfs_dependency.commit):
+        raise BuildToolError("dependency susfs lacks an immutable Git commit")
+    expected = {
+        "KernelSU": root_dependency.commit,
+        "SUSFS": susfs_dependency.commit,
+    }
+    for label, value in requested.items():
+        if not value:
+            continue
+        if not is_full_commit(value):
+            raise BuildToolError(f"{label} commit assertion must be a lowercase 40-character SHA")
+        if value != expected[label]:
+            raise BuildToolError(
+                f"{label} commit {value} is not the audited lock {expected[label]}; "
+                "update the lock and compatibility fingerprints first"
+            )
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "root_variant": root_variant,
+        "dependency_lock_sha256": lock.digest,
+        "root": {
+            "dependency": dependency_id,
+            "uri": root_dependency.url,
+            "commit": root_dependency.commit,
+        },
+        "susfs": {
+            "dependency": "susfs",
+            "uri": susfs_dependency.url,
+            "commit": susfs_dependency.commit,
+        },
+    }
+    if root_variant == "kernelsu-next":
+        wild = lock.dependencies["wild_kernel_patches"]
+        if wild.kind != "git" or not is_full_commit(wild.commit):
+            raise BuildToolError("dependency wild_kernel_patches lacks an immutable Git commit")
+        result["compatibility_patches"] = {
+            "dependency": "wild_kernel_patches",
+            "uri": wild.url,
+            "commit": wild.commit,
+        }
+    return result
 
 
 def validate_feature_dependencies(feature: FeatureProfile, lock: DependencyLock) -> None:

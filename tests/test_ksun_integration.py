@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +25,17 @@ class KsunIntegrationTests(unittest.TestCase):
         self.wild = self.root / "wild"
         (self.ksun / "kernel").mkdir(parents=True)
         (self.ksun / "kernel" / "Kconfig").write_text("config KSU_SUSFS\n\tbool\n", encoding="utf-8")
+        (self.ksun / HELPER.STAGE_STAMP).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "variant": "kernelsu-next",
+                    "source_commit": HELPER.EXPECTED_KSUN_COMMIT,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         hook_mode = self.ksun / HELPER.HOOK_MODE_PATH
         hook_mode.parent.mkdir(parents=True)
         hook_mode.write_text(HELPER.HOOK_MODE_STATEMENT + "\n", encoding="utf-8")
@@ -42,6 +54,10 @@ class KsunIntegrationTests(unittest.TestCase):
             )
             subprocess.run(["git", "add", "."], cwd=checkout, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=checkout, check=True)
+        self.commit_patches = (
+            mock.patch.object(HELPER, "EXPECTED_SUSFS_COMMIT", HELPER._git_head(self.susfs, "SUSFS")),
+            mock.patch.object(HELPER, "EXPECTED_WILD_COMMIT", HELPER._git_head(self.wild, "Wild patch")),
+        )
         susfs_payload = HELPER._git_blob_bytes(self.susfs, HELPER.SUSFS_PATCH, "SUSFS")
         self.susfs_hash_patch = mock.patch.object(
             HELPER, "EXPECTED_SUSFS_SHA256", hashlib.sha256(susfs_payload).hexdigest()
@@ -59,8 +75,12 @@ class KsunIntegrationTests(unittest.TestCase):
         )
         self.susfs_hash_patch.start()
         self.fix_hash_patch.start()
+        for patcher in self.commit_patches:
+            patcher.start()
 
     def tearDown(self) -> None:
+        for patcher in reversed(self.commit_patches):
+            patcher.stop()
         self.fix_hash_patch.stop()
         self.susfs_hash_patch.stop()
         self.temporary.cleanup()
@@ -92,6 +112,7 @@ class KsunIntegrationTests(unittest.TestCase):
             [HELPER.SUSFS_PATCH.name, *HELPER.FIX_PATCHES],
         )
         self.assertEqual(document["hook_mode"]["statement"], HELPER.HOOK_MODE_STATEMENT)
+        self.assertEqual(document["inputs"]["kernelsu_next_commit"], HELPER.EXPECTED_KSUN_COMMIT)
         self.assertTrue((self.ksun / ".op13-susfs-integrated.json").is_file())
         self.assertFalse(list(self.ksun.rglob("*.rej")))
 
@@ -101,6 +122,7 @@ class KsunIntegrationTests(unittest.TestCase):
             HELPER.REFERENCE_COMMIT,
             "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c",
         )
+        self.assertEqual(HELPER.EXPECTED_KSUN_COMMIT, "3b18216f71df189ab3d1b1ce0bdb21be1268e771")
         self.assertEqual(
             HELPER.FIX_PATCHES,
             (
@@ -118,6 +140,11 @@ class KsunIntegrationTests(unittest.TestCase):
             HELPER.EXPECTED_OVERWRITE_HOOK_MODE_SHA256,
             "86c6bf22abd6a86577fa9d064a976f8eabd13cc649eaa4bf574a5f2b3f2ecde9",
         )
+
+    def test_dependency_commit_drift_is_fatal(self) -> None:
+        with mock.patch.object(HELPER, "EXPECTED_SUSFS_COMMIT", "0" * 40):
+            with self.assertRaisesRegex(HELPER.IntegrationError, "SUSFS commit changed"):
+                HELPER.integrate(self.ksun, self.susfs, self.wild)
 
     def test_changed_reject_fingerprint_is_fatal(self) -> None:
         def fake_patch(tree: Path, patch_file: Path):

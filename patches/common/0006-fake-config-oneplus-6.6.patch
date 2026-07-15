@@ -4,21 +4,26 @@ Date: Tue, 14 Jul 2026 00:00:00 +0700
 Subject: [PATCH] kbuild: rebase fake proc config support onto OnePlus 6.6
 
 Rebase the pinned WildKernels fake-config implementation onto the locked
-OnePlus Android 15 6.6 Kbuild layout.
+OnePlus Android 15 6.6 Kbuild layout. Use the orchestrator's resolved
+SOURCE_DATE_EPOCH in the compiler command so repeated builds never depend on
+the runner's wall clock.
 
 Upstream-patch: WildKernels/kernel_patches@2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f/common/fake_config.patch
 Rebased-on: OnePlusOSS/android_kernel_common_oneplus_sm8750@9920459dfb0080dd8a81c41d95701483857f804a
 
 diff --git a/kernel/Makefile b/kernel/Makefile
-index dd97eb4a074d..719615a88b3f 100644
+index dd97eb4a074d..5e1b7a6326a8 100644
 --- a/kernel/Makefile
 +++ b/kernel/Makefile
-@@ -145,7 +145,8 @@ KCOV_INSTRUMENT_stackleak.o := n
+@@ -145,7 +145,11 @@ KCOV_INSTRUMENT_stackleak.o := n
  
  obj-$(CONFIG_SCF_TORTURE_TEST) += scftorture.o
  
 -$(obj)/configs.o: $(obj)/config_data.gz
-+CFLAGS_configs.o += -D__FORCE_REBUILD__="$(shell date +%s)"
++ifeq ($(strip $(SOURCE_DATE_EPOCH)),)
++$(error SOURCE_DATE_EPOCH is required for reproducible fake-config builds)
++endif
++CFLAGS_configs.o += -D__FORCE_REBUILD__="$(SOURCE_DATE_EPOCH)"
 +$(obj)/configs.o: $(obj)/config_data.gz FORCE
  
  targets += config_data config_data.gz
@@ -41,4 +46,3 @@ index dd97eb4a074d..719615a88b3f 100644
  	$(call filechk,cat)
  
  $(obj)/kheaders.o: $(obj)/kheaders_data.tar.xz
-

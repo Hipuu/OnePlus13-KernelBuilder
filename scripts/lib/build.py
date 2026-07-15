@@ -503,12 +503,18 @@ def _validate_build_epoch(epoch: int) -> int:
 
 
 def _build_epoch(source_dir: Path, common_kernel: str, requested: str | None) -> int:
-    value = (requested or os.environ.get("SOURCE_DATE_EPOCH") or "").strip()
-    if value:
-        if value.isdigit():
-            epoch = int(value)
+    configured_timestamp = (requested or "").strip()
+    if not configured_timestamp:
+        configured_timestamp = (os.environ.get("BUILD_TIMESTAMP") or "").strip()
+    if configured_timestamp:
+        if configured_timestamp.isdigit():
+            epoch = int(configured_timestamp)
         else:
-            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            normalized = (
+                configured_timestamp[:-1] + "+00:00"
+                if configured_timestamp.endswith("Z")
+                else configured_timestamp
+            )
             try:
                 parsed = datetime.fromisoformat(normalized)
             except ValueError as exc:
@@ -517,6 +523,11 @@ def _build_epoch(source_dir: Path, common_kernel: str, requested: str | None) ->
                 raise BuildToolError("BUILD_TIMESTAMP must include a timezone")
             epoch = int(parsed.timestamp())
         return _validate_build_epoch(epoch)
+    source_date_epoch = (os.environ.get("SOURCE_DATE_EPOCH") or "").strip()
+    if source_date_epoch:
+        if not source_date_epoch.isdigit():
+            raise BuildToolError("SOURCE_DATE_EPOCH must be an epoch integer")
+        return _validate_build_epoch(int(source_date_epoch))
     runner = CommandRunner(verbose=False)
     result = runner.run(
         ["git", "log", "-1", "--format=%ct"],
@@ -778,7 +789,7 @@ def build_kernel(
         (output_dir / "vmlinux").write_bytes(b"OP13-SMOKE-VMLINUX\n")
         (metadata_dir / "kernel-build.log").write_text("smoke build\n", encoding="utf-8", newline="\n")
     else:
-        epoch = _build_epoch(source_dir, device.common_kernel, build_timestamp or os.environ.get("BUILD_TIMESTAMP"))
+        epoch = _build_epoch(source_dir, device.common_kernel, build_timestamp)
         timestamp = datetime.fromtimestamp(epoch, timezone.utc).strftime("%a %b %d %H:%M:%S UTC %Y")
         script = source_dir / device.official_script
         if not script.is_file():

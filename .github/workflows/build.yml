@@ -21,6 +21,16 @@ on:
           - kernelsu-next
           - kernelsu
           - none
+      kernelsu_commit:
+        description: Optional full SHA assertion for the selected KernelSU lock
+        required: false
+        default: ""
+        type: string
+      susfs_commit:
+        description: Optional full SHA assertion for the SUSFS lock
+        required: false
+        default: ""
+        type: string
       profile:
         description: Feature profile
         required: true
@@ -82,6 +92,14 @@ on:
         type: string
       root:
         required: true
+        type: string
+      kernelsu_commit:
+        required: false
+        default: ""
+        type: string
+      susfs_commit:
+        required: false
+        default: ""
         type: string
       profile:
         required: true
@@ -154,6 +172,8 @@ jobs:
     env:
       BASE: ${{ inputs.base }}
       ROOT_VARIANT: ${{ inputs.root }}
+      REQUESTED_KERNELSU_COMMIT: ${{ inputs.kernelsu_commit }}
+      REQUESTED_SUSFS_COMMIT: ${{ inputs.susfs_commit }}
       PROFILE: ${{ inputs.profile }}
       BUILD_TARGET: ${{ inputs.target }}
       OPTIMIZATION: ${{ inputs.optimization }}
@@ -190,6 +210,12 @@ jobs:
           case "$BUILD_TARGET" in kernel|modules|mixed) ;; *) exit 2 ;; esac
           case "$OPTIMIZATION" in O2|O3) ;; *) exit 2 ;; esac
           case "$LTO_MODE" in thin|full) ;; *) exit 2 ;; esac
+          mkdir -p "$SOURCE_DIR" "$BUILD_DIR" "$MODULE_DIR" "$DIST_DIR" "$DEBUG_DIR"
+          python3 scripts/op13.py resolve-root-lock \
+            --root "$ROOT_VARIANT" \
+            --kernelsu-commit "$REQUESTED_KERNELSU_COMMIT" \
+            --susfs-commit "$REQUESTED_SUSFS_COMMIT" \
+            > "$DEBUG_DIR/root-selection.json"
           if [[ ! "$ARTIFACT_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]]; then
             echo "artifact retention must be an integer from 1 through 90 days" >&2
             exit 2
@@ -223,7 +249,6 @@ jobs:
           } >> "$GITHUB_ENV"
           python3 --version
           jq --version
-          mkdir -p "$SOURCE_DIR" "$BUILD_DIR" "$MODULE_DIR" "$DIST_DIR" "$DEBUG_DIR"
           df -h > "$DEBUG_DIR/disk-before.txt"
           {
             echo "cache_enabled=$CACHE_ENABLED"

@@ -140,9 +140,34 @@ class SmokePipelineTests(unittest.TestCase):
         self.assertFalse(any(path.name.endswith(("boot.img", "vendor_boot.img")) for path in dist.iterdir()))
         self.assertTrue((dist / "BUILD-MANIFEST.json").is_file())
         manifest = json.loads((dist / "BUILD-MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["builder"]["repository"], "Hipuu/OnePlus13-KernelBuilder")
         self.assertEqual(manifest["base"], "oos16")
+        self.assertTrue(manifest["debug"])
         self.assertEqual(manifest["kmi"], "android15-6.6")
+        self.assertEqual(manifest["source"]["locked_path"], "manifests/lockfiles/oos16.xml")
+        self.assertEqual(
+            manifest["source"]["resolved_path"],
+            next(path.name for path in dist.glob("*-manifest.xml")),
+        )
+        self.assertEqual(manifest["dependency_lock"]["path"], "dependencies/lock.yml")
+        self.assertEqual(
+            manifest["dependency_lock"]["sha256"],
+            sha256_file(self.root / "dependencies" / "lock.yml"),
+        )
+        self.assertEqual(manifest["dependency_lock"]["canonical_sha256"], self.lock.digest)
+        dependency_ids = [record["id"] for record in manifest["dependencies"]]
+        self.assertEqual(dependency_ids, sorted(dependency_ids))
+        kernelsu_next = next(
+            record for record in manifest["dependencies"] if record["id"] == "kernelsu_next"
+        )
+        self.assertEqual(kernelsu_next["source"]["commit"], "5" * 40)
+        firmware = next(
+            record
+            for record in manifest["dependencies"]
+            if record["id"] == "nethunter_wireless_firmware"
+        )
+        self.assertEqual(firmware["resource"]["sha256"], "a" * 64)
         self.assertTrue((dist / "SHA256SUMS").is_file())
 
         staging = self.build / "modules" / "staging"

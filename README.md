@@ -108,6 +108,7 @@ recorded and passes both unpack/repack and round-trip verification.
 - [Building locally and in Actions](docs/BUILDING.md)
 - [Feature profiles](docs/FEATURES.md)
 - [Installing a build](docs/INSTALLING.md)
+- [Release provenance and verification](docs/PROVENANCE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Device test protocol](docs/DEVICE-TESTING.md)
 - [Contributing](CONTRIBUTING.md)
