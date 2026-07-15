@@ -21,6 +21,13 @@ After SUSFS integration, an exact preimage-checked transform pins the versions
 that upstream would derive from full Git history: KernelSU `32525` and
 KernelSU-Next `33214` / `v3.3.0`. The final 91-file or 92-file driver subtree
 must match its audited digest before it is installed into `common/drivers`.
+For KernelSU-Next, the compatibility sequence is locked to the audited
+`Hipuu/OnePlus_KernelSU_SUSFS` snapshot `7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c`:
+the SUSFS v2.2.0 base patch, the six exact reject repairs,
+`overwrite_hook_mode.patch`, and then `ksu_toolkit.patch`. Every patch blob,
+the reject inventory, the hook-mode result, and the final driver tree have
+independent fingerprints, so a mismatched KernelSU/SUSFS pair fails before
+configuration or compilation.
 
 ## Reproducible inputs
 

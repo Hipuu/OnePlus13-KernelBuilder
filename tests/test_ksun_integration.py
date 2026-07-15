@@ -24,6 +24,9 @@ class KsunIntegrationTests(unittest.TestCase):
         self.wild = self.root / "wild"
         (self.ksun / "kernel").mkdir(parents=True)
         (self.ksun / "kernel" / "Kconfig").write_text("config KSU_SUSFS\n\tbool\n", encoding="utf-8")
+        hook_mode = self.ksun / HELPER.HOOK_MODE_PATH
+        hook_mode.parent.mkdir(parents=True)
+        hook_mode.write_text(HELPER.HOOK_MODE_STATEMENT + "\n", encoding="utf-8")
         susfs_patch = self.susfs / HELPER.SUSFS_PATCH
         susfs_patch.parent.mkdir(parents=True)
         susfs_patch.write_text("base\n", encoding="utf-8")
@@ -84,8 +87,37 @@ class KsunIntegrationTests(unittest.TestCase):
             document = HELPER.integrate(self.ksun, self.susfs, self.wild)
         self.assertEqual(calls, [HELPER.SUSFS_PATCH.name, *HELPER.FIX_PATCHES])
         self.assertEqual(document["base_patch"]["rejects"], sorted(HELPER.EXPECTED_REJECTS))
+        self.assertEqual(
+            document["reference"]["patch_order"],
+            [HELPER.SUSFS_PATCH.name, *HELPER.FIX_PATCHES],
+        )
+        self.assertEqual(document["hook_mode"]["statement"], HELPER.HOOK_MODE_STATEMENT)
         self.assertTrue((self.ksun / ".op13-susfs-integrated.json").is_file())
         self.assertFalse(list(self.ksun.rglob("*.rej")))
+
+    def test_oneplus_reference_patch_sequence_is_locked(self) -> None:
+        self.assertEqual(HELPER.REFERENCE_REPOSITORY, "Hipuu/OnePlus_KernelSU_SUSFS")
+        self.assertEqual(
+            HELPER.REFERENCE_COMMIT,
+            "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c",
+        )
+        self.assertEqual(
+            HELPER.FIX_PATCHES,
+            (
+                "fix_Kbuild.patch",
+                "fix_init.c.patch",
+                "fix_kernel_umount.c.patch",
+                "fix_sucompat.c.patch",
+                "fix_setuid_hook.c.patch",
+                "fix_supercall.c.patch",
+                "overwrite_hook_mode.patch",
+                "ksu_toolkit.patch",
+            ),
+        )
+        self.assertEqual(
+            HELPER.EXPECTED_OVERWRITE_HOOK_MODE_SHA256,
+            "86c6bf22abd6a86577fa9d064a976f8eabd13cc649eaa4bf574a5f2b3f2ecde9",
+        )
 
     def test_changed_reject_fingerprint_is_fatal(self) -> None:
         def fake_patch(tree: Path, patch_file: Path):

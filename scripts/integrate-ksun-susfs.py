@@ -27,6 +27,8 @@ EXPECTED_REJECTS = {
     "kernel/hook/setuid_hook.c.rej",
     "kernel/supercall/supercall.c.rej",
 }
+REFERENCE_REPOSITORY = "Hipuu/OnePlus_KernelSU_SUSFS"
+REFERENCE_COMMIT = "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c"
 FIX_PATCHES = (
     "fix_Kbuild.patch",
     "fix_init.c.patch",
@@ -34,11 +36,15 @@ FIX_PATCHES = (
     "fix_sucompat.c.patch",
     "fix_setuid_hook.c.patch",
     "fix_supercall.c.patch",
+    "overwrite_hook_mode.patch",
     "ksu_toolkit.patch",
 )
 SUSFS_PATCH = Path("kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch")
 WILD_FIX_DIR = Path("next/susfs_fix_patches/v2.2.0")
+HOOK_MODE_PATH = Path("kernel/supercall/dispatch.c")
+HOOK_MODE_STATEMENT = 'strscpy(cmd.mode, "Inline (SuSFS)", sizeof(cmd.mode));'
 EXPECTED_SUSFS_SHA256 = "1be114c12dde6aa9f67b79db9eb88d19355af29aa1445e5e6361dad6f18d9a19"
+EXPECTED_OVERWRITE_HOOK_MODE_SHA256 = "86c6bf22abd6a86577fa9d064a976f8eabd13cc649eaa4bf574a5f2b3f2ecde9"
 EXPECTED_FIX_SHA256 = {
     "fix_Kbuild.patch": "e6ac82983b97ee0144c8c7b72572f48ec9556c14d353c223d26736e480d62b69",
     "fix_init.c.patch": "b8c743c0dc2d22729735bf20ead52f14a3c3b837f9670c5ce984f402cff4615b",
@@ -46,6 +52,7 @@ EXPECTED_FIX_SHA256 = {
     "fix_sucompat.c.patch": "518d70d30ddc8bd41bde9b4f8288a482dd2ff2dbc194b1958cb1f7cc0753a079",
     "fix_setuid_hook.c.patch": "d0cfa90ecba9dd99ce5517ae63387d0f7156523850c285d87c9ec23e6666f988",
     "fix_supercall.c.patch": "378640c04d5bf9271d6b294d0efdd0040568615ae16f1cb696455343fd5ebc17",
+    "overwrite_hook_mode.patch": EXPECTED_OVERWRITE_HOOK_MODE_SHA256,
     "ksu_toolkit.patch": "a79b2a3f1bd0e314765694da29252039df7d6fd5e72423007505798b8ce115af",
 }
 
@@ -241,9 +248,18 @@ def integrate(ksun_dir: Path, susfs_dir: Path, wild_dir: Path, stamp: Path | Non
     kconfig_text = kconfig.read_text(encoding="utf-8")
     if "CONFIG_KSU_SUSFS" not in kconfig_text and "KSU_SUSFS" not in kconfig_text:
         raise IntegrationError("CONFIG_KSU_SUSFS is absent after integration")
+    hook_mode = _require_file(ksun / HOOK_MODE_PATH, "KernelSU-Next hook-mode dispatcher")
+    hook_mode_text = hook_mode.read_text(encoding="utf-8")
+    if hook_mode_text.count(HOOK_MODE_STATEMENT) != 1:
+        raise IntegrationError("OnePlus SUSFS hook-mode override is absent after integration")
     document: dict[str, Any] = {
         "schema_version": 1,
         "integration": "kernelsu-next-susfs-v2.2.0",
+        "reference": {
+            "repository": REFERENCE_REPOSITORY,
+            "commit": REFERENCE_COMMIT,
+            "patch_order": [SUSFS_PATCH.name, *FIX_PATCHES],
+        },
         "patch_tool": version,
         "base_patch": {
             "path": str(susfs_patch),
@@ -253,6 +269,11 @@ def integrate(ksun_dir: Path, susfs_dir: Path, wild_dir: Path, stamp: Path | Non
         },
         "fix_patches": fix_records,
         "kconfig": {"path": str(kconfig), "sha256": sha256_file(kconfig)},
+        "hook_mode": {
+            "path": str(hook_mode),
+            "sha256": sha256_file(hook_mode),
+            "statement": HOOK_MODE_STATEMENT,
+        },
     }
     _atomic_json(stamp_path, document)
     return document

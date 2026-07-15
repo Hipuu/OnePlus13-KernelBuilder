@@ -30,7 +30,7 @@ EXPECTED_TREES = {
     },
     "kernelsu-next": {
         "file_count": 92,
-        "tree_sha256": "4c27d35127e240f11bcf7cb4425f5f0b7a3ba1e4950bb985b04655fbf0b14934",
+        "tree_sha256": "e640c22f0e82c931b9bdecb6c8142e271da23015676c88c110eea519bbdc70d7",
     },
 }
 
