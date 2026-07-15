@@ -147,14 +147,21 @@ def _tree_digest(root: Path, records: dict[str, tuple[str, bytes]]) -> str:
     return digest.hexdigest()
 
 
-def stage(workspace: Path, source: Path, destination: Path, variant: str) -> dict[str, Any]:
+def stage(
+    workspace: Path,
+    source_root: Path,
+    source: Path,
+    destination: Path,
+    variant: str,
+) -> dict[str, Any]:
     expected_commit = EXPECTED_COMMITS.get(variant)
     if expected_commit is None:
         raise StageError(f"unsupported staged root variant: {variant}")
     workspace = _require_plain_directory(Path(workspace), "workspace")
+    source_root = _require_plain_directory(Path(source_root), "root dependency cache")
     source = _require_plain_directory(Path(source), "root dependency checkout")
-    if not _inside(source, workspace):
-        raise StageError("root dependency checkout escapes the workspace")
+    if source == source_root or source.parent != source_root:
+        raise StageError("root dependency checkout escapes its verified cache root")
 
     destination_raw = Path(destination)
     if destination_raw.is_symlink() or destination_raw.exists():
@@ -274,6 +281,7 @@ def stage(workspace: Path, source: Path, destination: Path, variant: str) -> dic
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--variant", choices=tuple(sorted(EXPECTED_COMMITS)), required=True)
@@ -283,7 +291,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        document = stage(args.workspace, args.source, args.destination, args.variant)
+        document = stage(
+            args.workspace,
+            args.source_root,
+            args.source,
+            args.destination,
+            args.variant,
+        )
     except StageError as exc:
         print(f"stage error: {exc}", file=sys.stderr)
         return 1

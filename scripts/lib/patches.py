@@ -580,6 +580,7 @@ def _execute_operation(
         dependency_dir = _dependency_dir(cache_root, lock, dependency_id) if isinstance(dependency_id, str) else root.resolve()
         replacements = {
             "{source_dir}": str(source_dir.resolve()),
+            "{cache_root}": str(cache_root.resolve()),
             "{dependency_dir}": str(dependency_dir),
             "{repo_root}": str(root.resolve()),
             "{base}": base,

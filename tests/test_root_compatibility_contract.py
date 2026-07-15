@@ -50,6 +50,10 @@ class RootCompatibilityContractTests(unittest.TestCase):
 
     def test_oneplus_susfs_patch_order_and_blobs_are_cross_file_locked(self) -> None:
         operations = {operation["id"]: operation for operation in self.root_series["operations"]}
+        for operation_id in ("stage-kernelsu", "stage-kernelsu-next"):
+            argv = operations[operation_id]["argv"]
+            source_root = argv.index("--source-root")
+            self.assertEqual(argv[source_root + 1], "{cache_root}/git")
         classic = operations["patch-kernelsu-susfs"]
         self.assertEqual(classic["dependency"], "susfs")
         self.assertEqual(classic["sha256"], INTEGRATE.EXPECTED_SUSFS_SHA256)

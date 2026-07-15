@@ -20,7 +20,9 @@ class KsunSourceStageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temporary.name) / "workspace"
-        self.source = self.workspace / "dependency"
+        self.workspace.mkdir(parents=True)
+        self.source_root = Path(self.temporary.name) / "cache" / "git"
+        self.source = self.source_root / "dependency"
         self.source.mkdir(parents=True)
         self._git("init", "--quiet")
         self._git("config", "user.name", "Fixture")
@@ -67,7 +69,13 @@ class KsunSourceStageTests(unittest.TestCase):
         self._git("update-index", "--add", "--cacheinfo", f"120000,{blob},{relative}")
         return blob
 
-    def _stage(self, destination: Path, variant: str = "kernelsu-next"):
+    def _stage(
+        self,
+        destination: Path,
+        variant: str = "kernelsu-next",
+        *,
+        source_root: Path | None = None,
+    ):
         trees = {
             name: self._git("rev-parse", f"HEAD:{name}").stdout.strip()
             for name in ("kernel", "uapi")
@@ -75,7 +83,13 @@ class KsunSourceStageTests(unittest.TestCase):
         with mock.patch.dict(HELPER.EXPECTED_COMMITS, {variant: self.commit}), mock.patch.dict(
             HELPER.EXPECTED_SOURCE_TREES, {variant: trees}
         ), mock.patch.object(HELPER, "EXPECTED_LINK_BLOB", self.link_blob):
-            return HELPER.stage(self.workspace, self.source, destination, variant)
+            return HELPER.stage(
+                self.workspace,
+                self.source_root if source_root is None else source_root,
+                self.source,
+                destination,
+                variant,
+            )
 
     def test_placeholder_link_is_materialized_with_deterministic_digest(self) -> None:
         first = self.workspace / "stage-one"
@@ -115,6 +129,13 @@ class KsunSourceStageTests(unittest.TestCase):
         outside = self.workspace.parent / "outside"
         with self.assertRaisesRegex(HELPER.StageError, "escapes the workspace"):
             self._stage(outside)
+
+    def test_source_must_be_a_direct_child_of_verified_cache_root(self) -> None:
+        with self.assertRaisesRegex(HELPER.StageError, "verified cache root"):
+            self._stage(
+                self.workspace / "wrong-cache",
+                source_root=self.source_root.parent,
+            )
 
 
 if __name__ == "__main__":
