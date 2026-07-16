@@ -57,6 +57,14 @@ class RootCompatibilityContractTests(unittest.TestCase):
         classic = operations["patch-kernelsu-susfs"]
         self.assertEqual(classic["dependency"], "susfs")
         self.assertEqual(classic["sha256"], INTEGRATE.EXPECTED_SUSFS_SHA256)
+        self.assertEqual(classic["cwd"], "kernel_platform/KernelSU")
+        self.assertEqual(classic["path"], "kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch")
+        # The pinned upstream patch is CRLF text.  Route it through the same
+        # GNU patch family used by the OnePlus reference so trailing CRs are
+        # normalized and the untracked staged driver cannot be skipped by an
+        # enclosing Git checkout.  The exact post-patch hashes remain pinned
+        # by pin-root-version.py.
+        self.assertEqual(classic["fuzz"], 1)
         self.assertEqual(
             INTEGRATE.FIX_PATCHES,
             (

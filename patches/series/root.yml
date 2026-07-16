@@ -58,6 +58,7 @@
       "sha256": "1be114c12dde6aa9f67b79db9eb88d19355af29aa1445e5e6361dad6f18d9a19",
       "cwd": "kernel_platform/KernelSU",
       "strip": 1,
+      "fuzz": 1,
       "feature": "root.susfs",
       "root_variants": ["kernelsu"]
     },
