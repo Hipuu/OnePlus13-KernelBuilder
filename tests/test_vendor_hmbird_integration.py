@@ -254,6 +254,60 @@ class VendorHmbirdIntegrationTests(unittest.TestCase):
         )
         self.assertFalse((self.vendor / HELPER.STAMP_NAME).exists())
 
+    def test_projects_a_pinned_common_header_into_the_vendor_tree(self) -> None:
+        common = self.root / "common"
+        relative = "include/linux/sched/hmbird.h"
+        payload = b"#ifndef FIXTURE_HMBIRD_H\n#define FIXTURE_HMBIRD_H\n#endif\n"
+        self._write_bytes(common / relative, payload)
+        self._init_repository(common)
+        common_commit = self._git(common, "rev-parse", "HEAD")
+        common_blob = self._git(common, "rev-parse", f"HEAD:{relative}")
+        common_sha256 = hashlib.sha256(payload).hexdigest()
+        spec = dataclasses.replace(
+            self.spec,
+            output_sha256={**self.spec.output_sha256, relative: common_sha256},
+            common_commit=common_commit,
+            common_projection_blobs={relative: common_blob},
+            common_projection_sha256={relative: common_sha256},
+        )
+
+        with self._fixture_pins(spec):
+            document = HELPER.integrate(
+                self.vendor,
+                self.wild,
+                "fixture",
+                common_dir=common,
+                repository_root=self.builder,
+            )
+
+        self.assertEqual((self.vendor / relative).read_bytes(), payload)
+        self.assertEqual(document["inputs"]["common_commit"], common_commit)
+        self.assertEqual(document["inputs"]["common_projection_blobs"], {relative: common_blob})
+        self.assertEqual(
+            document["inputs"]["common_projection_sha256"],
+            {relative: common_sha256},
+        )
+
+    def test_required_common_projection_stops_before_vendor_mutation(self) -> None:
+        relative = "include/linux/sched/hmbird.h"
+        spec = dataclasses.replace(
+            self.spec,
+            common_commit="1" * 40,
+            common_projection_blobs={relative: "2" * 40},
+            common_projection_sha256={relative: "3" * 64},
+        )
+        before_status = self._git(self.vendor, "status", "--porcelain")
+        with self._fixture_pins(spec), self.assertRaisesRegex(
+            HELPER.IntegrationError, "requires the pinned common kernel checkout"
+        ):
+            HELPER.integrate(
+                self.vendor,
+                self.wild,
+                "fixture",
+                repository_root=self.builder,
+            )
+        self.assertEqual(self._git(self.vendor, "status", "--porcelain"), before_status)
+
     def test_main_patch_hash_and_scx_worktree_preimages_are_pinned(self) -> None:
         wrong = dataclasses.replace(self.spec, main_sha256="0" * 64)
         with self._fixture_pins(wrong), self.assertRaisesRegex(
@@ -357,6 +411,7 @@ class VendorHmbirdIntegrationTests(unittest.TestCase):
             self.vendor,
             self.wild,
             "oos16",
+            common_dir=None,
             repository_root=None,
             stamp=None,
         )

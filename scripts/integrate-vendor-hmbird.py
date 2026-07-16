@@ -63,6 +63,9 @@ class BaseSpec:
     compatibility_sha256: str
     preimage_blobs: Mapping[str, str]
     output_sha256: Mapping[str, str]
+    common_commit: str | None = None
+    common_projection_blobs: Mapping[str, str] | None = None
+    common_projection_sha256: Mapping[str, str] | None = None
 
 
 BASE_SPECS: Mapping[str, BaseSpec] = {
@@ -123,10 +126,18 @@ BASE_SPECS: Mapping[str, BaseSpec] = {
             "kernel/time/tick-sched.c": "254624e4bd431980ece3413a15f1b01ee444187a",
         },
         output_sha256={
+            "include/linux/sched/hmbird.h": "2573f411a73b07bfab3acf4a1981f41bc23d421e600edda8235a7504db7a3f22",
             "include/linux/sched/hmbird_version.h": "ef32bbad31e880838760768e131814c5e469316e112c0e74dc10d63e4f8ad679",
             "kernel/sched/hmbird.h": "906e2a940eeda0b2e34dec1db20dc2ae7d7a46b1bfc1b46fd51ecd3f3fc3e14f",
             "kernel/sched/hmbird/hmbird.c": "a2c3942d844d7fb27c9dddb25ff8931ff7cd7c324f659984080de2b02714bfae",
             "kernel/sched/hmbird/hmbird_sched.h": "a2f95df47a1463418f152b82ee80d159ecb2edc7bce9d5934f0bb62d5af0a7f1",
+        },
+        common_commit="5a5534458764ecedd480533dbdb9f13d4d45af25",
+        common_projection_blobs={
+            "include/linux/sched/hmbird.h": "a298ee6f64cca294b95ba53fe2ceecf423c78193",
+        },
+        common_projection_sha256={
+            "include/linux/sched/hmbird.h": "2573f411a73b07bfab3acf4a1981f41bc23d421e600edda8235a7504db7a3f22",
         },
     ),
 }
@@ -245,6 +256,76 @@ def _git_blob_oid(checkout: Path, relative: Path, label: str) -> str:
         detail = result.stderr.strip() or oid
         raise IntegrationError(f"failed to resolve pinned {label} blob {relative}: {detail}")
     return oid
+
+
+def _load_common_projections(
+    common_dir: Path | None,
+    spec: BaseSpec,
+) -> tuple[str | None, dict[Path, bytes]]:
+    expected_blobs = dict(spec.common_projection_blobs or {})
+    expected_sha256 = dict(spec.common_projection_sha256 or {})
+    if not spec.common_commit:
+        if expected_blobs or expected_sha256:
+            raise IntegrationError("common projection pins require a common kernel commit")
+        return None, {}
+    if not expected_blobs or set(expected_blobs) != set(expected_sha256):
+        raise IntegrationError(
+            "common projection blob and SHA-256 declarations must have identical non-empty paths"
+        )
+    if common_dir is None:
+        raise IntegrationError("this HMBIRD profile requires the pinned common kernel checkout")
+
+    common = _require_plain_directory(common_dir, "common kernel")
+    common_commit = _git_head(common, "common kernel")
+    if common_commit != spec.common_commit:
+        raise IntegrationError(
+            f"common kernel commit changed: expected {spec.common_commit}, got {common_commit}"
+        )
+
+    payloads: dict[Path, bytes] = {}
+    for raw_relative, expected_oid in sorted(expected_blobs.items()):
+        if "\\" in raw_relative:
+            raise IntegrationError(
+                f"common projection path contains a backslash: {raw_relative!r}"
+            )
+        candidate = PurePosixPath(raw_relative)
+        if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+            raise IntegrationError(f"common projection path escapes its tree: {raw_relative!r}")
+        relative = Path(*candidate.parts)
+        actual_oid = _git_blob_oid(common, relative, "common kernel projection")
+        if actual_oid != expected_oid:
+            raise IntegrationError(
+                f"common projection blob {raw_relative} changed: "
+                f"expected {expected_oid}, got {actual_oid}"
+            )
+        payload = _git_blob_bytes(common, relative, "common kernel projection")
+        actual_sha256 = sha256_bytes(payload)
+        if actual_sha256 != expected_sha256[raw_relative]:
+            raise IntegrationError(
+                f"common projection {raw_relative} changed: "
+                f"expected {expected_sha256[raw_relative]}, got {actual_sha256}"
+            )
+        payloads[relative] = payload
+    return common_commit, payloads
+
+
+def _install_common_projections(tree: Path, payloads: Mapping[Path, bytes]) -> None:
+    root = tree.resolve()
+    for relative, payload in sorted(payloads.items(), key=lambda item: item[0].as_posix()):
+        target = tree / relative
+        try:
+            target.resolve().relative_to(root)
+        except ValueError as exc:
+            raise IntegrationError(
+                f"common projection target escapes vendor tree: {relative.as_posix()}"
+            ) from exc
+        if target.exists() or target.is_symlink():
+            raise IntegrationError(
+                f"common projection target already exists: {relative.as_posix()}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        target.chmod(0o644)
 
 
 def _patch_utility() -> str:
@@ -544,6 +625,7 @@ def integrate(
     wild_dir: Path,
     base: str,
     *,
+    common_dir: Path | None = None,
     repository_root: Path | None = None,
     stamp: Path | None = None,
 ) -> dict[str, Any]:
@@ -567,6 +649,7 @@ def integrate(
         raise IntegrationError(
             f"Wild patch commit changed: expected {EXPECTED_WILD_COMMIT}, got {wild_commit}"
         )
+    common_commit, common_projections = _load_common_projections(common_dir, spec)
     stamp_path = stamp.resolve() if stamp is not None else source / STAMP_NAME
     try:
         stamp_path.relative_to(source)
@@ -602,7 +685,9 @@ def integrate(
     main_changes = _patch_changes(main_payload, "Wild Fengchi")
     _assert_pinned_preimages(source, spec, compatibility_changes)
 
-    all_targets = frozenset(compatibility_changes.targets | main_changes.targets)
+    all_targets = frozenset(
+        compatibility_changes.targets | main_changes.targets | set(common_projections)
+    )
     executable = _patch_utility()
     version = _gnu_patch_version(executable)
     with tempfile.TemporaryDirectory(prefix="op13-hmbird-preflight-") as temporary_name:
@@ -622,6 +707,7 @@ def integrate(
             "Wild Fengchi preflight",
             executable,
         )
+        _install_common_projections(sandbox, common_projections)
         _assert_outputs(sandbox, spec, main_changes)
 
     snapshots, directories = _snapshot_targets(source, all_targets)
@@ -640,6 +726,7 @@ def integrate(
             "Wild Fengchi",
             executable,
         )
+        _install_common_projections(source, common_projections)
         outputs = _assert_outputs(source, spec, main_changes)
         document: dict[str, Any] = {
             "schema_version": 1,
@@ -670,6 +757,14 @@ def integrate(
             ],
             "outputs": outputs,
         }
+        if common_commit is not None:
+            document["inputs"]["common_commit"] = common_commit
+            document["inputs"]["common_projection_blobs"] = dict(
+                sorted((spec.common_projection_blobs or {}).items())
+            )
+            document["inputs"]["common_projection_sha256"] = dict(
+                sorted((spec.common_projection_sha256 or {}).items())
+            )
         _atomic_json(stamp_path, document)
         return document
     except Exception:
@@ -681,6 +776,7 @@ def integrate(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", required=True, type=Path)
+    parser.add_argument("--common-dir", type=Path)
     parser.add_argument("--wild-dir", required=True, type=Path)
     parser.add_argument("--base", required=True, choices=tuple(sorted(BASE_SPECS)))
     parser.add_argument("--repository-root", type=Path)
@@ -695,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
             args.source_dir,
             args.wild_dir,
             args.base,
+            common_dir=args.common_dir,
             repository_root=args.repository_root,
             stamp=args.stamp,
         )

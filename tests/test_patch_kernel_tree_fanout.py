@@ -330,6 +330,10 @@ class KernelTreeManifestContractTests(unittest.TestCase):
             vendor["argv"],
         )
         self.assertIn(
+            "{source_dir}/kernel_platform/common",
+            vendor["argv"],
+        )
+        self.assertIn(
             "{dependency_dir:wild_kernel_patches}",
             vendor["argv"],
         )

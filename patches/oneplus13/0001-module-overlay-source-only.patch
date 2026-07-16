@@ -54,7 +54,7 @@ occur otherwise.
  kernel/module/module_overlay/overlay_files.h  |  22 +++
  7 files changed, 300 insertions(+)
  create mode 100644 kernel/module/module_overlay/Makefile
- create mode 100644 kernel/module/module_overlay/convert_overlay.sh
+ create mode 100755 kernel/module/module_overlay/convert_overlay.sh
  create mode 100644 kernel/module/module_overlay/module_intercept.c
  create mode 100644 kernel/module/module_overlay/modules/.gitkeep
  create mode 100644 kernel/module/module_overlay/overlay_files.h
@@ -159,7 +159,7 @@ index 0000000..ecc8072
 +	$(call if_changed,genoverlay)
 \ No newline at end of file
 diff --git a/kernel/module/module_overlay/convert_overlay.sh b/kernel/module/module_overlay/convert_overlay.sh
-new file mode 100644
+new file mode 100755
 index 0000000..e135300
 --- /dev/null
 +++ b/kernel/module/module_overlay/convert_overlay.sh
@@ -422,6 +422,4 @@ index 0000000..d9f5be9
 \ No newline at end of file
 -- 
 2.47.3
-
-
 

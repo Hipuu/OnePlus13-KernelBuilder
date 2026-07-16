@@ -26,6 +26,8 @@
         "{repo_root}/scripts/integrate-vendor-hmbird.py",
         "--source-dir",
         "{source_dir}/kernel_platform/msm-kernel",
+        "--common-dir",
+        "{source_dir}/kernel_platform/common",
         "--wild-dir",
         "{dependency_dir:wild_kernel_patches}",
         "--base",
@@ -36,6 +38,15 @@
       "expected_outputs": [
         "kernel_platform/msm-kernel/.op13-hmbird-vendor.json"
       ],
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
+      "id": "hmbird-cpufreq-api-oos15-cn",
+      "type": "apply",
+      "path": "patches/oneplus13/hmbird/cpufreq-api-oos15-cn.patch",
+      "cwd": "kernel_platform/common",
+      "strip": 1,
+      "bases": ["oos15-cn"],
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
