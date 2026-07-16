@@ -48,6 +48,17 @@ must be introduced as a lock update together with its source-tree, patch,
 version, and final-driver fingerprints; it is not accepted as an unchecked
 runtime override.
 
+The locked OOS15 China scheduler overlay contains an older
+`scx_sched_fork()` hook that addresses SCX storage removed by the selected
+Fengchi/HMBIRD patch. Full and Wild China builds therefore run one CN-only
+compatibility transform immediately after vendor HMBIRD integration. It
+requires modules commit `a85bac41e21a790e216039cde1d34a6c5d6416d1`, executable
+blob `625b526e0c234212152b46a0e5b874368f5a3902`, and full-file SHA-256
+`96b1a2cfe793bc33f1e6c942058767587d95ff4317b8811a305855fd570123af`.
+The postimage matches the fork-handler cleanup already present in the locked
+Global and OOS16 module sources and is independently fingerprinted; no
+KernelSU or SUSFS input is changed by this base-source repair.
+
 ## Reproducible inputs
 
 `dependencies/lock.yml` pins every dependency. Each release profile points to

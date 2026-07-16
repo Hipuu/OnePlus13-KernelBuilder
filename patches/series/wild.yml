@@ -41,6 +41,24 @@
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
+      "id": "hmbird-sched-assist-oos15-cn",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-oos15-cn-hmbird-overlay.py",
+        "--source-dir",
+        "{source_dir}",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        ".op13/oos15-cn-hmbird-overlay.json"
+      ],
+      "bases": ["oos15-cn"],
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
       "id": "hmbird-cpufreq-api-oos15-cn",
       "type": "apply",
       "path": "patches/oneplus13/hmbird/cpufreq-api-oos15-cn.patch",

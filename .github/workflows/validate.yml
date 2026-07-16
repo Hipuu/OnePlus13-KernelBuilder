@@ -442,6 +442,9 @@ jobs:
             cp out/source/kernel_platform/common/arch/arm64/configs/gki_defconfig \
               out/debug/canonical-gki-defconfig.txt
           fi
+          if [[ -d out/source/.op13 ]]; then
+            cp -a out/source/.op13 out/debug/source-context
+          fi
 
       - name: Upload patch diagnostics
         if: failure()

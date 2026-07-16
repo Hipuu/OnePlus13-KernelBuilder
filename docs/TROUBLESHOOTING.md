@@ -50,6 +50,15 @@ because the pinned SM8750 sources contain no implementation. An unknown Rust
 Binder symbol disappearing during `olddefconfig` is a hard configuration error,
 not evidence that the feature built.
 
+For OOS15 China HMBIRD errors in `sched_assist/sa_common.c` mentioning a
+missing `oplus_task_struct.scx`, `SCX_SLICE_DFL`, or `scx_task_stats`, inspect
+`.op13/oos15-cn-hmbird-overlay.json` in the source/patch diagnostics. The
+repository-owned CN compatibility gate accepts only the locked module commit,
+blob, executable mode, LF-only full-file preimage, and exact clean postimage.
+Do not restore deprecated sched_ext storage or weaken the preimage gate; an
+unexpected digest means the module lock and compatibility contract must be
+reviewed together.
+
 ## Disk or memory exhaustion
 
 For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,
