@@ -34,6 +34,29 @@ class ConfigurationTests(unittest.TestCase):
         device, _, _, features = discover_configs(self.root)
         self.assertEqual(device.official_cache_dir, "bazel-cache")
         self.assertEqual(features["test"].required_symbols["CONFIG_MT76x0U"], "m")
+        self.assertEqual(features["test"].kconfig_fragments[0].kernel_trees, ("common",))
+
+    def test_kconfig_fragment_can_target_both_locked_kernel_trees(self) -> None:
+        path = self.root / "configs" / "features" / "test.yml"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["kconfig_fragments"][0]["kernel_trees"] = ["common", "msm-kernel"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        _, _, _, features = discover_configs(self.root)
+        self.assertEqual(
+            features["test"].kconfig_fragments[0].kernel_trees,
+            ("common", "msm-kernel"),
+        )
+
+    def test_kconfig_fragment_rejects_invalid_kernel_tree_sets(self) -> None:
+        path = self.root / "configs" / "features" / "test.yml"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for invalid in ([], ["common", "common"], ["vendor"]):
+            with self.subTest(invalid=invalid):
+                data = json.loads(json.dumps(original))
+                data["kconfig_fragments"][0]["kernel_trees"] = invalid
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(BuildToolError, "kernel tree"):
+                    discover_configs(self.root)
 
     def test_official_build_cache_must_be_kernel_platform_relative(self) -> None:
         path = self.root / "configs" / "devices" / "oneplus13.yml"

@@ -1,0 +1,38 @@
+diff --git a/build_with_bazel.py b/build_with_bazel.py
+--- a/build_with_bazel.py
++++ b/build_with_bazel.py
+@@ -304,6 +304,7 @@
+         if self.dry_run:
+             self.user_opts.append("--nobuild")
+ 
++        gki_headers_to_restore = []
+         try:
+             if self.gki_headers:
+                 gki_files_path = os.path.join(self.workspace, 'msm-kernel/files_gki_aarch64.txt')
+@@ -315,5 +316,6 @@
+                     if ".h" in f:
+                         logging.info('GKI header file...%s', f)
+                         f=f.strip()
++                        gki_headers_to_restore.append(f)
+                         common_f = os.path.join(common_d, f)
+                         msm_f = os.path.join(msm_d, f)
+@@ -335,10 +337,15 @@
+                 self.run_targets(targets_to_build)
+         finally:
+             if self.gki_headers:
+-                status = subprocess.Popen(["git", "checkout",
+-                                     "--pathspec-from-file=files_gki_aarch64.txt"],
+-                                    cwd=os.path.join(self.workspace, "msm-kernel"))
+-                status.wait()
++                status = subprocess.run(
++                    ["git", "checkout", "--pathspec-from-file=-"],
++                    cwd=os.path.join(self.workspace, "msm-kernel"),
++                    input="".join(
++                        f"{path}\n" for path in gki_headers_to_restore
++                    ),
++                    text=True,
++                    check=False,
++                )
+                 if status.returncode != 0:
+                     logging.error("Failed to restore headers from symlinks")
+                     logging.error("You might want to check your msm-kernel tree")

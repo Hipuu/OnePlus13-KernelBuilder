@@ -3,67 +3,92 @@
   "id": "common",
   "operations": [
     {
+      "id": "oneplus-build-restore-only-gki-headers",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-oneplus-build-cleanup.py",
+        "--source-dir",
+        "{source_dir}/kernel_platform/msm-kernel",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/msm-kernel/.op13-build-with-bazel-cleanup.json"
+      ]
+    },
+    {
       "id": "kbuild-o3-choice",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0001-kbuild-add-o3-optimization-choice.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "performance.optimization_o2_o3"
     },
     {
       "id": "copy-baseband-guard-source",
       "type": "copy",
+      "kernel_trees": ["common", "msm-kernel"],
       "dependency": "baseband_guard",
       "path": ".",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "destination": "security/baseband-guard",
       "feature": "oneplus.baseband_guard"
     },
     {
       "id": "pin-baseband-guard-build-version",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0002-baseband-guard-reproducible-version.patch",
-      "cwd": "kernel_platform/common/security/baseband-guard",
+      "cwd": "kernel_platform/{kernel_tree}",
+      "directory": "security/baseband-guard",
       "strip": 1,
       "feature": "oneplus.baseband_guard"
     },
     {
       "id": "wire-baseband-guard-lsm",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0003-security-integrate-baseband-guard.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.baseband_guard"
     },
     {
       "id": "bbrv3-android15-6.6",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0004-bbrv3-android15-6.6-oneplus.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "network.bbrv3"
     },
     {
       "id": "bbrv3-source",
       "type": "copy",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/bbrv3/tcp_bbr3.c",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "destination": "net/ipv4/tcp_bbr3.c",
       "feature": "network.bbrv3"
     },
     {
       "id": "droidspaces-oneplus-6.6",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0005-droidspaces-oneplus-6.6.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.droidspaces"
     },
     {
       "id": "fake-proc-config-support",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/common/0006-fake-config-oneplus-6.6.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.fake_config"
     }

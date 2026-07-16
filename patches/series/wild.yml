@@ -17,54 +17,81 @@
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
+      "id": "hmbird-fengchi-oneplus13-vendor",
+      "type": "exec",
+      "dependency": "wild_kernel_patches",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-vendor-hmbird.py",
+        "--source-dir",
+        "{source_dir}/kernel_platform/msm-kernel",
+        "--wild-dir",
+        "{dependency_dir:wild_kernel_patches}",
+        "--base",
+        "{base}",
+        "--repository-root",
+        "{repo_root}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/msm-kernel/.op13-hmbird-vendor.json"
+      ],
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
       "id": "hmbird-device-tree-overwriter",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "dependency": "wild_kernel_patches",
       "path": "oneplus/hmbird/overwriter.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
-      "fuzz": 1,
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
       "id": "hmbird-ogki-device-tree-config",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "dependency": "wild_kernel_patches",
       "path": "oneplus/hmbird/hmbird_config.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
       "id": "module-overlay-source-only",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0001-module-overlay-source-only.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.module_overlay_interception"
     },
     {
       "id": "ntsync-android15-6.6-compat",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0002-ntsync-android15-6.6-wiring.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.ntsync"
     },
     {
       "id": "ntsync-implementation",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "dependency": "wild_kernel_patches",
       "path": "common/ntsync/ntsync_base.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.ntsync"
     },
     {
       "id": "unicode-normalization-bypass-fix",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0003-unicode-normalization-fix.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "oneplus.unicode_fix"
     },
@@ -125,16 +152,18 @@
     {
       "id": "disable-cache-hot-buddy",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0005-disable-cache-hot-buddy-oneplus-6.6.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "performance.memory"
     },
     {
       "id": "increase-socket-memory-packets",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0004-increase-sk-mem-packets-oneplus-6.6.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "performance.memory"
     },
@@ -204,8 +233,9 @@
     {
       "id": "cpufreq-minimum-limit-hook",
       "type": "apply",
+      "kernel_trees": ["common", "msm-kernel"],
       "path": "patches/oneplus13/0006-cpufreq-minimum-limit-oneplus-6.6.patch",
-      "cwd": "kernel_platform/common",
+      "cwd": "kernel_platform/{kernel_tree}",
       "strip": 1,
       "feature": "performance.scheduler"
     },

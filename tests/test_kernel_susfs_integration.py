@@ -260,7 +260,9 @@ class KernelSusfsIntegrationTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             ["patch"], 0, "patching file fs/Makefile\n", ""
         )
-        with mock.patch.object(HELPER.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(
+            HELPER, "_patch_utility", return_value="patch"
+        ), mock.patch.object(HELPER.subprocess, "run", return_value=completed) as run:
             return_code, output = HELPER._run_patch(self.common, self.susfs / HELPER.PATCH_RELATIVE)
         self.assertEqual(return_code, 0)
         self.assertIn("patching file", output)
@@ -280,6 +282,20 @@ class KernelSusfsIntegrationTests(unittest.TestCase):
             stderr=subprocess.STDOUT,
             check=False,
         )
+
+    def test_patch_utility_finds_git_for_windows_bundle(self) -> None:
+        git = self.root / "Git" / "cmd" / "git.exe"
+        patch = self.root / "Git" / "usr" / "bin" / "patch.exe"
+        git.parent.mkdir(parents=True)
+        patch.parent.mkdir(parents=True)
+        git.write_bytes(b"git")
+        patch.write_bytes(b"patch")
+
+        def locate(name: str) -> str | None:
+            return None if name == "patch" else str(git)
+
+        with mock.patch.object(HELPER.shutil, "which", side_effect=locate):
+            self.assertEqual(Path(HELPER._patch_utility()), patch.resolve())
 
     def test_cli_prints_the_deterministic_document(self) -> None:
         expected = {"base": "oos16", "schema_version": 1}

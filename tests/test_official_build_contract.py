@@ -370,6 +370,16 @@ class OfficialBuildContractTests(unittest.TestCase):
             "required_symbols": {"CONFIG_TEST": "y"},
             "config_sha256": sha256_file(requested_config),
             "requested_config_sha256": sha256_file(requested_config),
+            "kernel_tree_configs": {
+                "common": {
+                    "required_symbols": {"CONFIG_TEST": "y"},
+                    "requested_config_sha256": sha256_file(requested_config),
+                },
+                "msm-kernel": {
+                    "required_symbols": {"CONFIG_MODULES": "y"},
+                    "requested_config_sha256": "a" * 64,
+                },
+            },
             "module_outputs": {
                 "requested_paths": ["drivers/net/can/vcan.ko"],
                 "active_paths": [],

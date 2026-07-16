@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the pinned SUSFS Android 15 / 6.6 patch to a common kernel tree.
+"""Apply the pinned SUSFS Android 15 / 6.6 patch to a locked kernel tree.
 
 The upstream patch expects a small amount of compatibility context that is
 not identical across every OnePlus release.  This helper prepares only those
@@ -221,17 +221,26 @@ def _residue(root: Path) -> list[Path]:
     return sorted(matches, key=lambda item: item.relative_to(root).as_posix())
 
 
+def _patch_utility() -> str:
+    executable = shutil.which("patch")
+    if executable:
+        return executable
+    git = shutil.which("git")
+    if git:
+        bundled = Path(git).resolve().parents[1] / "usr" / "bin" / "patch.exe"
+        if bundled.is_file():
+            return str(bundled)
+    raise IntegrationError("GNU patch is required")
+
+
 def _gnu_patch_version() -> str:
-    try:
-        result = subprocess.run(
-            ["patch", "--version"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise IntegrationError("GNU patch is required") from exc
+    result = subprocess.run(
+        [_patch_utility(), "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
     first_line = result.stdout.splitlines()[0] if result.stdout else ""
     if result.returncode != 0 or "GNU patch" not in first_line:
         raise IntegrationError(f"unsupported patch implementation: {first_line!r}")
@@ -240,7 +249,7 @@ def _gnu_patch_version() -> str:
 
 def _run_patch(tree: Path, patch_file: Path) -> tuple[int, str]:
     command = [
-        "patch",
+        _patch_utility(),
         "-p1",
         "--forward",
         "--batch",
@@ -376,7 +385,7 @@ def _assert_symbols(source: Path, copied: list[tuple[Path, Path]]) -> list[str]:
 def integrate(source_dir: Path, susfs_dir: Path, base: str) -> dict[str, Any]:
     if base not in BASES:
         raise IntegrationError(f"unsupported OnePlus base {base!r}")
-    source = _require_plain_directory(source_dir, "common kernel")
+    source = _require_plain_directory(source_dir, "kernel tree")
     susfs = _require_plain_directory(susfs_dir, "SUSFS")
     stamp = source / STAMP_NAME
     if stamp.exists() or stamp.is_symlink():
@@ -384,7 +393,7 @@ def integrate(source_dir: Path, susfs_dir: Path, base: str) -> dict[str, Any]:
     existing_residue = _residue(source)
     if existing_residue:
         relative = [path.relative_to(source).as_posix() for path in existing_residue]
-        raise IntegrationError(f"common kernel contains patch residue: {relative}")
+        raise IntegrationError(f"kernel tree contains patch residue: {relative}")
 
     version = _kernel_version(source)
     patch_file = _require_plain_file(susfs, PATCH_RELATIVE, "SUSFS Android 15 / 6.6 patch")

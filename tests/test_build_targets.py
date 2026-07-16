@@ -16,6 +16,7 @@ from lib.build import (
     build_external_modules,
     build_kernel,
     configure_kernel,
+    parse_fragment,
 )
 from lib.config import KconfigFragment, discover_configs
 from lib.context import load_context, new_context, write_context
@@ -110,6 +111,66 @@ class BuildTargetContractTests(unittest.TestCase):
             [(self.root / "patches" / "common" / "test.config").resolve()],
         )
 
+    def test_fragment_kernel_tree_projection_is_explicit(self) -> None:
+        shared_fragment = self.root / "patches" / "common" / "shared.config"
+        shared_fragment.write_text("CONFIG_SHARED=y\n", encoding="utf-8")
+        feature = replace(
+            self.feature,
+            kconfig_fragments=(
+                *self.feature.kconfig_fragments,
+                KconfigFragment(
+                    path="patches/common/shared.config",
+                    scope="common",
+                    required=True,
+                    kernel_trees=("common", "msm-kernel"),
+                ),
+            ),
+        )
+        self.assertEqual(
+            [path.name for path in _fragment_paths(self.root, feature, "mixed", "common")],
+            ["test.config", "shared.config"],
+        )
+        self.assertEqual(
+            [path.name for path in _fragment_paths(self.root, feature, "mixed", "msm-kernel")],
+            ["shared.config"],
+        )
+        with self.assertRaisesRegex(BuildToolError, "unsupported Kconfig kernel tree"):
+            _fragment_paths(self.root, feature, "mixed", "vendor")
+
+    def test_configuration_records_common_and_msm_requests_independently(self) -> None:
+        self._configure("mixed")
+        configuration = load_context(self.context_path)["configuration"]
+        tree_configs = configuration["kernel_tree_configs"]
+        self.assertEqual(set(tree_configs), {"common", "msm-kernel"})
+        self.assertIn("CONFIG_TEST_FEATURE", tree_configs["common"]["required_symbols"])
+        self.assertNotIn(
+            "CONFIG_TEST_FEATURE",
+            tree_configs["msm-kernel"]["required_symbols"],
+        )
+        for kernel_tree in ("common", "msm-kernel"):
+            self.assertRegex(
+                tree_configs[kernel_tree]["requested_config_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+
+    def test_nethunter_projects_only_its_base_fragment_to_msm(self) -> None:
+        _, _, _, features = discover_configs(ROOT)
+        feature = features["nethunter"]
+        msm_fragments = _fragment_paths(ROOT, feature, "mixed", "msm-kernel")
+
+        self.assertEqual(
+            [path.name for path in msm_fragments],
+            ["config-nethunter-base.config"],
+        )
+        msm_symbols = parse_fragment(msm_fragments[0])
+        self.assertEqual(msm_symbols["CONFIG_KSU"], "y")
+        self.assertEqual(msm_symbols["CONFIG_KSU_SUSFS"], "y")
+        self.assertEqual(msm_symbols["CONFIG_BBG"], "y")
+        self.assertEqual(msm_symbols["CONFIG_TCP_CONG_BBR3"], "y")
+        self.assertNotIn("CONFIG_BT_HCIBTUSB", msm_symbols)
+        self.assertNotIn("CONFIG_CAN", msm_symbols)
+        self.assertNotIn("CONFIG_MEMKERNEL", msm_symbols)
+
     def test_kernel_phase_rejects_modules_only_configuration(self) -> None:
         self._configure("mixed")
         context = load_context(self.context_path)
@@ -201,6 +262,16 @@ class BuildTargetContractTests(unittest.TestCase):
             "optimization": "O2",
             "lto": "thin",
             "config_sha256": "a" * 64,
+            "kernel_tree_configs": {
+                kernel_tree: {
+                    "fragments": [],
+                    "forced_symbols": {},
+                    "required_symbols": {},
+                    "requested_config_sha256": "4" * 64,
+                    "source_defconfig_sha256": "5" * 64,
+                }
+                for kernel_tree in ("common", "msm-kernel")
+            },
             "module_outputs": module_outputs,
         }
         base = {

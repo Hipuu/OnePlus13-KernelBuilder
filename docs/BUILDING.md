@@ -19,8 +19,9 @@ are never copied through blindly.
 
 After SUSFS integration, an exact preimage-checked transform pins the versions
 that upstream would derive from full Git history: KernelSU `32525` and
-KernelSU-Next `33214` / `v3.3.0`. The final 91-file or 92-file driver subtree
-must match its audited digest before it is installed into `common/drivers`.
+KernelSU-Next dev `33207` / nearest tag `v3.2.0`. The final 91-file or 92-file
+driver subtree must match its audited digest before it is installed into both
+locked kernel trees.
 For KernelSU-Next, the compatibility sequence is locked to the audited
 `Hipuu/OnePlus_KernelSU_SUSFS` snapshot `7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c`:
 the SUSFS v2.2.0 base patch, the six exact reject repairs,
@@ -41,8 +42,8 @@ as the MT76 USB drivers.
 
 The currently audited root commits are KernelSU
 `b0bc817b4e966aa6aa830834eaf6ef765d821d40`, KernelSU-Next
-`3b18216f71df189ab3d1b1ce0bdb21be1268e771`, and SUSFS
-`e7b28525f69ca5864bed7db51f77663f5adfe218`. A different requested commit
+`1a0ef4898568a013b51d74ceb5593b83725bfb78`, and SUSFS
+`a8c720c42ca46fca13179280b13aa13c9fbe1562`. A different requested commit
 must be introduced as a lock update together with its source-tree, patch,
 version, and final-driver fingerprints; it is not accepted as an unchecked
 runtime override.
@@ -124,7 +125,7 @@ gh workflow run build.yml --repo Hipuu/OnePlus13-KernelBuilder \
   -f base=oos15-global \
   -f root=kernelsu \
   -f kernelsu_commit=b0bc817b4e966aa6aa830834eaf6ef765d821d40 \
-  -f susfs_commit=e7b28525f69ca5864bed7db51f77663f5adfe218 \
+  -f susfs_commit=a8c720c42ca46fca13179280b13aa13c9fbe1562 \
   -f profile=wild \
   -f target=kernel \
   -f optimization=O2 \

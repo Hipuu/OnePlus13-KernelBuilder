@@ -186,6 +186,7 @@ class KconfigFragment:
     path: str
     scope: str
     required: bool
+    kernel_trees: tuple[str, ...] = ("common",)
 
 
 @dataclass(frozen=True)
@@ -376,7 +377,21 @@ def load_feature_profile(path: Path) -> FeatureProfile:
         required = entry.get("required")
         if not isinstance(required, bool):
             raise BuildToolError(f"{path}: Kconfig fragment required must be boolean")
-        fragments.append(KconfigFragment(fragment_path, scope, required))
+        tree_values = entry.get("kernel_trees", ["common"])
+        kernel_trees = tuple(
+            _string(value, f"{path}:kconfig_fragments[{index}].kernel_trees")
+            for value in _list(
+                tree_values,
+                f"{path}:kconfig_fragments[{index}].kernel_trees",
+            )
+        )
+        if not kernel_trees or len(set(kernel_trees)) != len(kernel_trees):
+            raise BuildToolError(
+                f"{path}: Kconfig fragment kernel trees must be non-empty and unique"
+            )
+        if not set(kernel_trees).issubset({"common", "msm-kernel"}):
+            raise BuildToolError(f"{path}: unsupported Kconfig kernel tree")
+        fragments.append(KconfigFragment(fragment_path, scope, required, kernel_trees))
     symbols_raw = _mapping(raw.get("required_symbols"), f"{path}:required_symbols")
     symbols: dict[str, str] = {}
     for name, value in symbols_raw.items():

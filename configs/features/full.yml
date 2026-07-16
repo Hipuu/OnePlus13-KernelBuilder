@@ -71,7 +71,8 @@
     {
       "path": "patches/common/config-wild.config",
       "scope": "common",
-      "required": true
+      "required": true,
+      "kernel_trees": ["common", "msm-kernel"]
     },
     {
       "path": "patches/nethunter/config-nethunter-common.config",

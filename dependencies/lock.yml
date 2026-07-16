@@ -46,16 +46,17 @@
     "kernelsu_next": {
       "kind": "git",
       "url": "https://github.com/KernelSU-Next/KernelSU-Next.git",
-      "ref": "refs/tags/v3.3.0",
-      "commit": "3b18216f71df189ab3d1b1ce0bdb21be1268e771",
+      "ref": "1a0ef4898568a013b51d74ceb5593b83725bfb78",
+      "commit": "1a0ef4898568a013b51d74ceb5593b83725bfb78",
+      "version": "dev@1a0ef489",
       "license": "GPL-2.0-only",
       "required_for": ["root-ksun"]
     },
     "susfs": {
       "kind": "git",
       "url": "https://gitlab.com/simonpunk/susfs4ksu.git",
-      "ref": "e7b28525f69ca5864bed7db51f77663f5adfe218",
-      "commit": "e7b28525f69ca5864bed7db51f77663f5adfe218",
+      "ref": "a8c720c42ca46fca13179280b13aa13c9fbe1562",
+      "commit": "a8c720c42ca46fca13179280b13aa13c9fbe1562",
       "version": "v2.2.0",
       "license": "GPL-2.0-only",
       "required_for": ["susfs"]

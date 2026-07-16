@@ -37,24 +37,24 @@ PINS: dict[str, dict[str, Any]] = {
         "post_sha256": "b374339ca45c9281f0f3c97781f01736e51334afe712403cfe7c491ae6c70158",
     },
     "kernelsu-next": {
-        "commit": "3b18216f71df189ab3d1b1ce0bdb21be1268e771",
-        "version": 33214,
-        "tag": "v3.3.0",
-        "history_count": 3214,
+        "commit": "1a0ef4898568a013b51d74ceb5593b83725bfb78",
+        "version": 33207,
+        "tag": "v3.2.0",
+        "history_count": 3207,
         "pre_sha256": "9a309a41d71f0af221ab9300f1628ee6586c82aa4e786ea72e17c898f45c28d4",
         "block_start": 'LPATH := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin\n',
         "block_sha256": "15e99a8be8c7f1290e0e299b7ca95153ce028dca644bf4dd7d321e6fac082f55",
         "replacement": (
-            "# Pinned source-only metadata for KernelSU-Next v3.3.0 "
-            "(3b18216f71df189ab3d1b1ce0bdb21be1268e771)\n"
-            "KSU_VERSION := 33214\n"
-            "KSU_VERSION_TAG := v3.3.0\n"
+            "# Pinned source-only metadata for KernelSU-Next dev "
+            "(1a0ef4898568a013b51d74ceb5593b83725bfb78)\n"
+            "KSU_VERSION := 33207\n"
+            "KSU_VERSION_TAG := v3.2.0\n"
             "$(info -- KernelSU-Next version: $(KSU_VERSION))\n"
             "ccflags-y += -DKSU_VERSION=$(KSU_VERSION)\n"
             "$(info -- KernelSU-Next tag: $(KSU_VERSION_TAG))\n"
             'ccflags-y += -DKSU_VERSION_TAG=\\"$(KSU_VERSION_TAG)\\"\n\n'
         ),
-        "post_sha256": "1af629c61c6f03dcaedc7b9500884b8a08e099cd6b0d04541241e67273967b5f",
+        "post_sha256": "cf9a57a9526334d2783ebd0a72566494bb8c5885890d5b548703196a7a636438",
     },
 }
 STAGE_STAMP = ".op13-root-stage.json"

@@ -122,7 +122,7 @@ class KsunIntegrationTests(unittest.TestCase):
             HELPER.REFERENCE_COMMIT,
             "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c",
         )
-        self.assertEqual(HELPER.EXPECTED_KSUN_COMMIT, "3b18216f71df189ab3d1b1ce0bdb21be1268e771")
+        self.assertEqual(HELPER.EXPECTED_KSUN_COMMIT, "1a0ef4898568a013b51d74ceb5593b83725bfb78")
         self.assertEqual(
             HELPER.FIX_PATCHES,
             (
@@ -165,12 +165,28 @@ class KsunIntegrationTests(unittest.TestCase):
 
     def test_patch_command_disables_mismatch_backups(self) -> None:
         completed = mock.Mock(returncode=1, stdout="expected partial application")
-        with mock.patch.object(HELPER.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(
+            HELPER, "_patch_utility", return_value="patch"
+        ), mock.patch.object(HELPER.subprocess, "run", return_value=completed) as run:
             return_code, output = HELPER._run_patch(self.ksun, self.susfs / HELPER.SUSFS_PATCH)
         command = run.call_args.args[0]
         self.assertIn("--no-backup-if-mismatch", command)
         self.assertEqual(return_code, 1)
         self.assertEqual(output, "expected partial application")
+
+    def test_patch_utility_finds_git_for_windows_bundle(self) -> None:
+        git = self.root / "Git" / "cmd" / "git.exe"
+        patch = self.root / "Git" / "usr" / "bin" / "patch.exe"
+        git.parent.mkdir(parents=True)
+        patch.parent.mkdir(parents=True)
+        git.write_bytes(b"git")
+        patch.write_bytes(b"patch")
+
+        def locate(name: str) -> str | None:
+            return None if name == "patch" else str(git)
+
+        with mock.patch.object(HELPER.shutil, "which", side_effect=locate):
+            self.assertEqual(Path(HELPER._patch_utility()), patch.resolve())
 
 
 if __name__ == "__main__":

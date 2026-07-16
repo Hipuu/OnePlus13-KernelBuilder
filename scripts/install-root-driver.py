@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install an audited KernelSU kernel subtree into the common driver tree."""
+"""Install an audited KernelSU subtree into one locked kernel driver tree."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ EXECUTABLE_PATHS = {
 EXPECTED_TREES = {
     "kernelsu": {
         "file_count": 91,
-        "tree_sha256": "4e9b2c14446e42afeab9f7cf07c34761df3c7c38dd9ef84d49f7c40421d8aa6b",
+        "tree_sha256": "c32526dbc9392b46ee6f516abfcde1adf72cfc87ea2f8c7f32b1be2fa87a5c69",
     },
     "kernelsu-next": {
         "file_count": 92,
-        "tree_sha256": "e640c22f0e82c931b9bdecb6c8142e271da23015676c88c110eea519bbdc70d7",
+        "tree_sha256": "7047e1e47aef84f8740f3aeef7908d2a251d61aab737dfcf699297b90cc98208",
     },
 }
 

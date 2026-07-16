@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integrate SUSFS v2.2.0 into the pinned KernelSU-Next v3.3.0 tree.
+"""Integrate pinned SUSFS v2.2.0 into the selected KernelSU-Next dev tree.
 
 This helper intentionally models the audited, partially-rejecting upstream
 patch sequence.  Any change to that reject fingerprint, patch order, or final
@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,8 +30,8 @@ EXPECTED_REJECTS = {
 }
 REFERENCE_REPOSITORY = "Hipuu/OnePlus_KernelSU_SUSFS"
 REFERENCE_COMMIT = "7ea1d5058255fba3cf8e836d0c6c27c9546b7f6c"
-EXPECTED_KSUN_COMMIT = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
-EXPECTED_SUSFS_COMMIT = "e7b28525f69ca5864bed7db51f77663f5adfe218"
+EXPECTED_KSUN_COMMIT = "1a0ef4898568a013b51d74ceb5593b83725bfb78"
+EXPECTED_SUSFS_COMMIT = "a8c720c42ca46fca13179280b13aa13c9fbe1562"
 EXPECTED_WILD_COMMIT = "2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f"
 STAGE_STAMP = ".op13-root-stage.json"
 FIX_PATCHES = (
@@ -47,7 +48,7 @@ SUSFS_PATCH = Path("kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch")
 WILD_FIX_DIR = Path("next/susfs_fix_patches/v2.2.0")
 HOOK_MODE_PATH = Path("kernel/supercall/dispatch.c")
 HOOK_MODE_STATEMENT = 'strscpy(cmd.mode, "Inline (SuSFS)", sizeof(cmd.mode));'
-EXPECTED_SUSFS_SHA256 = "1be114c12dde6aa9f67b79db9eb88d19355af29aa1445e5e6361dad6f18d9a19"
+EXPECTED_SUSFS_SHA256 = "4996b4d8010986c1c6b970a54319171e49807391997ff472c5d598d6c4456eef"
 EXPECTED_OVERWRITE_HOOK_MODE_SHA256 = "86c6bf22abd6a86577fa9d064a976f8eabd13cc649eaa4bf574a5f2b3f2ecde9"
 EXPECTED_FIX_SHA256 = {
     "fix_Kbuild.patch": "e6ac82983b97ee0144c8c7b72572f48ec9556c14d353c223d26736e480d62b69",
@@ -110,9 +111,21 @@ def _residue(root: Path, suffix: str) -> set[str]:
     }
 
 
+def _patch_utility() -> str:
+    executable = shutil.which("patch")
+    if executable:
+        return executable
+    git = shutil.which("git")
+    if git:
+        bundled = Path(git).resolve().parents[1] / "usr" / "bin" / "patch.exe"
+        if bundled.is_file():
+            return str(bundled)
+    raise IntegrationError("GNU patch is required")
+
+
 def _run_patch(tree: Path, patch_file: Path) -> tuple[int, str]:
     command = [
-        "patch",
+        _patch_utility(),
         "-p1",
         "--forward",
         "--batch",
@@ -187,16 +200,13 @@ def _run_patch_payload(tree: Path, payload: bytes, filename: str) -> tuple[int, 
 
 
 def _gnu_patch_version() -> str:
-    try:
-        result = subprocess.run(
-            ["patch", "--version"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise IntegrationError("GNU patch is required") from exc
+    result = subprocess.run(
+        [_patch_utility(), "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
     first_line = result.stdout.splitlines()[0] if result.stdout else ""
     if result.returncode != 0 or "GNU patch" not in first_line:
         raise IntegrationError(f"unsupported patch implementation: {first_line!r}")

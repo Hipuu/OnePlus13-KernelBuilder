@@ -1,0 +1,142 @@
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1523,7 +1523,6 @@
+ 	 */
+ 	struct callback_head		l1d_flush_kill;
+ #endif
+-
+ #ifdef CONFIG_SLIM_SCHED
+ 	ANDROID_KABI_USE(1, unsigned long sched_prop);
+ 	ANDROID_KABI_USE(2, struct sched_ext_entity *scx);
+diff --git a/include/linux/sched/ext.h b/include/linux/sched/ext.h
+--- a/include/linux/sched/ext.h
++++ b/include/linux/sched/ext.h
+@@ -569,6 +569,8 @@
+ 	u16				demand_scaled;
+ 	void 			*sdsq;
+ };
++
++
+ 
+ /*
+  * The following is embedded in task_struct and contains all fields necessary
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -7385,11 +7385,10 @@
+ 		} else {
+ 			if (dl_prio(oldprio))
+ 				p->dl.pi_se = &p->dl;
+-			if (rt_prio(oldprio))
++			else if (rt_prio(oldprio))
+ 				p->rt.timeout = 0;
+ 			else if (!task_has_idle_policy(p))
+ 				reweight_task(p, prio - MAX_RT_PRIO);
+-
+ 		}
+ 
+ 		__setscheduler_prio(p, prio);
+diff --git a/kernel/sched/ext.c b/kernel/sched/ext.c
+--- a/kernel/sched/ext.c
++++ b/kernel/sched/ext.c
+@@ -284,6 +284,8 @@
+ 	__ret;									\
+ })
+ 
++//#include "./slim_walt.c"
++
+ /* @mask is constant, always inline to cull unnecessary branches */
+ static __always_inline bool scx_kf_allowed(u32 mask)
+ {
+@@ -602,6 +604,7 @@
+ 		container_of(node_a, struct sched_ext_entity, dsq_node.priq);
+ 	const struct sched_ext_entity *b =
+ 		container_of(node_b, struct sched_ext_entity, dsq_node.priq);
++
+ 	return time_before64(a->dsq_vtime, b->dsq_vtime);
+ }
+ 
+@@ -674,6 +677,7 @@
+ 	} else {
+ 		list_del_init(&p->scx->dsq_node.fifo);
+ 	}
++
+ }
+ 
+ static bool task_linked_on_dsq(struct task_struct *p)
+@@ -1015,6 +1019,9 @@
+ 		SCX_CALL_OP_TASK(SCX_KF_REST, stopping, p, false);
+ 	}
+ 
++	//if(task_current(rq, p))
++	//	scx_update_task_ravg(p, rq, PUT_PREV_TASK, rq->clock);
++
+ 	if (SCX_HAS_OP(quiescent))
+ 		SCX_CALL_OP_TASK(SCX_KF_REST, quiescent, p, deq_flags);
+ 
+@@ -1648,6 +1655,9 @@
+ 	/* see dequeue_task_scx() on why we skip when !QUEUED */
+ 	if (SCX_HAS_OP(running) && (p->scx->flags & SCX_TASK_QUEUED))
+ 		SCX_CALL_OP_TASK(SCX_KF_REST, running, p);
++
++	//if(p->scx->flags & SCX_TASK_QUEUED)
++	//	scx_update_task_ravg(p, rq, PICK_NEXT_TASK, rq->clock);
+ 
+ 	watchdog_unwatch_task(p, true);
+ 
+@@ -1705,6 +1715,10 @@
+ 	if (SCX_HAS_OP(stopping) && (p->scx->flags & SCX_TASK_QUEUED))
+ 		SCX_CALL_OP_TASK(SCX_KF_REST, stopping, p, true);
+ 
++	//if(p->scx->flags & SCX_TASK_QUEUED)
++	//	scx_update_task_ravg(p, rq, PUT_PREV_TASK, rq->clock);
++
++
+ 	/*
+ 	 * If we're being called from put_prev_task_balance(), balance_scx() may
+ 	 * have decided that @p should keep running.
+@@ -2140,7 +2154,7 @@
+ static void task_tick_scx(struct rq *rq, struct task_struct *curr, int queued)
+ {
+ 	update_curr_scx(rq);
+-
++	//scx_update_task_ravg(curr, rq, TASK_UPDATE, rq->clock);
+ 	/*
+ 	 * While disabling, always resched and refresh core-sched timestamp as
+ 	 * we can't trust the slice management or ops.core_sched_before().
+@@ -2175,6 +2189,7 @@
+ 			return ret;
+ 		}
+ 	}
++	//scx_sched_init_task(p);
+ 
+ 	if (p->scx->disallow) {
+ 		struct rq *rq;
+@@ -2796,6 +2811,8 @@
+ 		ret = -EBUSY;
+ 		goto err_unlock;
+ 	}
++
++	//slim_walt_enable(true);
+ 
+ 	/*
+ 	 * Set scx_ops, transition to PREPPING and clear exit info to arm the
+diff --git a/kernel/sched/ext.h b/kernel/sched/ext.h
+--- a/kernel/sched/ext.h
++++ b/kernel/sched/ext.h
+@@ -153,12 +153,14 @@
+ 	__scx_notify_pick_next_task(rq, p, active);
+ }
+ 
++//extern void scx_scheduler_tick(void);
+ static inline void scx_notify_sched_tick(void)
+ {
+ 	unsigned long last_check;
+ 
+ 	if (!scx_enabled())
+ 		return;
++	//scx_scheduler_tick();
+ 
+ 	last_check = scx_watchdog_timestamp;
+ 	if (unlikely(time_after(jiffies, last_check + scx_watchdog_timeout))) {

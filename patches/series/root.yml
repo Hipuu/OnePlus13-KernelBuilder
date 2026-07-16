@@ -55,7 +55,7 @@
       "type": "apply",
       "dependency": "susfs",
       "path": "kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch",
-      "sha256": "1be114c12dde6aa9f67b79db9eb88d19355af29aa1445e5e6361dad6f18d9a19",
+      "sha256": "4996b4d8010986c1c6b970a54319171e49807391997ff472c5d598d6c4456eef",
       "cwd": "kernel_platform/KernelSU",
       "strip": 1,
       "fuzz": 1,
@@ -86,20 +86,21 @@
     {
       "id": "patch-common-susfs",
       "type": "exec",
+      "kernel_trees": ["common", "msm-kernel"],
       "dependencies": ["susfs"],
       "cwd": ".",
       "argv": [
         "python3",
         "{repo_root}/scripts/integrate-kernel-susfs.py",
         "--source-dir",
-        "{source_dir}/kernel_platform/common",
+        "{source_dir}/kernel_platform/{kernel_tree}",
         "--susfs-dir",
         "{dependency_dir:susfs}",
         "--base",
         "{base}"
       ],
       "expected_outputs": [
-        "kernel_platform/common/.op13-susfs-kernel.json"
+        "kernel_platform/{kernel_tree}/.op13-susfs-kernel.json"
       ],
       "feature": "root.susfs",
       "root_variants": ["kernelsu", "kernelsu-next"]
@@ -145,6 +146,7 @@
     {
       "id": "install-kernelsu-driver",
       "type": "exec",
+      "kernel_trees": ["common", "msm-kernel"],
       "cwd": ".",
       "argv": [
         "python3",
@@ -154,18 +156,19 @@
         "--root-dir",
         "{source_dir}/kernel_platform/KernelSU",
         "--destination",
-        "{source_dir}/kernel_platform/common/drivers/kernelsu",
+        "{source_dir}/kernel_platform/{kernel_tree}/drivers/kernelsu",
         "--variant",
         "kernelsu"
       ],
       "expected_outputs": [
-        "kernel_platform/common/drivers/kernelsu/.op13-root-source.json"
+        "kernel_platform/{kernel_tree}/drivers/kernelsu/.op13-root-source.json"
       ],
       "root_variants": ["kernelsu"]
     },
     {
       "id": "install-kernelsu-next-driver",
       "type": "exec",
+      "kernel_trees": ["common", "msm-kernel"],
       "cwd": ".",
       "argv": [
         "python3",
@@ -175,19 +178,20 @@
         "--root-dir",
         "{source_dir}/kernel_platform/KernelSU-Next",
         "--destination",
-        "{source_dir}/kernel_platform/common/drivers/kernelsu",
+        "{source_dir}/kernel_platform/{kernel_tree}/drivers/kernelsu",
         "--variant",
         "kernelsu-next"
       ],
       "expected_outputs": [
-        "kernel_platform/common/drivers/kernelsu/.op13-root-source.json"
+        "kernel_platform/{kernel_tree}/drivers/kernelsu/.op13-root-source.json"
       ],
       "root_variants": ["kernelsu-next"]
     },
     {
       "id": "register-kernelsu-kconfig",
       "type": "replace",
-      "target": "kernel_platform/common/drivers/Kconfig",
+      "kernel_trees": ["common", "msm-kernel"],
+      "target": "kernel_platform/{kernel_tree}/drivers/Kconfig",
       "find": "endmenu\n",
       "replace": "source \"drivers/kernelsu/Kconfig\"\n\nendmenu\n",
       "count": 1,
@@ -196,7 +200,8 @@
     {
       "id": "register-kernelsu-makefile",
       "type": "append",
-      "target": "kernel_platform/common/drivers/Makefile",
+      "kernel_trees": ["common", "msm-kernel"],
+      "target": "kernel_platform/{kernel_tree}/drivers/Makefile",
       "lines": [
         "obj-$(CONFIG_KSU) += kernelsu/"
       ],

@@ -43,6 +43,7 @@ BUILD_TARGETS = {"kernel", "modules", "mixed", "monolithic"}
 KERNEL_PHASE_TARGETS = {"kernel", "mixed"}
 MODULE_PHASE_TARGETS = {"modules", "mixed"}
 ROOT_VARIANTS = {"kernelsu", "kernelsu-next", "none"}
+KERNEL_TREE_NAMES = ("common", "msm-kernel")
 BRANDING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 SYMBOL_LINE_RE = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 SYMBOL_UNSET_RE = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
@@ -168,10 +169,19 @@ def _config_command(config_tool: Path, config_path: Path, symbol: str, value: st
     return [str(config_tool), "--file", str(config_path), "--keep-case", *action]
 
 
-def _fragment_paths(root: Path, feature: FeatureProfile, build_target: str) -> list[Path]:
+def _fragment_paths(
+    root: Path,
+    feature: FeatureProfile,
+    build_target: str,
+    kernel_tree: str = "common",
+) -> list[Path]:
+    if kernel_tree not in KERNEL_TREE_NAMES:
+        raise BuildToolError(f"unsupported Kconfig kernel tree {kernel_tree!r}")
     include_modules = build_target in MODULE_PHASE_TARGETS
     result: list[Path] = []
     for fragment in feature.kconfig_fragments:
+        if kernel_tree not in fragment.kernel_trees:
+            continue
         if fragment.scope == "modules" and not include_modules:
             continue
         path = resolve_inside(root, fragment.path, f"feature {feature.id} fragment", must_exist=fragment.required)
@@ -186,6 +196,30 @@ def _common_gki_defconfig(source_dir: Path, device: Device) -> Path:
     """Return the defconfig consumed by the pinned Kleaf arm64 targets."""
 
     return source_dir / device.common_kernel / "arch" / device.arch / "configs" / "gki_defconfig"
+
+
+def _kernel_tree_path(source_dir: Path, device: Device, kernel_tree: str) -> Path:
+    if kernel_tree == "common":
+        relative = device.common_kernel
+    elif kernel_tree == "msm-kernel":
+        relative = device.vendor_kernel
+    else:
+        raise BuildToolError(f"unsupported Kconfig kernel tree {kernel_tree!r}")
+    return source_dir / relative
+
+
+def _kernel_tree_gki_defconfig(
+    source_dir: Path,
+    device: Device,
+    kernel_tree: str,
+) -> Path:
+    return (
+        _kernel_tree_path(source_dir, device, kernel_tree)
+        / "arch"
+        / device.arch
+        / "configs"
+        / "gki_defconfig"
+    )
 
 
 def _official_build_paths(source_dir: Path, device: Device) -> tuple[Path, Path]:
@@ -219,7 +253,7 @@ def _official_cache_path(source_dir: Path, device: Device) -> Path:
 
 def _run_kconfig_make(
     runner: CommandRunner,
-    common_kernel: Path,
+    kernel_tree: Path,
     config_output: Path,
     arch: str,
     target: str,
@@ -228,16 +262,20 @@ def _run_kconfig_make(
     env = dict(toolchain_env)
     env["KCONFIG_CONFIG"] = str((config_output / ".config").resolve())
     runner.run(
-        ["make", "-C", str(common_kernel), f"O={config_output}", f"ARCH={arch}", target],
+        ["make", "-C", str(kernel_tree), f"O={config_output}", f"ARCH={arch}", target],
         env=env,
     )
 
 
-def _kconfig_toolchain_env(source_dir: Path, device: Device) -> dict[str, str]:
-    """Resolve the exact Clang toolchain declared by the locked common tree."""
+def _kconfig_toolchain_env(
+    source_dir: Path,
+    device: Device,
+    kernel_tree: str = "common",
+) -> dict[str, str]:
+    """Resolve the exact Clang toolchain declared by one locked kernel tree."""
 
-    common_kernel = source_dir / device.common_kernel
-    constants = common_kernel / "build.config.constants"
+    selected_tree = _kernel_tree_path(source_dir, device, kernel_tree)
+    constants = selected_tree / "build.config.constants"
     if not constants.is_file():
         raise BuildToolError(f"locked Clang version declaration is missing: {constants}")
     matches = [
@@ -246,7 +284,9 @@ def _kconfig_toolchain_env(source_dir: Path, device: Device) -> dict[str, str]:
         if (match := CLANG_VERSION_RE.fullmatch(line)) is not None
     ]
     if len(matches) != 1:
-        raise BuildToolError("locked common tree must declare exactly one CLANG_VERSION")
+        raise BuildToolError(
+            f"locked {kernel_tree} tree must declare exactly one CLANG_VERSION"
+        )
     clang_bin = (
         source_dir
         / "kernel_platform"
@@ -280,46 +320,54 @@ def _kconfig_toolchain_env(source_dir: Path, device: Device) -> dict[str, str]:
     }
 
 
-def _configure_common_gki_defconfig(
+def _configure_gki_defconfig(
     *,
     source_dir: Path,
     metadata_dir: Path,
     device: Device,
+    kernel_tree: str,
     fragments: Iterable[Path],
     forced: Mapping[str, str],
+    work_name: str,
 ) -> tuple[Path, Path]:
-    """Merge and canonicalize the checked-in GKI defconfig used by Kleaf.
+    """Merge and canonicalize one checked-in GKI defconfig used by Kleaf.
 
     ``prepare_vendor.sh`` does not consume ``KCONFIG_CONFIG`` from its caller.
-    The only reliable input is therefore common/arch/arm64/configs/gki_defconfig.
-    Canonicalizing through savedefconfig and then rebuilding a full .config also
-    makes the requested configuration digest independent of incidental output
-    files from an earlier build.
+    Both the base ``//common`` build and the mixed ``//msm-kernel`` build load
+    their own arch/arm64/configs/gki_defconfig. Canonicalizing each tree through
+    savedefconfig, then rebuilding a full .config, makes the request independent
+    of incidental output files from an earlier build.
     """
 
-    common_kernel = source_dir / device.common_kernel
-    source_defconfig = _common_gki_defconfig(source_dir, device)
-    config_tool = common_kernel / "scripts" / "config"
+    selected_tree = _kernel_tree_path(source_dir, device, kernel_tree)
+    source_defconfig = _kernel_tree_gki_defconfig(source_dir, device, kernel_tree)
+    config_tool = selected_tree / "scripts" / "config"
     if not source_defconfig.is_file():
         raise BuildToolError(f"Kleaf GKI defconfig is missing: {source_defconfig}")
     if not config_tool.is_file():
         raise BuildToolError(f"kernel scripts/config is missing: {config_tool}")
-    config_output = metadata_dir / "config-work"
+    config_output = metadata_dir / work_name
     if config_output.exists():
         shutil.rmtree(config_output)
     config_output.mkdir(parents=True)
     requested_config = config_output / ".config"
     shutil.copy2(source_defconfig, requested_config)
     runner = CommandRunner()
-    toolchain_env = _kconfig_toolchain_env(source_dir, device)
+    toolchain_env = _kconfig_toolchain_env(source_dir, device, kernel_tree)
     for fragment in fragments:
         for symbol, value in parse_fragment(fragment).items():
-            runner.run(_config_command(config_tool, requested_config, symbol, value), cwd=common_kernel)
+            runner.run(
+                _config_command(config_tool, requested_config, symbol, value),
+                cwd=selected_tree,
+            )
     for symbol, value in forced.items():
-        runner.run(_config_command(config_tool, requested_config, symbol, value), cwd=common_kernel)
+        runner.run(
+            _config_command(config_tool, requested_config, symbol, value),
+            cwd=selected_tree,
+        )
     _run_kconfig_make(
         runner,
-        common_kernel,
+        selected_tree,
         config_output,
         device.arch,
         "olddefconfig",
@@ -327,7 +375,7 @@ def _configure_common_gki_defconfig(
     )
     _run_kconfig_make(
         runner,
-        common_kernel,
+        selected_tree,
         config_output,
         device.arch,
         "savedefconfig",
@@ -343,7 +391,7 @@ def _configure_common_gki_defconfig(
     requested_config.unlink(missing_ok=True)
     _run_kconfig_make(
         runner,
-        common_kernel,
+        selected_tree,
         config_output,
         device.arch,
         "gki_defconfig",
@@ -351,7 +399,7 @@ def _configure_common_gki_defconfig(
     )
     _run_kconfig_make(
         runner,
-        common_kernel,
+        selected_tree,
         config_output,
         device.arch,
         "olddefconfig",
@@ -360,6 +408,27 @@ def _configure_common_gki_defconfig(
     if not requested_config.is_file():
         raise BuildToolError("Kleaf GKI defconfig did not produce a full .config")
     return requested_config, source_defconfig
+
+
+def _configure_common_gki_defconfig(
+    *,
+    source_dir: Path,
+    metadata_dir: Path,
+    device: Device,
+    fragments: Iterable[Path],
+    forced: Mapping[str, str],
+) -> tuple[Path, Path]:
+    """Compatibility wrapper for the base common-kernel configuration."""
+
+    return _configure_gki_defconfig(
+        source_dir=source_dir,
+        metadata_dir=metadata_dir,
+        device=device,
+        kernel_tree="common",
+        fragments=fragments,
+        forced=forced,
+        work_name="config-work",
+    )
 
 
 def configure_kernel(
@@ -411,10 +480,16 @@ def configure_kernel(
                 "modules-only configuration requires a mixed-target kernel artifact"
             )
     config_path = output_dir / ".config"
-    fragments = _fragment_paths(root, feature, build_target)
-    merged_values: dict[str, str] = {}
-    for fragment in fragments:
-        merged_values.update(parse_fragment(fragment))
+    fragments_by_tree = {
+        kernel_tree: _fragment_paths(root, feature, build_target, kernel_tree)
+        for kernel_tree in KERNEL_TREE_NAMES
+    }
+    merged_by_tree: dict[str, dict[str, str]] = {}
+    for kernel_tree, tree_fragments in fragments_by_tree.items():
+        merged: dict[str, str] = {}
+        for fragment in tree_fragments:
+            merged.update(parse_fragment(fragment))
+        merged_by_tree[kernel_tree] = merged
     explicit_expectations = expected_symbols(
         feature,
         root_variant=root_variant,
@@ -434,25 +509,66 @@ def configure_kernel(
             )
             if path.exists():
                 omitted_module_symbols.update(parse_fragment(path))
-        for symbol in omitted_module_symbols - set(merged_values):
+        for symbol in omitted_module_symbols - set(merged_by_tree["common"]):
             explicit_expectations.pop(symbol, None)
     # A fragment is a requested feature surface, not a best-effort hint.  Assert
     # every merged value after olddefconfig so unknown symbols and unmet Kconfig
     # dependencies fail closed instead of disappearing from the final config.
-    overrides = dict(merged_values)
-    overrides.update(explicit_expectations)
+    tuning_symbols = (
+        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE",
+        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3",
+        "CONFIG_LTO_CLANG_THIN",
+        "CONFIG_LTO_CLANG_FULL",
+    )
+    overrides_by_tree: dict[str, dict[str, str]] = {}
+    common_overrides = dict(merged_by_tree["common"])
+    common_overrides.update(explicit_expectations)
+    overrides_by_tree["common"] = common_overrides
+    msm_overrides = dict(merged_by_tree["msm-kernel"])
+    msm_requested_symbols = set(msm_overrides)
+    msm_requested_symbols.update(tuning_symbols)
+    msm_overrides.update(
+        {
+            symbol: value
+            for symbol, value in explicit_expectations.items()
+            if symbol in msm_requested_symbols
+        }
+    )
+    overrides_by_tree["msm-kernel"] = msm_overrides
     if root_variant == "none":
-        overrides.update({symbol: "n" for symbol in overrides if symbol.startswith("CONFIG_KSU")})
+        for tree_overrides in overrides_by_tree.values():
+            tree_overrides.update(
+                {
+                    symbol: "n"
+                    for symbol in tree_overrides
+                    if symbol.startswith("CONFIG_KSU")
+                }
+            )
     # Only build-mode and explicit no-root selections are forced.  Feature
     # symbols remain assertions so a missing patch/Kconfig definition fails.
-    forced: dict[str, str] = {
-        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE": overrides["CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE"],
-        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3": overrides["CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3"],
-        "CONFIG_LTO_CLANG_THIN": overrides["CONFIG_LTO_CLANG_THIN"],
-        "CONFIG_LTO_CLANG_FULL": overrides["CONFIG_LTO_CLANG_FULL"],
+    forced_by_tree: dict[str, dict[str, str]] = {}
+    for kernel_tree, tree_overrides in overrides_by_tree.items():
+        forced = {symbol: tree_overrides[symbol] for symbol in tuning_symbols}
+        if root_variant == "none":
+            forced.update(
+                {
+                    symbol: "n"
+                    for symbol in tree_overrides
+                    if symbol.startswith("CONFIG_KSU")
+                }
+            )
+        forced_by_tree[kernel_tree] = forced
+    tree_requests = {
+        kernel_tree: {
+            "fragments": [
+                {"path": str(path.resolve()), "sha256": sha256_file(path)}
+                for path in fragments_by_tree[kernel_tree]
+            ],
+            "forced_symbols": dict(sorted(forced_by_tree[kernel_tree].items())),
+            "required_symbols": dict(sorted(overrides_by_tree[kernel_tree].items())),
+        }
+        for kernel_tree in KERNEL_TREE_NAMES
     }
-    if root_variant == "none":
-        forced.update({symbol: "n" for symbol in overrides if symbol.startswith("CONFIG_KSU")})
     request = {
         "schema_version": 1,
         "profile": profile.id,
@@ -461,42 +577,71 @@ def configure_kernel(
         "optimization": optimization,
         "lto": lto,
         "build_target": build_target,
-        "fragments": [
-            {"path": str(path.resolve()), "sha256": sha256_file(path)} for path in fragments
-        ],
-        "forced_symbols": dict(sorted(forced.items())),
-        "required_symbols": dict(sorted(overrides.items())),
+        # Keep the common-tree aliases stable for artifact consumers while the
+        # explicit per-tree records bind both Kleaf build inputs.
+        **tree_requests["common"],
+        "kernel_tree_requests": tree_requests,
     }
     atomic_write_json(metadata_dir / "config-request.json", request)
     if check_only:
         return config_path
-    source_defconfig: Path | None = None
+    requested_configs: dict[str, Path] = {}
+    source_defconfigs: dict[str, Path] = {}
     if smoke:
-        simulated = dict(merged_values)
-        simulated.update(forced)
-        # Smoke mode models defined feature Kconfig entries.  It never yields a
-        # releasable artifact and exists only to test pipeline invariants.
-        for symbol, value in overrides.items():
-            simulated.setdefault(symbol, value)
-        lines = [
-            f"# {symbol} is not set" if value == "n" else f"{symbol}={value}"
-            for symbol, value in sorted(simulated.items())
-        ]
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-        requested_config_path = config_path
+        for kernel_tree in KERNEL_TREE_NAMES:
+            simulated = dict(merged_by_tree[kernel_tree])
+            simulated.update(forced_by_tree[kernel_tree])
+            # Smoke mode models defined feature Kconfig entries. It never
+            # yields a releasable artifact and exists only for invariants.
+            for symbol, value in overrides_by_tree[kernel_tree].items():
+                simulated.setdefault(symbol, value)
+            lines = [
+                f"# {symbol} is not set" if value == "n" else f"{symbol}={value}"
+                for symbol, value in sorted(simulated.items())
+            ]
+            if kernel_tree == "common":
+                tree_config_path = config_path
+            else:
+                tree_config_path = metadata_dir / "config-work-msm-kernel" / ".config"
+                tree_config_path.parent.mkdir(parents=True, exist_ok=True)
+            tree_config_path.write_text(
+                "\n".join(lines) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            requested_configs[kernel_tree] = tree_config_path
     else:
-        requested_config_path, source_defconfig = _configure_common_gki_defconfig(
-            source_dir=source_dir,
-            metadata_dir=metadata_dir,
-            device=device,
-            fragments=fragments,
-            forced=forced,
+        requested_configs["common"], source_defconfigs["common"] = (
+            _configure_common_gki_defconfig(
+                source_dir=source_dir,
+                metadata_dir=metadata_dir,
+                device=device,
+                fragments=fragments_by_tree["common"],
+                forced=forced_by_tree["common"],
+            )
+        )
+        requested_configs["msm-kernel"], source_defconfigs["msm-kernel"] = (
+            _configure_gki_defconfig(
+                source_dir=source_dir,
+                metadata_dir=metadata_dir,
+                device=device,
+                kernel_tree="msm-kernel",
+                fragments=fragments_by_tree["msm-kernel"],
+                forced=forced_by_tree["msm-kernel"],
+                work_name="config-work-msm-kernel",
+            )
         )
         if downloaded_kernel_context is None:
-            shutil.copy2(requested_config_path, config_path)
+            shutil.copy2(requested_configs["common"], config_path)
         elif not config_path.is_file():
             raise BuildToolError("downloaded mixed kernel artifact lacks its Image .config")
-    assert_symbols(requested_config_path, overrides)
+    for kernel_tree in KERNEL_TREE_NAMES:
+        assert_symbols(
+            requested_configs[kernel_tree],
+            overrides_by_tree[kernel_tree],
+        )
+    requested_config_path = requested_configs["common"]
+    overrides = overrides_by_tree["common"]
     explicit_module_symbols = sorted(
         symbol for symbol, value in overrides.items() if value == "m"
     )
@@ -547,14 +692,32 @@ def configure_kernel(
         config_sha256 = str(downloaded_configuration["config_sha256"])
     else:
         config_sha256 = sha256_file(config_path)
+    kernel_tree_configs: dict[str, dict[str, Any]] = {}
+    for kernel_tree in KERNEL_TREE_NAMES:
+        tree_record: dict[str, Any] = {
+            **tree_requests[kernel_tree],
+            "requested_config_path": str(requested_configs[kernel_tree].resolve()),
+            "requested_config_sha256": sha256_file(requested_configs[kernel_tree]),
+        }
+        source_defconfig = source_defconfigs.get(kernel_tree)
+        if source_defconfig is not None:
+            tree_record.update(
+                {
+                    "source_defconfig_path": str(source_defconfig.resolve()),
+                    "source_defconfig_sha256": sha256_file(source_defconfig),
+                }
+            )
+        kernel_tree_configs[kernel_tree] = tree_record
     configuration_record = {
         **request,
         "config_path": str(config_path.resolve()),
         "config_sha256": config_sha256,
         "requested_config_path": str(requested_config_path.resolve()),
         "requested_config_sha256": requested_config_sha256,
+        "kernel_tree_configs": kernel_tree_configs,
         "module_outputs": module_outputs_record,
     }
+    source_defconfig = source_defconfigs.get("common")
     if source_defconfig is not None:
         configuration_record.update(
             {
@@ -973,8 +1136,31 @@ def build_kernel(
         assert_symbols(config_path, required_symbols)
         module_config = preserved_kernel_kit / ".config"
         module_symvers = preserved_kernel_kit / "Module.symvers"
+        configured_tree_records = configuration.get("kernel_tree_configs")
+        if not isinstance(configured_tree_records, dict):
+            raise BuildToolError("configured per-tree Kconfig lineage is absent")
+        common_tree_record = configured_tree_records.get("common")
+        msm_tree_record = configured_tree_records.get("msm-kernel")
+        if not isinstance(common_tree_record, dict) or not isinstance(msm_tree_record, dict):
+            raise BuildToolError("configured common/MSM Kconfig lineage is absent")
+        msm_required_symbols = msm_tree_record.get("required_symbols")
+        if not isinstance(msm_required_symbols, dict):
+            raise BuildToolError("configured MSM symbol request is absent")
+        assert_symbols(module_config, msm_required_symbols)
         if sha256_file(module_symvers) != sha256_file(symvers):
             raise BuildToolError("preserved kernel kit Module.symvers differs from the exact dist")
+        built_tree_records = {
+            "common": {
+                **common_tree_record,
+                "built_config_path": str(config_path.resolve()),
+                "built_config_sha256": sha256_file(config_path),
+            },
+            "msm-kernel": {
+                **msm_tree_record,
+                "built_config_path": str(module_config.resolve()),
+                "built_config_sha256": sha256_file(module_config),
+            },
+        }
         configuration = {
             **configuration,
             "config_path": str(config_path.resolve()),
@@ -984,6 +1170,7 @@ def build_kernel(
             "module_config_path": str(module_config.resolve()),
             "module_config_sha256": sha256_file(module_config),
             "kernel_kit_path": str(preserved_kernel_kit.resolve()),
+            "kernel_tree_configs": built_tree_records,
             "module_outputs": {
                 **configured_module_outputs,
                 "produced": produced_module_outputs,
@@ -1075,6 +1262,41 @@ def _compare_kernel_lineage(source_context: Mapping[str, Any], kernel_context: M
     ):
         if source_config.get(field) != kernel_config.get(field):
             raise BuildToolError(f"kernel artifact configuration differs at {field}")
+    source_trees = source_config.get("kernel_tree_configs")
+    kernel_trees = kernel_config.get("kernel_tree_configs")
+    if not isinstance(source_trees, dict) or not isinstance(kernel_trees, dict):
+        raise BuildToolError("kernel artifact per-tree Kconfig lineage is absent")
+    for kernel_tree in KERNEL_TREE_NAMES:
+        source_tree = source_trees.get(kernel_tree)
+        kernel_tree_record = kernel_trees.get(kernel_tree)
+        if not isinstance(source_tree, dict) or not isinstance(kernel_tree_record, dict):
+            raise BuildToolError(
+                f"kernel artifact Kconfig lineage is absent for {kernel_tree}"
+            )
+        for field in (
+            "forced_symbols",
+            "required_symbols",
+            "requested_config_sha256",
+            "source_defconfig_sha256",
+        ):
+            if source_tree.get(field) != kernel_tree_record.get(field):
+                raise BuildToolError(
+                    f"kernel artifact Kconfig lineage differs at {kernel_tree}.{field}"
+                )
+        source_fragment_digests = [
+            item.get("sha256")
+            for item in source_tree.get("fragments", [])
+            if isinstance(item, dict)
+        ]
+        kernel_fragment_digests = [
+            item.get("sha256")
+            for item in kernel_tree_record.get("fragments", [])
+            if isinstance(item, dict)
+        ]
+        if source_fragment_digests != kernel_fragment_digests:
+            raise BuildToolError(
+                f"kernel artifact Kconfig lineage differs at {kernel_tree}.fragments"
+            )
     source_outputs = source_config.get("module_outputs")
     kernel_outputs = kernel_config.get("module_outputs")
     if not isinstance(source_outputs, dict) or not isinstance(kernel_outputs, dict):

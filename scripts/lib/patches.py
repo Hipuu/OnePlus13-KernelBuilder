@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .config import (
     DependencyLock,
@@ -34,6 +34,23 @@ from .runtime import CommandRunner, fetch_dependencies
 
 OPERATION_TYPES = {"apply", "git-apply", "copy", "replace", "append", "exec"}
 ROOT_VARIANTS = {"kernelsu", "kernelsu-next", "none"}
+KERNEL_TREE_ORDER = ("common", "msm-kernel")
+KERNEL_TREE_PLACEHOLDER = "{kernel_tree}"
+KERNEL_TREE_SUBSTITUTION_FIELDS = frozenset(
+    {"cwd", "target", "destination", "argv", "expected_outputs"}
+)
+KERNEL_TREE_SCALAR_FIELDS = frozenset({"cwd", "target", "destination"})
+KERNEL_TREE_LIST_FIELDS = frozenset({"argv", "expected_outputs"})
+EXEC_STATIC_PLACEHOLDERS = frozenset(
+    {
+        "source_dir",
+        "cache_root",
+        "dependency_dir",
+        "repo_root",
+        "base",
+        "root_variant",
+    }
+)
 
 
 def _patch_utility() -> str:
@@ -66,6 +83,131 @@ def _as_string_list(value: Any, where: str) -> list[str]:
             raise BuildToolError(f"{where}: entries must be non-empty strings")
         result.append(item)
     return result
+
+
+def _validate_exec_argv_placeholders(
+    argv: Iterable[str],
+    declared_dependencies: set[str],
+    where: str,
+) -> None:
+    for token in argv:
+        placeholders = re.findall(r"\{([^{}]+)\}", token)
+        for placeholder in placeholders:
+            if placeholder in EXEC_STATIC_PLACEHOLDERS:
+                continue
+            prefix = "dependency_dir:"
+            if placeholder.startswith(prefix):
+                dependency_id = placeholder[len(prefix) :]
+                if dependency_id in declared_dependencies:
+                    continue
+                raise BuildToolError(
+                    f"{where}: dependency placeholder {dependency_id!r} is not declared"
+                )
+            raise BuildToolError(
+                f"{where}: unsupported argv placeholder {{{placeholder}}}"
+            )
+        remainder = re.sub(r"\{[^{}]+\}", "", token)
+        if "{" in remainder or "}" in remainder:
+            raise BuildToolError(f"{where}: malformed argv placeholder {token!r}")
+        if "http://" in token or "https://" in token:
+            raise BuildToolError(f"{where}: network arguments are forbidden")
+
+
+def _contains_kernel_tree_placeholder(value: Any) -> bool:
+    if isinstance(value, str):
+        return KERNEL_TREE_PLACEHOLDER in value
+    if isinstance(value, list):
+        return any(_contains_kernel_tree_placeholder(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_kernel_tree_placeholder(item) for item in value.values())
+    return False
+
+
+def _validate_kernel_tree_fanout(
+    operation: Mapping[str, Any],
+    where: str,
+) -> tuple[str, ...] | None:
+    if "kernel_tree" in operation:
+        raise BuildToolError(f"{where}: kernel_tree is reserved for expanded operations")
+
+    has_placeholder = _contains_kernel_tree_placeholder(operation)
+    if "kernel_trees" not in operation:
+        if has_placeholder:
+            raise BuildToolError(
+                f"{where}: unresolved {KERNEL_TREE_PLACEHOLDER} placeholder without kernel_trees"
+            )
+        return None
+
+    raw_trees = _as_string_list(operation["kernel_trees"], f"{where}.kernel_trees")
+    if not raw_trees:
+        raise BuildToolError(f"{where}.kernel_trees: expected a non-empty array")
+    if len(set(raw_trees)) != len(raw_trees):
+        raise BuildToolError(f"{where}.kernel_trees: entries must be unique")
+    unknown = sorted(set(raw_trees) - set(KERNEL_TREE_ORDER))
+    if unknown:
+        raise BuildToolError(f"{where}.kernel_trees: unknown kernel trees {unknown}")
+    if not has_placeholder:
+        raise BuildToolError(
+            f"{where}: kernel_trees requires at least one {KERNEL_TREE_PLACEHOLDER} placeholder"
+        )
+
+    for field, value in operation.items():
+        if field == "kernel_trees" or field in KERNEL_TREE_SUBSTITUTION_FIELDS:
+            continue
+        if _contains_kernel_tree_placeholder(value):
+            supported = ", ".join(sorted(KERNEL_TREE_SUBSTITUTION_FIELDS))
+            raise BuildToolError(
+                f"{where}.{field}: {KERNEL_TREE_PLACEHOLDER} is supported only in {supported}"
+            )
+    for field in KERNEL_TREE_SCALAR_FIELDS:
+        if field in operation:
+            value = operation[field]
+            if not isinstance(value, str) or not value:
+                raise BuildToolError(
+                    f"{where}.{field}: kernel-tree fan-out requires a non-empty string"
+                )
+    for field in KERNEL_TREE_LIST_FIELDS:
+        if field in operation:
+            _as_string_list(operation[field], f"{where}.{field}")
+
+    selected = set(raw_trees)
+    return tuple(tree for tree in KERNEL_TREE_ORDER if tree in selected)
+
+
+def _expand_kernel_tree_operation(
+    operation: Mapping[str, Any],
+    where: str | None = None,
+) -> list[dict[str, Any]]:
+    location = where or f"operation {operation.get('id', '<unknown>')}"
+    trees = _validate_kernel_tree_fanout(operation, location)
+    if trees is None:
+        return [dict(operation)]
+
+    operation_id = operation.get("id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise BuildToolError(f"{location}: operation needs an id before kernel-tree expansion")
+    expanded_operations: list[dict[str, Any]] = []
+    for tree in trees:
+        expanded = dict(operation)
+        expanded.pop("kernel_trees", None)
+        expanded["id"] = f"{operation_id}@{tree}"
+        expanded["kernel_tree"] = tree
+        for field in KERNEL_TREE_SUBSTITUTION_FIELDS:
+            if field not in expanded:
+                continue
+            value = expanded[field]
+            if isinstance(value, str):
+                expanded[field] = value.replace(KERNEL_TREE_PLACEHOLDER, tree)
+            elif isinstance(value, list):
+                expanded[field] = [
+                    item.replace(KERNEL_TREE_PLACEHOLDER, tree) for item in value
+                ]
+        if _contains_kernel_tree_placeholder(expanded):
+            raise BuildToolError(
+                f"{location}: unresolved {KERNEL_TREE_PLACEHOLDER} placeholder after expansion"
+            )
+        expanded_operations.append(expanded)
+    return expanded_operations
 
 
 def _load_series(path: Path) -> tuple[str, list[dict[str, Any]]]:
@@ -120,12 +262,28 @@ def _load_series(path: Path) -> tuple[str, list[dict[str, Any]]]:
                 raise BuildToolError(f"{where}: fuzz is supported only for apply operations")
             if not isinstance(fuzz, int) or isinstance(fuzz, bool) or fuzz < 0 or fuzz > 3:
                 raise BuildToolError(f"{where}: fuzz must be an integer from 0 through 3")
+        if "directory" in operation:
+            if operation_type not in {"apply", "git-apply"}:
+                raise BuildToolError(
+                    f"{where}: directory is supported only for patch operations"
+                )
+            operation["directory"] = _safe_relative(
+                operation["directory"],
+                f"{where}.directory",
+            )
+            if operation.get("fuzz", 0):
+                raise BuildToolError(
+                    f"{where}: directory is incompatible with fuzzy patch operations"
+                )
         if "sha256" in operation:
             expected_sha256 = operation["sha256"]
             if operation_type not in {"apply", "git-apply"}:
                 raise BuildToolError(f"{where}: sha256 is supported only for patch operations")
             if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
                 raise BuildToolError(f"{where}: sha256 must be a lowercase SHA-256 digest")
+        kernel_trees = _validate_kernel_tree_fanout(operation, where)
+        if kernel_trees is not None:
+            operation["kernel_trees"] = list(kernel_trees)
         operations.append(operation)
     return series_id, operations
 
@@ -381,6 +539,111 @@ def _preflight_fuzzy_patch(
         return (replay.stdout or "") + (replay.stderr or "")
 
 
+def _git_apply_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(
+        part.strip()
+        for part in (result.stdout or "", result.stderr or "")
+        if part.strip()
+    )
+
+
+def _reject_skipped_git_patch(operation_id: str, output: str) -> None:
+    if re.search(r"\bSkipped patch\b", output, re.IGNORECASE):
+        skipped = next(
+            (
+                line.strip()
+                for line in output.splitlines()
+                if re.search(r"\bSkipped patch\b", line, re.IGNORECASE)
+            ),
+            "Skipped patch",
+        )
+        raise BuildToolError(
+            f"operation {operation_id}: git apply skipped a declared patch target: {skipped}"
+        )
+
+
+def _require_git_top(
+    *,
+    cwd: Path,
+    operation_id: str,
+    runner: CommandRunner,
+) -> Path:
+    result = runner.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=cwd,
+        capture=True,
+    )
+    raw_top = (result.stdout or "").strip()
+    if not raw_top:
+        raise BuildToolError(
+            f"operation {operation_id}: git apply directory has no repository top"
+        )
+    top = Path(raw_top).resolve()
+    if top != cwd.resolve():
+        raise BuildToolError(
+            f"operation {operation_id}: git apply directory must run from the Git top "
+            f"({top}), not {cwd.resolve()}"
+        )
+    return top
+
+
+def _directory_patch_target_states(
+    *,
+    patch: Path,
+    cwd: Path,
+    directory: str,
+    strip: int,
+    operation_id: str,
+) -> dict[str, str | None]:
+    raw_base = cwd / directory
+    if raw_base.is_symlink():
+        raise BuildToolError(
+            f"operation {operation_id}: patch directory must not be a symlink"
+        )
+    base = raw_base.resolve()
+    cwd_root = cwd.resolve()
+    try:
+        base.relative_to(cwd_root)
+    except ValueError as exc:
+        raise BuildToolError(
+            f"operation {operation_id}: patch directory escapes its cwd"
+        ) from exc
+    if not base.is_dir():
+        raise BuildToolError(
+            f"operation {operation_id}: patch directory is missing: {directory}"
+        )
+
+    states: dict[str, str | None] = {}
+    for relative in _fuzzy_patch_targets(
+        patch,
+        strip=strip,
+        operation_id=operation_id,
+    ):
+        raw_target = base / relative
+        if raw_target.is_symlink():
+            raise BuildToolError(
+                f"operation {operation_id}: declared patch target is a symlink: "
+                f"{(Path(directory) / relative).as_posix()}"
+            )
+        target = raw_target.resolve()
+        try:
+            target.relative_to(base)
+        except ValueError as exc:
+            raise BuildToolError(
+                f"operation {operation_id}: declared patch target escapes its directory"
+            ) from exc
+        display = (Path(directory) / relative).as_posix()
+        if not target.exists():
+            states[display] = None
+        elif not target.is_file():
+            raise BuildToolError(
+                f"operation {operation_id}: declared patch target is not a file: {display}"
+            )
+        else:
+            states[display] = sha256_file(target)
+    return states
+
+
 def _execute_operation(
     operation: Mapping[str, Any],
     *,
@@ -397,14 +660,28 @@ def _execute_operation(
     operation_id = str(operation["id"])
     operation_type = str(operation["type"])
     record: dict[str, Any] = {"id": operation_id, "type": operation_type, "status": "checked" if check_only else "applied"}
+    if "kernel_tree" in operation:
+        record["kernel_tree"] = str(operation["kernel_tree"])
     if operation_type in {"apply", "git-apply"}:
         patch, patch_root = _operation_source(operation, root=root, cache_root=cache_root, lock=lock, base=base)
         cwd = _cwd(source_dir, operation)
         strip = operation.get("strip", 1)
         if not isinstance(strip, int) or isinstance(strip, bool) or strip < 0 or strip > 4:
             raise BuildToolError(f"operation {operation_id}: strip must be between 0 and 4")
+        directory: str | None = None
+        if "directory" in operation:
+            directory = _safe_relative(
+                operation["directory"],
+                f"operation {operation_id}.directory",
+            )
+            if operation.get("fuzz", 0):
+                raise BuildToolError(
+                    f"operation {operation_id}: directory is incompatible with fuzzy patches"
+                )
         if smoke:
             record.update({"path": str(patch), "sha256": None, "status": "smoke-checked"})
+            if directory is not None:
+                record["directory"] = directory
             return record
         if not patch.is_file():
             raise BuildToolError(f"operation {operation_id}: patch is missing: {patch}")
@@ -475,10 +752,77 @@ def _execute_operation(
                     raise BuildToolError(f"operation {operation_id}: patch output reported a rejected hunk")
                 record.update({"fuzz": fuzz, "patch_output": patch_output})
             else:
-                git_apply = ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply"]
-                runner.run([*git_apply, "--check", f"-p{strip}", str(patch_input)], cwd=cwd)
+                declared_before: dict[str, str | None] | None = None
+                if directory is not None:
+                    _require_git_top(
+                        cwd=cwd,
+                        operation_id=operation_id,
+                        runner=runner,
+                    )
+                    declared_before = _directory_patch_target_states(
+                        patch=patch_input,
+                        cwd=cwd,
+                        directory=directory,
+                        strip=strip,
+                        operation_id=operation_id,
+                    )
+                git_apply = [
+                    "git",
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "core.eol=lf",
+                    "apply",
+                    "--verbose",
+                ]
+                if directory is not None:
+                    git_apply.append(f"--directory={Path(directory).as_posix()}")
+                checked = runner.run(
+                    [*git_apply, "--check", f"-p{strip}", str(patch_input)],
+                    cwd=cwd,
+                    capture=True,
+                )
+                outputs = [_git_apply_output(checked)]
+                _reject_skipped_git_patch(operation_id, outputs[0])
                 if not check_only:
-                    runner.run([*git_apply, f"-p{strip}", str(patch_input)], cwd=cwd)
+                    applied = runner.run(
+                        [*git_apply, f"-p{strip}", str(patch_input)],
+                        cwd=cwd,
+                        capture=True,
+                    )
+                    applied_output = _git_apply_output(applied)
+                    outputs.append(applied_output)
+                    _reject_skipped_git_patch(operation_id, applied_output)
+                    if declared_before is not None:
+                        declared_after = _directory_patch_target_states(
+                            patch=patch_input,
+                            cwd=cwd,
+                            directory=directory,
+                            strip=strip,
+                            operation_id=operation_id,
+                        )
+                        unchanged = sorted(
+                            path
+                            for path, before in declared_before.items()
+                            if declared_after.get(path) == before
+                        )
+                        if unchanged:
+                            raise BuildToolError(
+                                f"operation {operation_id}: git apply left declared patch "
+                                f"targets unchanged: {unchanged}"
+                            )
+                        record.update(
+                            {
+                                "declared_targets": sorted(declared_before),
+                                "pre_sha256": declared_before,
+                                "post_sha256": declared_after,
+                            }
+                        )
+                patch_output = "\n".join(output for output in outputs if output)
+                if patch_output:
+                    record["patch_output"] = patch_output
+                if directory is not None:
+                    record["directory"] = directory
             record.update({"path": str(patch), "sha256": actual_sha256, "cwd": str(cwd), "strip": strip})
             return record
         finally:
@@ -577,6 +921,11 @@ def _execute_operation(
         declared_dependencies = set(_as_string_list(operation.get("dependencies", []), f"operation {operation_id}.dependencies"))
         if isinstance(dependency_id, str):
             declared_dependencies.add(dependency_id)
+        _validate_exec_argv_placeholders(
+            argv,
+            declared_dependencies,
+            f"operation {operation_id}.argv",
+        )
         dependency_dir = _dependency_dir(cache_root, lock, dependency_id) if isinstance(dependency_id, str) else root.resolve()
         replacements = {
             "{source_dir}": str(source_dir.resolve()),
@@ -669,6 +1018,7 @@ def apply_patch_series(
     paths = _series_paths(root, feature, root_variant)
     series: list[tuple[str, list[dict[str, Any]]]] = [_load_series(path) for path in paths]
     operation_ids: set[str] = set()
+    expanded_operation_ids: set[str] = set()
     selected_operations: list[dict[str, Any]] = []
     for series_id, operations in series:
         for operation in operations:
@@ -679,7 +1029,17 @@ def apply_patch_series(
             if _operation_enabled(operation, feature, profile.id, root_variant):
                 operation = dict(operation)
                 operation["id"] = qualified
-                selected_operations.append(operation)
+                for expanded in _expand_kernel_tree_operation(
+                    operation,
+                    f"patch operation {qualified}",
+                ):
+                    expanded_id = str(expanded["id"])
+                    if expanded_id in expanded_operation_ids:
+                        raise BuildToolError(
+                            f"duplicate expanded patch operation {expanded_id}"
+                        )
+                    expanded_operation_ids.add(expanded_id)
+                    selected_operations.append(expanded)
     dependency_set: set[str] = set()
     for operation in selected_operations:
         if operation.get("dependency") is not None:
@@ -711,9 +1071,15 @@ def apply_patch_series(
             )
         except BuildToolError as exc:
             if operation["optional"]:
-                records.append(
-                    {"id": operation["id"], "type": operation["type"], "status": "optional-skipped", "reason": str(exc)}
-                )
+                skipped = {
+                    "id": operation["id"],
+                    "type": operation["type"],
+                    "status": "optional-skipped",
+                    "reason": str(exc),
+                }
+                if "kernel_tree" in operation:
+                    skipped["kernel_tree"] = operation["kernel_tree"]
+                records.append(skipped)
                 continue
             raise
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -758,47 +1124,107 @@ def validate_series_documents(
                 loaded.setdefault(path, _load_series(path))
             for profile in profiles.values():
                 combinations += 1
+                expanded_operation_ids: set[str] = set()
                 for path in paths:
-                    _, operations = loaded[path]
-                    for operation in operations:
-                        if not _operation_enabled(operation, feature, profile.id, root_variant):
-                            continue
-                        operation_count += 1
-                        dependency_id = operation.get("dependency")
-                        if dependency_id is not None and dependency_id not in lock.dependencies:
-                            raise BuildToolError(
-                                f"{path}: operation {operation['id']} references unlocked dependency {dependency_id}"
-                            )
-                        for extra_dependency in _as_string_list(
-                            operation.get("dependencies", []), f"{path}:{operation['id']}.dependencies"
+                    series_id, operations = loaded[path]
+                    for logical_operation in operations:
+                        if not _operation_enabled(
+                            logical_operation,
+                            feature,
+                            profile.id,
+                            root_variant,
                         ):
-                            if extra_dependency not in lock.dependencies:
+                            continue
+                        qualified = dict(logical_operation)
+                        qualified["id"] = f"{series_id}:{logical_operation['id']}"
+                        for operation in _expand_kernel_tree_operation(
+                            qualified,
+                            f"{path}: operation {qualified['id']}",
+                        ):
+                            operation_id = str(operation["id"])
+                            if operation_id in expanded_operation_ids:
                                 raise BuildToolError(
-                                    f"{path}: operation {operation['id']} references unlocked dependency {extra_dependency}"
+                                    f"{path}: duplicate expanded patch operation {operation_id}"
                                 )
-                        if operation["type"] in {"apply", "git-apply", "copy"}:
-                            selected_path = operation.get("path")
-                            if "path_by_base" in operation:
-                                mapping = operation["path_by_base"]
-                                if not isinstance(mapping, dict) or profile.id not in mapping:
-                                    if not operation["optional"]:
-                                        raise BuildToolError(
-                                            f"{path}: operation {operation['id']} lacks a path for {profile.id}"
-                                        )
-                                    continue
-                                selected_path = mapping[profile.id]
-                            relative = _safe_relative(selected_path, f"{path}:{operation['id']}.path")
-                            if dependency_id is None:
-                                resolve_inside(root, relative, f"{path}:{operation['id']}.path", must_exist=not operation["optional"])
-                        if operation["type"] in {"replace", "append"}:
-                            _safe_relative(operation.get("target"), f"{path}:{operation['id']}.target")
-                        if operation["type"] == "exec":
-                            _as_string_list(operation.get("argv"), f"{path}:{operation['id']}.argv")
-                            outputs = _as_string_list(
-                                operation.get("expected_outputs"), f"{path}:{operation['id']}.expected_outputs"
-                            )
-                            if not outputs:
-                                raise BuildToolError(f"{path}: exec operation {operation['id']} needs expected_outputs")
+                            expanded_operation_ids.add(operation_id)
+                            operation_count += 1
+                            dependency_id = operation.get("dependency")
+                            if dependency_id is not None and dependency_id not in lock.dependencies:
+                                raise BuildToolError(
+                                    f"{path}: operation {operation_id} references unlocked dependency {dependency_id}"
+                                )
+                            for extra_dependency in _as_string_list(
+                                operation.get("dependencies", []),
+                                f"{path}:{operation_id}.dependencies",
+                            ):
+                                if extra_dependency not in lock.dependencies:
+                                    raise BuildToolError(
+                                        f"{path}: operation {operation_id} references unlocked dependency {extra_dependency}"
+                                    )
+                            if "cwd" in operation:
+                                _safe_relative(operation["cwd"], f"{path}:{operation_id}.cwd")
+                            if "directory" in operation:
+                                _safe_relative(
+                                    operation["directory"],
+                                    f"{path}:{operation_id}.directory",
+                                )
+                            if operation["type"] in {"apply", "git-apply", "copy"}:
+                                selected_path = operation.get("path")
+                                if "path_by_base" in operation:
+                                    mapping = operation["path_by_base"]
+                                    if not isinstance(mapping, dict) or profile.id not in mapping:
+                                        if not operation["optional"]:
+                                            raise BuildToolError(
+                                                f"{path}: operation {operation_id} lacks a path for {profile.id}"
+                                            )
+                                        continue
+                                    selected_path = mapping[profile.id]
+                                relative = _safe_relative(selected_path, f"{path}:{operation_id}.path")
+                                if dependency_id is None:
+                                    resolve_inside(
+                                        root,
+                                        relative,
+                                        f"{path}:{operation_id}.path",
+                                        must_exist=not operation["optional"],
+                                    )
+                            if operation["type"] == "copy":
+                                _safe_relative(
+                                    operation.get("destination"),
+                                    f"{path}:{operation_id}.destination",
+                                )
+                            if operation["type"] in {"replace", "append"}:
+                                _safe_relative(
+                                    operation.get("target"),
+                                    f"{path}:{operation_id}.target",
+                                )
+                            if operation["type"] == "exec":
+                                argv = _as_string_list(
+                                    operation.get("argv"),
+                                    f"{path}:{operation_id}.argv",
+                                )
+                                declared_dependencies = set(
+                                    _as_string_list(
+                                        operation.get("dependencies", []),
+                                        f"{path}:{operation_id}.dependencies",
+                                    )
+                                )
+                                if isinstance(dependency_id, str):
+                                    declared_dependencies.add(dependency_id)
+                                _validate_exec_argv_placeholders(
+                                    argv,
+                                    declared_dependencies,
+                                    f"{path}:{operation_id}.argv",
+                                )
+                                outputs = _as_string_list(
+                                    operation.get("expected_outputs"),
+                                    f"{path}:{operation_id}.expected_outputs",
+                                )
+                                if not outputs:
+                                    raise BuildToolError(
+                                        f"{path}: exec operation {operation_id} needs expected_outputs"
+                                    )
+                                for output in outputs:
+                                    _safe_relative(output, f"{path}:{operation_id}.expected_outputs")
     return {
         "series": sorted(series_id for series_id, _ in loaded.values()),
         "combinations": combinations,

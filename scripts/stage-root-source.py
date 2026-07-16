@@ -17,7 +17,7 @@ from typing import Any
 
 EXPECTED_COMMITS = {
     "kernelsu": "b0bc817b4e966aa6aa830834eaf6ef765d821d40",
-    "kernelsu-next": "3b18216f71df189ab3d1b1ce0bdb21be1268e771",
+    "kernelsu-next": "1a0ef4898568a013b51d74ceb5593b83725bfb78",
 }
 EXPECTED_SOURCE_TREES = {
     "kernelsu": {
