@@ -107,11 +107,21 @@ or oversized cache is not saved. Source trees, `Module.symvers`, and kernel
 lineage metadata remain excluded from Actions cache storage.
 
 The locked source graph occupies roughly 57–60 GiB on the hosted runner. Before
-sync/build jobs, Actions removes the unused hosted tool cache and other explicit
-runner-image paths, then requires at least 100 GiB free. Repo keeps network
-fetches serial (`--jobs-network 1`) to bound temporary pack-file usage while
-retaining the requested parallelism for local checkouts. This avoids transient
-disk exhaustion without changing any locked revision or checked-out content.
+checkout in sync/build jobs, Actions removes only an explicit allowlist of
+unused runner-image paths. The immutable-pinned disk action then combines
+loop-backed capacity from `/` and `/mnt` in one LVM volume, recreates 4 GiB of
+swap, and mounts the ext4 build volume at the whole GitHub workspace. It
+reserves 8.25 GiB on `/` and 1 GiB on `/mnt`; a fail-closed validator requires
+at least 8 GiB to remain on `/` and 100 GiB to be available in the pooled
+workspace. The small root-reserve margin covers setup metadata written after
+the volume is allocated. The validator also proves the mount, backing files,
+loop devices,
+two physical volumes, logical volumes, active swap, write access, and canonical
+non-symlink paths before source synchronization. Repo keeps network fetches
+serial (`--jobs-network 1`) to bound temporary pack-file usage while retaining
+the requested parallelism for local checkouts. This avoids transient disk
+exhaustion without changing a locked revision or the canonical `out/source`
+layout.
 
 Set optional repository variables `KERNEL_BRANDING` and `BUILD_TIMESTAMP` for
 single-line build metadata. A manual modules-only build resolves the newest

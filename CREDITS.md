@@ -27,6 +27,9 @@ The build also depends on or integrates work from:
   `556891806e7907c135574f398d2a20ca0e7ff27e` under its
   [MIT License](https://github.com/Poko-Apps/MemKernel/blob/556891806e7907c135574f398d2a20ca0e7ff27e/LICENSE)
 - [NetHunter wireless firmware packaging](https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware)
+- [easimon/maximize-build-space](https://github.com/easimon/maximize-build-space),
+  pinned at `c28619d8999a147d5e09c1199f84ff6af6ad5794` under its
+  [MIT License](https://github.com/easimon/maximize-build-space/blob/c28619d8999a147d5e09c1199f84ff6af6ad5794/LICENSE).
 
 The root [MIT License](LICENSE) covers only original orchestration,
 configuration metadata, schemas, and documentation contributed to this

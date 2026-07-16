@@ -195,11 +195,165 @@ jobs:
       KERNEL_ARTIFACT_DIR: out/kernel-artifact
       KERNEL_ARTIFACT_DOWNLOAD_DIR: out/kernel-artifact-download
     steps:
+      - name: Reclaim allowlisted runner tools before pooling disks
+        run: |
+          set -euo pipefail
+          if [[ ! -d "$RUNNER_TEMP" || -L "$RUNNER_TEMP" ]]; then
+            echo "runner temporary directory is unavailable or is a symlink" >&2
+            exit 2
+          fi
+          runner_temp_root=$(realpath -e -- "$RUNNER_TEMP")
+          preparation_dir="$runner_temp_root/op13-pre-lvm"
+          if [[ -e "$preparation_dir" || -L "$preparation_dir" ]]; then
+            echo "pre-LVM evidence directory already exists: $preparation_dir" >&2
+            exit 2
+          fi
+          install -d -m 0700 -- "$preparation_dir"
+          cleanup_log="$preparation_dir/disk-cleanup.txt"
+          : > "$cleanup_log"
+          if [[ ! -d /mnt || -L /mnt || "$(realpath -e -- /mnt)" != /mnt ]]; then
+            echo "/mnt is unavailable, is a symlink, or resolves unexpectedly" >&2
+            exit 2
+          fi
+          root_device=$(stat -c %d -- /)
+          temp_device=$(stat -c %d -- /mnt)
+          if [[ "$root_device" == "$temp_device" ]]; then
+            echo "/mnt must be backed by a filesystem separate from root" >&2
+            exit 2
+          fi
+          df -h / /mnt > "$preparation_dir/disk-before-cleanup.txt"
+          before_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          cleanup_paths=(
+            /usr/local/lib/android
+            /usr/share/dotnet
+            /opt/ghc
+            /usr/local/.ghcup
+            /usr/share/swift
+            /usr/local/swift
+            /opt/hostedtoolcache
+            /usr/local/share/powershell
+            /usr/local/share/vcpkg
+          )
+          for candidate in "${cleanup_paths[@]}"; do
+            if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+              printf 'absent\t%s\n' "$candidate" >> "$cleanup_log"
+              continue
+            fi
+            if [[ -L "$candidate" ]]; then
+              printf 'skipped-symlink\t%s\t%s\n' "$candidate" "$(readlink -- "$candidate")" \
+                >> "$cleanup_log"
+              continue
+            fi
+            resolved=$(realpath -e -- "$candidate")
+            if [[ "$resolved" != "$candidate" ]]; then
+              echo "cleanup path resolved outside its explicit allowlist entry: $candidate -> $resolved" >&2
+              exit 2
+            fi
+            if [[ "$(stat -c %d -- "$resolved")" != "$root_device" ]] || \
+                mountpoint -q -- "$resolved"; then
+              echo "cleanup path is not an ordinary root-filesystem directory: $resolved" >&2
+              exit 2
+            fi
+            size=$(sudo du -sh -- "$resolved" 2>/dev/null | cut -f 1 || true)
+            printf 'remove\t%s\t%s\n' "${size:-unknown}" "$resolved" >> "$cleanup_log"
+            sudo rm -rf --one-file-system -- "$resolved"
+          done
+          if command -v docker >/dev/null 2>&1; then
+            docker image prune --all --force >> "$cleanup_log" 2>&1 || true
+          fi
+          after_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+          df -h / /mnt > "$preparation_dir/disk-after-cleanup.txt"
+          reclaimed=$((after_available - before_available))
+          {
+            echo "root_device=$root_device"
+            echo "temp_device=$temp_device"
+            echo "root_available_before_bytes=$before_available"
+            echo "root_available_after_bytes=$after_available"
+            echo "root_reclaimed_bytes=$reclaimed"
+          } > "$preparation_dir/preparation.properties"
+          {
+            echo '## Hosted-runner pre-LVM cleanup'
+            echo
+            echo "- Root available before cleanup: ${before_available} bytes"
+            echo "- Root available after cleanup: ${after_available} bytes"
+            echo "- Net reclaimed: ${reclaimed} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pool root and temporary disks for the build workspace
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794 # pinned 2025-03-28
+        with:
+          root-reserve-mb: 8448
+          temp-reserve-mb: 1024
+          swap-size-mb: 4096
+          overprovision-lvm: 'false'
+          build-mount-path: ${{ github.workspace }}
+          build-mount-path-ownership: runner:runner
+          pv-loop-path: /pv.img
+          tmp-pv-loop-path: /mnt/tmp-pv.img
+          remove-dotnet: 'false'
+          remove-android: 'false'
+          remove-haskell: 'false'
+          remove-codeql: 'false'
+          remove-docker-images: 'false'
+
+      - name: Capture failed pre-LVM setup state
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d "$RUNNER_TEMP" || -L "$RUNNER_TEMP" ]]; then
+            echo "runner temporary directory is unavailable or is a symlink" >&2
+            exit 2
+          fi
+          runner_temp_root=$(realpath -e -- "$RUNNER_TEMP")
+          failure_dir="$runner_temp_root/op13-lvm-failure"
+          if [[ -e "$failure_dir" || -L "$failure_dir" ]]; then
+            echo "LVM failure evidence directory already exists: $failure_dir" >&2
+            exit 2
+          fi
+          install -d -m 0700 -- "$failure_dir"
+          preparation_dir="$runner_temp_root/op13-pre-lvm"
+          if [[ -d "$preparation_dir" && ! -L "$preparation_dir" &&
+                "$(realpath -e -- "$preparation_dir")" == "$preparation_dir" ]]; then
+            cp -a -- "$preparation_dir/." "$failure_dir/"
+          fi
+          {
+            echo '--- filesystems ---'
+            df -h || true
+            echo '--- mounts ---'
+            findmnt || true
+            echo '--- loop devices ---'
+            sudo losetup --list || true
+            echo '--- physical volumes ---'
+            sudo pvs || true
+            echo '--- logical volumes ---'
+            sudo lvs || true
+            echo '--- swap ---'
+            sudo swapon --show || true
+          } > "$failure_dir/setup-failure-state.txt" 2>&1
+
+      - name: Preserve failed pre-LVM setup evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pre-lvm-${{ inputs.base }}-${{ inputs.root }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/op13-lvm-failure
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Validate pooled build filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/validate-runner-storage.sh \
+            --debug-dir "$DEBUG_DIR" \
+            --summary-title 'Hosted-runner pooled build filesystem'
 
       - name: Validate inputs and runner tools
         id: validated-inputs
@@ -263,67 +417,6 @@ jobs:
             echo 'compile_cache_scope=official device Bazel cache only'
             echo 'kernel_lineage=versioned artifact only'
           } > "$DEBUG_DIR/cache-statistics.txt"
-
-      - name: Reclaim unused hosted-runner disk
-        run: |
-          set -euo pipefail
-          cleanup_log="$DEBUG_DIR/disk-cleanup.txt"
-          : > "$cleanup_log"
-          df -h / > "$DEBUG_DIR/disk-before-cleanup.txt"
-          du -sh "$GITHUB_WORKSPACE" >> "$cleanup_log"
-          before_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
-          cleanup_paths=(
-            /usr/local/lib/android
-            /usr/share/dotnet
-            /opt/ghc
-            /usr/local/.ghcup
-            /usr/share/swift
-            /usr/local/swift
-            /opt/hostedtoolcache
-            /usr/local/share/powershell
-            /usr/local/share/vcpkg
-          )
-          for candidate in "${cleanup_paths[@]}"; do
-            if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
-              printf 'absent\t%s\n' "$candidate" >> "$cleanup_log"
-              continue
-            fi
-            if [[ -L "$candidate" ]]; then
-              printf 'skipped-symlink\t%s\t%s\n' "$candidate" "$(readlink -- "$candidate")" \
-                >> "$cleanup_log"
-              continue
-            fi
-            resolved=$(realpath -e -- "$candidate")
-            if [[ "$resolved" != "$candidate" ]]; then
-              echo "cleanup path resolved outside its explicit allowlist entry: $candidate -> $resolved" >&2
-              exit 2
-            fi
-            size=$(sudo du -sh -- "$resolved" 2>/dev/null | cut -f 1 || true)
-            printf 'remove\t%s\t%s\n' "${size:-unknown}" "$resolved" >> "$cleanup_log"
-            sudo rm -rf --one-file-system -- "$resolved"
-          done
-          if command -v docker >/dev/null 2>&1; then
-            docker image prune --all --force >> "$cleanup_log" 2>&1 || true
-          fi
-          required_commands=(bash python3 jq gh git curl make patch depmod zip unzip sha256sum tar xz zstd)
-          for required_command in "${required_commands[@]}"; do
-            command -v "$required_command" >> "$cleanup_log"
-          done
-          after_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
-          df -h / > "$DEBUG_DIR/disk-after-cleanup.txt"
-          reclaimed=$((after_available - before_available))
-          {
-            echo '## Hosted-runner disk preparation'
-            echo
-            echo "- Available before cleanup: ${before_available} bytes"
-            echo "- Available after cleanup: ${after_available} bytes"
-            echo "- Net reclaimed: ${reclaimed} bytes"
-          } >> "$GITHUB_STEP_SUMMARY"
-          minimum_available=$((100 * 1024 * 1024 * 1024))
-          if ((after_available < minimum_available)); then
-            echo "less than 100 GiB is available for the locked source graph and kernel build" >&2
-            exit 2
-          fi
 
       - name: Resolve artifact names
         id: artifact-names
@@ -551,14 +644,14 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          df -h / > "$DEBUG_DIR/disk-after-source-sync.txt"
+          df -h / "$GITHUB_WORKSPACE" > "$DEBUG_DIR/disk-after-source-sync.txt"
           du -sh "$SOURCE_DIR" > "$DEBUG_DIR/source-size.txt" 2>&1 || true
           {
             echo '## Locked source footprint'
             echo
             echo '```text'
             cat "$DEBUG_DIR/source-size.txt"
-            df -h /
+            df -h / "$GITHUB_WORKSPACE"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -746,7 +839,7 @@ jobs:
             echo
             echo '```text'
             cat "$DEBUG_DIR/output-sizes.txt"
-            df -h /
+            df -h / "$GITHUB_WORKSPACE"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -764,7 +857,7 @@ jobs:
             exit 2
           fi
           rm -rf --one-file-system -- "$source_root"
-          df -h / > "$DEBUG_DIR/disk-after-source-release.txt"
+          df -h / "$GITHUB_WORKSPACE" > "$DEBUG_DIR/disk-after-source-release.txt"
 
       - name: Archive reusable kernel output
         if: success() && inputs.target != 'modules'

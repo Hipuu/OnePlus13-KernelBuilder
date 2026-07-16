@@ -52,8 +52,14 @@ not evidence that the feature built.
 
 ## Disk or memory exhaustion
 
-Read `disk-before.txt`, `disk-after.txt`, and `output-sizes.txt`. Use a clean
-workspace, lower source-sync/build parallelism, or move `out/` to a larger
+For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,
+`disk-after-lvm.txt`, `disk-before.txt`, `disk-after.txt`, and
+`output-sizes.txt`. If setup fails before checkout, use the
+`pre-lvm-<base>-<root>-<run-id>` artifact together with the step log. The job
+stops before source synchronization unless its
+workspace is the expected two-PV LVM mount with at least 100 GiB available and
+the runner root retains at least 8 GiB. For a local build, use a clean workspace,
+lower source-sync/build parallelism, or place the repository on a larger
 case-sensitive Linux filesystem. Do not delete source projects in the middle of
 a build, because modules and DTBs must remain tied to the same manifest.
 
