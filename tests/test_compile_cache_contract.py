@@ -26,7 +26,9 @@ class HostedCompileCacheContractTests(unittest.TestCase):
         self.assertEqual(self.text.count("uses: actions/cache/restore@"), 1)
         self.assertEqual(self.text.count("uses: actions/cache/save@"), 1)
         self.assertGreaterEqual(self.text.count(condition), 4)
-        self.assertLess(self.text.index("bash scripts/sync-sources.sh"), path_guard)
+        self.assertLess(
+            self.text.index("bash scripts/run-hosted-source-sync.sh"), path_guard
+        )
         self.assertLess(path_guard, restore)
         self.assertLess(restore, build)
         self.assertLess(build, save)

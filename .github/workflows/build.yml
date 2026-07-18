@@ -196,6 +196,7 @@ jobs:
       KERNEL_ARTIFACT_DOWNLOAD_DIR: out/kernel-artifact-download
     steps:
       - name: Reclaim allowlisted runner tools before pooling disks
+        id: prepare-storage
         run: |
           set -euo pipefail
           if [[ ! -d "$RUNNER_TEMP" || -L "$RUNNER_TEMP" ]]; then
@@ -218,9 +219,19 @@ jobs:
           root_device=$(stat -c %d -- /)
           temp_device=$(stat -c %d -- /mnt)
           if [[ "$root_device" == "$temp_device" ]]; then
-            echo "/mnt must be backed by a filesystem separate from root" >&2
-            exit 2
+            storage_mode=shared
+            root_reserve_mb=9472
+            temp_reserve_mb=8448
+          else
+            storage_mode=dual
+            root_reserve_mb=8448
+            temp_reserve_mb=1024
           fi
+          {
+            echo "storage_mode=$storage_mode"
+            echo "root_reserve_mb=$root_reserve_mb"
+            echo "temp_reserve_mb=$temp_reserve_mb"
+          } >> "$GITHUB_OUTPUT"
           df -h / /mnt > "$preparation_dir/disk-before-cleanup.txt"
           before_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
           cleanup_paths=(
@@ -261,12 +272,32 @@ jobs:
           if command -v docker >/dev/null 2>&1; then
             docker image prune --all --force >> "$cleanup_log" 2>&1 || true
           fi
+          if [[ -e /swapfile || -L /swapfile ]]; then
+            if [[ -L /swapfile || ! -f /swapfile ||
+                  "$(realpath -e -- /swapfile)" != /swapfile ||
+                  "$(stat -c %d -- /swapfile)" != "$root_device" ]]; then
+              echo "root swap file is not an ordinary root-filesystem file" >&2
+              exit 2
+            fi
+            if ! sudo swapon --show=NAME --noheadings | awk '{$1=$1; print}' |
+                grep -F -x -q -- /swapfile; then
+              echo "root swap file exists but is not the active runner swap" >&2
+              exit 2
+            fi
+            swap_size=$(sudo du -sh -- /swapfile 2>/dev/null | cut -f 1 || true)
+            printf 'remove-swap\t%s\t/swapfile\n' "${swap_size:-unknown}" >> "$cleanup_log"
+            sudo swapoff -- /swapfile
+            sudo rm -f -- /swapfile
+          fi
           after_available=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
           df -h / /mnt > "$preparation_dir/disk-after-cleanup.txt"
           reclaimed=$((after_available - before_available))
           {
             echo "root_device=$root_device"
             echo "temp_device=$temp_device"
+            echo "storage_mode=$storage_mode"
+            echo "root_reserve_mb=$root_reserve_mb"
+            echo "temp_reserve_mb=$temp_reserve_mb"
             echo "root_available_before_bytes=$before_available"
             echo "root_available_after_bytes=$after_available"
             echo "root_reclaimed_bytes=$reclaimed"
@@ -277,13 +308,14 @@ jobs:
             echo "- Root available before cleanup: ${before_available} bytes"
             echo "- Root available after cleanup: ${after_available} bytes"
             echo "- Net reclaimed: ${reclaimed} bytes"
+            echo "- Storage topology: ${storage_mode}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pool root and temporary disks for the build workspace
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794 # pinned 2025-03-28
         with:
-          root-reserve-mb: 8448
-          temp-reserve-mb: 1024
+          root-reserve-mb: ${{ steps.prepare-storage.outputs.root_reserve_mb }}
+          temp-reserve-mb: ${{ steps.prepare-storage.outputs.temp_reserve_mb }}
           swap-size-mb: 4096
           overprovision-lvm: 'false'
           build-mount-path: ${{ github.workspace }}
@@ -488,6 +520,7 @@ jobs:
           CACHE_KEY: op13-dependencies-v2-${{ runner.os }}-${{ hashFiles('dependencies/lock.yml') }}-${{ hashFiles(format('configs/profiles/{0}.yml', inputs.base)) }}-${{ hashFiles(format('configs/features/{0}.yml', inputs.profile)) }}-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}
         run: |
           set -euo pipefail
+          mkdir -p "$DEBUG_DIR"
           {
             echo "dependency_cache_hit=${CACHE_HIT:-skipped}"
             echo "dependency_cache_key=$CACHE_KEY"
@@ -567,9 +600,10 @@ jobs:
       - name: Synchronize locked sources
         run: |
           set -euo pipefail
-          bash scripts/sync-sources.sh \
+          bash scripts/run-hosted-source-sync.sh \
             --base "$BASE" \
-            --output "$SOURCE_DIR"
+            --output "$SOURCE_DIR" \
+            --debug-dir "$DEBUG_DIR"
 
       - name: Validate compile cache filesystem path
         if: inputs.cache && !inputs.clean && inputs.target != 'modules'
@@ -624,6 +658,7 @@ jobs:
           CACHE_PATH: ${{ steps.compile-cache-identity.outputs.path }}
         run: |
           set -euo pipefail
+          mkdir -p "$DEBUG_DIR"
           cache_bytes=0
           cache_human=absent
           if [[ -d "$CACHE_PATH" ]]; then
@@ -644,6 +679,7 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
+          mkdir -p "$DEBUG_DIR"
           df -h / "$GITHUB_WORKSPACE" > "$DEBUG_DIR/disk-after-source-sync.txt"
           du -sh "$SOURCE_DIR" > "$DEBUG_DIR/source-size.txt" 2>&1 || true
           {
@@ -696,6 +732,7 @@ jobs:
           UPSTREAM_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
+          mkdir -p "$DEBUG_DIR"
           limit_bytes=$COMPILE_CACHE_MAX_BYTES
           cache_bytes=0
           cache_human=absent
@@ -749,6 +786,7 @@ jobs:
           SAVE_KEY: ${{ steps.compile-cache-identity.outputs.key }}
         run: |
           set -euo pipefail
+          mkdir -p "$DEBUG_DIR"
           {
             echo "compile_cache_save_outcome=${SAVE_OUTCOME:-skipped}"
             echo "compile_cache_save_eligible=${SAVE_ELIGIBLE:-skipped}"

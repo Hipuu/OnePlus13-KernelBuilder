@@ -97,6 +97,30 @@ expected_preparation_root="$(realpath -e -- "$RUNNER_TEMP")/op13-pre-lvm"
 if [[ "$preparation_root" != "$expected_preparation_root" ]]; then
   fail_layout "pre-LVM evidence directory resolved unexpectedly"
 fi
+properties="$preparation_root/preparation.properties"
+if [[ ! -f "$properties" || -L "$properties" ]]; then
+  fail_layout "pre-LVM storage properties are unavailable or are a symlink"
+fi
+property_value() {
+  local key=$1
+  awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$properties"
+}
+storage_mode=$(property_value storage_mode)
+root_reserve_mb=$(property_value root_reserve_mb)
+temp_reserve_mb=$(property_value temp_reserve_mb)
+case "$storage_mode" in
+  dual)
+    [[ "$root_reserve_mb" == 8448 && "$temp_reserve_mb" == 1024 ]] ||
+      fail_layout "dual-device reserve selection changed"
+    ;;
+  shared)
+    [[ "$root_reserve_mb" == 9472 && "$temp_reserve_mb" == 8448 ]] ||
+      fail_layout "shared-device reserve selection changed"
+    ;;
+  *)
+    fail_layout "unsupported hosted-runner storage mode: $storage_mode"
+    ;;
+esac
 cp -a -- "$preparation_root/." "$debug_root/"
 
 if [[ ! -d /mnt || -L /mnt || "$(realpath -e -- /mnt)" != /mnt ]]; then
@@ -115,17 +139,30 @@ workspace_device=$(stat -c %d -- "$workspace_root")
 out_device=$(stat -c %d -- "$out_root")
 root_backing_device=$(stat -c %d -- /pv.img)
 temp_backing_device=$(stat -c %d -- /mnt/tmp-pv.img)
-if [[ "$root_device" == "$temp_device" ]]; then
-  fail_layout "/mnt is not separate from the root filesystem"
-fi
 if [[ "$workspace_device" == "$root_device" || "$workspace_device" == "$temp_device" || \
       "$workspace_device" != "$out_device" ]]; then
   fail_layout "workspace/out is not isolated on the pooled filesystem"
 fi
-if [[ "$root_backing_device" != "$root_device" || \
-      "$temp_backing_device" != "$temp_device" ]]; then
-  fail_layout "LVM backing files are not located on their expected filesystems"
-fi
+case "$storage_mode" in
+  dual)
+    if [[ "$root_device" == "$temp_device" ]]; then
+      fail_layout "dual-device mode does not have a separate /mnt filesystem"
+    fi
+    if [[ "$root_backing_device" != "$root_device" || \
+          "$temp_backing_device" != "$temp_device" ]]; then
+      fail_layout "dual-device backing files are not on their expected filesystems"
+    fi
+    ;;
+  shared)
+    if [[ "$root_device" != "$temp_device" ]]; then
+      fail_layout "shared-device mode unexpectedly has a separate /mnt filesystem"
+    fi
+    if [[ "$root_backing_device" != "$root_device" || \
+          "$temp_backing_device" != "$root_device" ]]; then
+      fail_layout "shared-device backing files are not both on the root filesystem"
+    fi
+    ;;
+esac
 
 mount_target=$(findmnt -n -o TARGET --target "$out_root")
 mount_source=$(findmnt -n -o SOURCE --target "$out_root")
@@ -224,6 +261,9 @@ done
   echo "mount_source=$mount_source"
   echo "mount_type=$mount_type"
   echo "mount_options=$mount_options"
+  echo "storage_mode=$storage_mode"
+  echo "root_reserve_mb=$root_reserve_mb"
+  echo "temp_reserve_mb=$temp_reserve_mb"
   echo "root_device=$root_device"
   echo "temp_device=$temp_device"
   echo "workspace_device=$workspace_device"
@@ -246,6 +286,7 @@ df -h / /mnt "$out_root" > "$debug_root/disk-after-lvm.txt"
 {
   echo "## $summary_title"
   echo
+  echo "- Storage topology: ${storage_mode}"
   echo "- Root reserve available: ${root_available} bytes"
   echo "- Pooled workspace available: ${out_available} bytes"
   echo "- Workspace mount source: ${mount_source}"

@@ -15,7 +15,7 @@ class RootWorkflowInputTests(unittest.TestCase):
         self.assertIn("REQUESTED_KERNELSU_COMMIT: ${{ inputs.kernelsu_commit }}", text)
         self.assertIn("REQUESTED_SUSFS_COMMIT: ${{ inputs.susfs_commit }}", text)
         resolver = text.index("python3 scripts/op13.py resolve-root-lock")
-        source_sync = text.index("bash scripts/sync-sources.sh")
+        source_sync = text.index("bash scripts/run-hosted-source-sync.sh")
         self.assertLess(resolver, source_sync)
         self.assertIn('> "$DEBUG_DIR/root-selection.json"', text)
 

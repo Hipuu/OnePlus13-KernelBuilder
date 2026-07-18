@@ -23,7 +23,7 @@ diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
  
  static LIST_HEAD(cpufreq_policy_list);
  
-+static unsigned int scaling_min_freq_limit[NR_CPUS] = {
++static unsigned int scaling_min_freq_limit_store[NR_CPUS] = {
 +	[0 ... NR_CPUS - 1] = INT_MAX,
 +};
  /* Macros to iterate over CPU policies */
@@ -37,7 +37,7 @@ diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
 +					   char *buf)
 +{
 +	return sysfs_emit(buf, "%u\n",
-+			  READ_ONCE(scaling_min_freq_limit[policy->cpu]));
++			  READ_ONCE(scaling_min_freq_limit_store[policy->cpu]));
 +}
 +
  show_one(cpuinfo_min_freq, cpuinfo.min_freq);
@@ -57,7 +57,7 @@ diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
 +	if (ret)
 +		return ret;
 +
-+	WRITE_ONCE(scaling_min_freq_limit[policy->cpu], val);
++	WRITE_ONCE(scaling_min_freq_limit_store[policy->cpu], val);
 +	return count;
 +}
 +
@@ -85,7 +85,7 @@ diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
  	new_data.max = freq_qos_read_value(&policy->constraints, FREQ_QOS_MAX);
  
 +	new_data.min = min(new_data.min,
-+			   READ_ONCE(scaling_min_freq_limit[policy->cpu]));
++			   READ_ONCE(scaling_min_freq_limit_store[policy->cpu]));
 +
  	pr_debug("setting new policy for CPU %u: %u - %u kHz\n",
  		 new_data.cpu, new_data.min, new_data.max);

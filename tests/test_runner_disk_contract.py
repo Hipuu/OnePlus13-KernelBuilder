@@ -58,8 +58,21 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
                         validation, text.index("- name: Synchronize locked sources")
                     )
 
-                self.assertIn("root-reserve-mb: 8448", text)
-                self.assertIn("temp-reserve-mb: 1024", text)
+                self.assertIn("id: prepare-storage", text)
+                self.assertIn("storage_mode=shared", text)
+                self.assertIn("storage_mode=dual", text)
+                self.assertIn("root_reserve_mb=9472", text)
+                self.assertIn("temp_reserve_mb=8448", text)
+                self.assertIn("root_reserve_mb=8448", text)
+                self.assertIn("temp_reserve_mb=1024", text)
+                self.assertIn(
+                    "root-reserve-mb: ${{ steps.prepare-storage.outputs.root_reserve_mb }}",
+                    text,
+                )
+                self.assertIn(
+                    "temp-reserve-mb: ${{ steps.prepare-storage.outputs.temp_reserve_mb }}",
+                    text,
+                )
                 self.assertIn("swap-size-mb: 4096", text)
                 self.assertIn("overprovision-lvm: 'false'", text)
                 self.assertIn("build-mount-path: ${{ github.workspace }}", text)
@@ -79,6 +92,21 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
                 self.assertIn("sudo lvs || true", text)
                 self.assertIn("path: ${{ runner.temp }}/op13-lvm-failure", text)
                 self.assertIn("if-no-files-found: warn", text)
+
+    def test_shared_device_mode_stages_one_gib_for_the_second_pv(self) -> None:
+        # The action allocates the root PV first, then recalculates /mnt free.
+        # On a shared filesystem, 9472 - 8448 leaves a 1024 MiB second PV and
+        # the final 8448 MiB root reserve. Dual-device mode keeps the original
+        # independent reserves.
+        self.assertEqual(9472 - 8448, 1024)
+        for text in (
+            self._text(".github/workflows/build.yml"),
+            self._patch_rehearsal_job(),
+        ):
+            self.assertIn('echo "storage_mode=$storage_mode"', text)
+            self.assertIn('echo "root_reserve_mb=$root_reserve_mb"', text)
+            self.assertIn('echo "temp_reserve_mb=$temp_reserve_mb"', text)
+            self.assertNotIn("/mnt must be backed by a filesystem separate from root", text)
 
     def test_pooled_disk_action_is_immutable(self) -> None:
         match = re.fullmatch(r"[^@]+@([0-9a-f]{40})", self.ACTION)
@@ -116,6 +144,10 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
                     text,
                 )
                 self.assertIn('mountpoint -q -- "$resolved"', text)
+                self.assertIn("if [[ -e /swapfile || -L /swapfile ]]", text)
+                self.assertIn("sudo swapon --show=NAME --noheadings", text)
+                self.assertIn("sudo swapoff -- /swapfile", text)
+                self.assertIn("sudo rm -f -- /swapfile", text)
 
     def test_shared_validator_enforces_lvm_layout_and_capacity(self) -> None:
         script = self._text("scripts/validate-runner-storage.sh")
@@ -124,6 +156,12 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
             '[[ "$workspace_device" == "$root_device"',
             'mount_type" != ext4',
             '*,rw,*)',
+            "storage_mode=$(property_value storage_mode)",
+            '[[ "$root_reserve_mb" == 8448 && "$temp_reserve_mb" == 1024 ]]',
+            '[[ "$root_reserve_mb" == 9472 && "$temp_reserve_mb" == 8448 ]]',
+            "dual-device mode does not have a separate /mnt filesystem",
+            "shared-device mode unexpectedly has a separate /mnt filesystem",
+            "shared-device backing files are not both on the root filesystem",
             "/dev/mapper/buildvg-buildlv",
             "sudo losetup --associated /pv.img",
             "sudo losetup --associated /mnt/tmp-pv.img",

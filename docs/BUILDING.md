@@ -119,20 +119,28 @@ lineage metadata remain excluded from Actions cache storage.
 
 The locked source graph occupies roughly 57–60 GiB on the hosted runner. Before
 checkout in sync/build jobs, Actions removes only an explicit allowlist of
-unused runner-image paths. The immutable-pinned disk action then combines
-loop-backed capacity from `/` and `/mnt` in one LVM volume, recreates 4 GiB of
-swap, and mounts the ext4 build volume at the whole GitHub workspace. It
-reserves 8.25 GiB on `/` and 1 GiB on `/mnt`; a fail-closed validator requires
-at least 8 GiB to remain on `/` and 100 GiB to be available in the pooled
-workspace. The small root-reserve margin covers setup metadata written after
-the volume is allocated. The validator also proves the mount, backing files,
-loop devices,
-two physical volumes, logical volumes, active swap, write access, and canonical
-non-symlink paths before source synchronization. Repo keeps network fetches
-serial (`--jobs-network 1`) to bound temporary pack-file usage while retaining
-the requested parallelism for local checkouts. This avoids transient disk
-exhaustion without changing a locked revision or the canonical `out/source`
-layout.
+unused runner-image paths. The storage preflight accepts both hosted layouts:
+the older separate `/` and `/mnt` filesystems and the newer consolidated
+145-GiB root filesystem where `/mnt` is an ordinary directory. The
+immutable-pinned disk action always creates two exact loop-backed LVM physical
+volumes, recreates 4 GiB of swap, and mounts the ext4 build volume at the whole
+GitHub workspace. Separate-device mode reserves 8.25 GiB on `/` and 1 GiB on
+`/mnt`. Shared-device mode stages the action's sequential allocations with
+9.25/8.25-GiB reserve inputs, producing a 1-GiB second PV while still leaving
+8.25 GiB on the common filesystem. An exact active `/swapfile` from the
+consolidated image is reclaimed before the LVM swap is created.
+
+A fail-closed validator requires at least 8 GiB to remain on `/` and 100 GiB
+to be available in the pooled workspace. It proves the declared topology,
+mount, backing-file placement, distinct loop devices, two physical volumes,
+logical volumes, active swap, write access, and canonical non-symlink paths
+before source synchronization. Hosted jobs keep repo network fetches serial
+(`--jobs-network 1`) and use two checkout workers, leaving capacity for the
+runner agent and filesystem; the local CLI default remains four workers. A
+60-second observer records load, memory, filesystem space, and the highest-RSS
+processes beside the complete source-sync log in `out/debug`. This avoids
+transient disk/resource exhaustion without changing a locked revision or the
+canonical `out/source` layout.
 
 Set optional repository variables `KERNEL_BRANDING` and `BUILD_TIMESTAMP` for
 single-line build metadata. A manual modules-only build resolves the newest

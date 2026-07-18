@@ -17,6 +17,12 @@ artifact, and preserve the original run ID.
 - For a download, recalculate the file SHA-256 from a trusted upstream release
   and update the lock in a reviewed change if upstream intentionally changed
   the asset.
+- Hosted jobs write `source-sync.log` and one-minute
+  `source-sync-telemetry.log` snapshots with load, RAM, disk, and top resident
+  processes. A GitHub annotation that the runner lost communication without a
+  finalized log or artifact is infrastructure loss rather than a surfaced
+  manifest error; rerun it once before changing a lock. Hosted checkout uses
+  two workers while repo network fetches remain serial.
 
 ## A patch fails or is already applied
 
@@ -59,6 +65,14 @@ Do not restore deprecated sched_ext storage or weaken the preimage gate; an
 unexpected digest means the module lock and compatibility contract must be
 reviewed together.
 
+A compiler redefinition of `scaling_min_freq_limit` in
+`drivers/cpufreq/cpufreq.c` means the local minimum-limit hook reused the
+sysfs attribute identifier for its per-CPU backing array. The locked patch
+keeps the public `scaling_min_freq_limit` sysfs name and uses
+`scaling_min_freq_limit_store` only for backing storage. This compatibility
+fix applies to both common and MSM kernel trees and is independent of the
+KernelSU/SUSFS driver integration.
+
 ## Disk or memory exhaustion
 
 For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,
@@ -67,10 +81,14 @@ For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,
 `pre-lvm-<base>-<root>-<run-id>` artifact together with the step log. The job
 stops before source synchronization unless its
 workspace is the expected two-PV LVM mount with at least 100 GiB available and
-the runner root retains at least 8 GiB. For a local build, use a clean workspace,
-lower source-sync/build parallelism, or place the repository on a larger
-case-sensitive Linux filesystem. Do not delete source projects in the middle of
-a build, because modules and DTBs must remain tied to the same manifest.
+the runner root retains at least 8 GiB. `preparation.properties` and
+`disk-layout.txt` record whether the runner used `dual` or `shared` storage;
+both modes keep two distinct loop devices and are checked against different
+backing-file placement and reserve contracts. For a local build, use a clean
+workspace, lower source-sync/build parallelism, or place the repository on a
+larger case-sensitive Linux filesystem. Do not delete source projects in the
+middle of a build, because modules and DTBs must remain tied to the same
+manifest.
 
 ## Modules-only build cannot find a kernel artifact
 
