@@ -83,6 +83,15 @@ Common-kernel configuration includes USB Bluetooth HCI, AirSpy and HackRF SDR,
 VCAN and common CAN platform/SPI/USB adapters, and CH341, FTDI, and PL2303 USB
 serial support.
 
+The NetHunter fragment explicitly pins media subdriver autoselection off. The
+locked OnePlus media Kconfig then resolves 37 ancillary tuner symbols to
+modules when SDR support is enabled.
+Those are retained as part of the resolved feature closure: the builder maps
+their exact 38 Kbuild outputs (the simple-tuner symbol emits two files) into
+Kleaf, packages them, and verifies them like the other in-tree modules. This
+avoids both an undeclared-output build failure and silently removing useful
+SDR-adjacent drivers.
+
 The separate modules fragment covers ATH9K/10K/11K and MT76 families plus
 SLCAN. RTW88 is built from its locked external checkout. MemKernel's reviewed
 source files are copied from its locked checkout into the common tree; its

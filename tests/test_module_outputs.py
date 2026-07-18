@@ -192,6 +192,93 @@ class ModuleOutputIntegrationTests(unittest.TestCase):
             self.assertEqual(module_outputs.MODULE_OUTPUT_BY_SYMBOL[symbol], path)
         self.assertNotIn("CONFIG_CAN_ESD_USB2", module_outputs.MODULE_OUTPUT_BY_SYMBOL)
 
+    def test_sdr_tuner_kconfig_closure_declares_exact_multi_output_set(self) -> None:
+        expected_stems = {
+            "e4000",
+            "fc0011",
+            "fc0012",
+            "fc0013",
+            "fc2580",
+            "it913x",
+            "m88rs6000t",
+            "max2165",
+            "mc44s803",
+            "msi001",
+            "mt2060",
+            "mt2063",
+            "mt20xx",
+            "mt2131",
+            "mt2266",
+            "mxl301rf",
+            "mxl5005s",
+            "mxl5007t",
+            "qm1d1b0004",
+            "qm1d1c0042",
+            "qt1010",
+            "r820t",
+            "si2157",
+            "tda18212",
+            "tda18218",
+            "tda18250",
+            "tda18271",
+            "tda827x",
+            "tda8290",
+            "tda9887",
+            "tea5761",
+            "tea5767",
+            "tua9001",
+            "tuner-simple",
+            "tuner-types",
+            "xc2028",
+            "xc4000",
+            "xc5000",
+        }
+        expected_paths = {
+            f"drivers/media/tuners/{stem}.ko" for stem in expected_stems
+        }
+        mapping = module_outputs.MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL
+        flattened = [path for paths in mapping.values() for path in paths]
+
+        self.assertEqual(len(mapping), 37)
+        self.assertEqual(len(flattened), 38)
+        self.assertEqual(set(flattened), expected_paths)
+        self.assertEqual(len(flattened), len(set(flattened)))
+        self.assertEqual(
+            mapping["CONFIG_MEDIA_TUNER_SIMPLE"],
+            (
+                "drivers/media/tuners/tuner-simple.ko",
+                "drivers/media/tuners/tuner-types.ko",
+            ),
+        )
+        for symbol, paths in mapping.items():
+            with self.subTest(symbol=symbol):
+                self.assertEqual(
+                    module_outputs.module_output_paths_for_symbol(symbol), paths
+                )
+                self.assertEqual(
+                    module_outputs.MODULE_OUTPUT_BY_SYMBOL[symbol], paths[0]
+                )
+                self.assertEqual(
+                    module_outputs.MODULE_EXTRA_OUTPUTS_BY_SYMBOL.get(symbol, ()),
+                    paths[1:],
+                )
+
+        record = module_outputs.resolve_module_outputs(mapping)
+        self.assertEqual(record["active_symbols"], sorted(mapping))
+        self.assertEqual(record["active_paths"], sorted(expected_paths))
+        self.assertEqual(record["official_paths"], [])
+        self.assertEqual(record["requested_paths"], sorted(expected_paths))
+        self.assertTrue(
+            expected_paths.issubset(set(module_outputs.mapped_module_output_paths()))
+        )
+
+    def test_payload_consumers_use_the_flattened_multi_output_allowlist(self) -> None:
+        for relative in ("scripts/lib/build.py", "scripts/lib/artifacts.py"):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("mapped_module_output_paths()", text)
+                self.assertNotIn("MODULE_OUTPUT_BY_SYMBOL.values()", text)
+
     def test_oos15_integration_is_sorted_audited_and_scoped_to_4k_target(self) -> None:
         symbols = [
             "CONFIG_USB_SERIAL_CH341",
@@ -363,6 +450,55 @@ class ModuleOutputIntegrationTests(unittest.TestCase):
             module_outputs,
             "MODULE_OUTPUT_BY_SYMBOL",
             {"CONFIG_TEST": "../escape.ko"},
+        ):
+            with self.assertRaisesRegex(BuildToolError, "unsafe module output path"):
+                module_outputs.resolve_module_outputs(["CONFIG_TEST"])
+
+    def test_multi_output_constant_validation_rejects_unknown_and_duplicate_paths(self) -> None:
+        with mock.patch.object(
+            module_outputs,
+            "MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL",
+            {},
+        ), mock.patch.object(
+            module_outputs,
+            "MODULE_OUTPUT_BY_SYMBOL",
+            {"CONFIG_TEST": "drivers/example/primary.ko"},
+        ), mock.patch.object(
+            module_outputs,
+            "MODULE_EXTRA_OUTPUTS_BY_SYMBOL",
+            {"CONFIG_UNKNOWN": ("drivers/example/extra.ko",)},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unknown symbols"):
+                module_outputs._validate_module_output_constants()
+
+        with mock.patch.object(
+            module_outputs,
+            "MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL",
+            {},
+        ), mock.patch.object(
+            module_outputs,
+            "MODULE_OUTPUT_BY_SYMBOL",
+            {"CONFIG_TEST": "drivers/example/repeated.ko"},
+        ), mock.patch.object(
+            module_outputs,
+            "MODULE_EXTRA_OUTPUTS_BY_SYMBOL",
+            {"CONFIG_TEST": ("drivers/example/repeated.ko",)},
+        ), mock.patch.object(
+            module_outputs,
+            "OFFICIAL_GKI_MODULE_OUTPUTS",
+            frozenset(),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "repeated .ko paths"):
+                module_outputs._validate_module_output_constants()
+
+        with mock.patch.object(
+            module_outputs,
+            "MODULE_OUTPUT_BY_SYMBOL",
+            {"CONFIG_TEST": "drivers/example/safe.ko"},
+        ), mock.patch.object(
+            module_outputs,
+            "MODULE_EXTRA_OUTPUTS_BY_SYMBOL",
+            {"CONFIG_TEST": ("../escape.ko",)},
         ):
             with self.assertRaisesRegex(BuildToolError, "unsafe module output path"):
                 module_outputs.resolve_module_outputs(["CONFIG_TEST"])

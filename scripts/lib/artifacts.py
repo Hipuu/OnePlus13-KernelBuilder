@@ -31,7 +31,7 @@ from .context import (
     write_context,
 )
 from .errors import BuildToolError
-from .module_outputs import MODULE_OUTPUT_BY_SYMBOL, verify_produced_module_outputs
+from .module_outputs import mapped_module_output_paths, verify_produced_module_outputs
 from .runtime import fetch_dependencies
 
 
@@ -200,7 +200,7 @@ def verify_build_output(
             declared_paths = module_outputs.get("requested_paths")
             if not isinstance(declared_paths, list):
                 raise BuildToolError("Kleaf module-output declaration paths are absent")
-            mapped_paths = set(MODULE_OUTPUT_BY_SYMBOL.values())
+            mapped_paths = set(mapped_module_output_paths())
             produced_paths = [
                 path for path in recorded_official_paths if path in mapped_paths
             ]

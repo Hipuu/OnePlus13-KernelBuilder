@@ -148,6 +148,27 @@ class OfficialBuildContractTests(unittest.TestCase):
                 ["drivers/net/can/vcan.ko", "drivers/net/can/slcan/slcan.ko"],
             )
 
+    def test_official_payload_preserves_both_simple_tuner_outputs(self) -> None:
+        dist = self.root / "out" / "tuner-dist"
+        declared = [
+            "drivers/media/tuners/tuner-simple.ko",
+            "drivers/media/tuners/tuner-types.ko",
+        ]
+        for relative in declared:
+            module = dist / relative
+            module.parent.mkdir(parents=True, exist_ok=True)
+            module.write_bytes(f"{relative}\n".encode())
+        (dist / "modules.order").write_text(
+            "\n".join(declared) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        ordered, verification = _verify_official_module_payload(dist, declared)
+
+        self.assertEqual([path.as_posix() for path in ordered], declared)
+        self.assertEqual(verification["paths"], declared)
+
     def test_modules_staging_archive_is_safely_and_exactly_selected(self) -> None:
         unsafe_dist = self.root / "out" / "unsafe-dist"
         unsafe_dist.mkdir(parents=True)

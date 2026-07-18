@@ -33,6 +33,7 @@ from .module_outputs import (
     MODULE_OUTPUT_BY_SYMBOL,
     integrate_common_kleaf_module_outputs,
     integrate_msm_kleaf_module_dist,
+    mapped_module_output_paths,
     resolve_module_outputs,
     verify_produced_module_outputs,
 )
@@ -1422,7 +1423,7 @@ def _verify_official_module_payload(
                 f"one official .ko was matched to multiple modules.order paths: {module}"
             )
         used_sources.add(source_key)
-    mapped_paths = set(MODULE_OUTPUT_BY_SYMBOL.values())
+    mapped_paths = set(mapped_module_output_paths())
     produced_paths = [
         relative.as_posix()
         for relative in ordered_paths

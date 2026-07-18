@@ -92,6 +92,14 @@ the transaction or stamp fails. A changed patch, converter digest, or starting
 mode requires a lock review rather than bypassing the gate. This failure is
 independent of KernelSU/SUSFS integration.
 
+If Kleaf reports that 38 `drivers/media/tuners/*.ko` files were built but not
+copied, do not disable SDR or add ad hoc `module_outs` in a synced checkout.
+The locked OnePlus tuner Kconfig defaults 37 symbols to `m` when media
+subdriver autoselection is off, and `CONFIG_MEDIA_TUNER_SIMPLE` emits two
+files. The repository-owned final-config mapper must resolve that exact
+37-symbol/38-output closure into `OP13_MODULE_IMPLICIT_OUTS` for each locked
+common target; a different list means the source/config locks need review.
+
 ## Disk or memory exhaustion
 
 For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,

@@ -312,7 +312,8 @@ matching kernel output containing at least `.config`, `Module.symvers`,
 `System.map`, and the kernel release metadata.
 
 In-tree module outputs are part of the official Kleaf build contract. During
-configuration, each allowlisted `=m` symbol is resolved to an exact `.ko` path.
+configuration, each allowlisted `=m` symbol is resolved to one or more exact
+`.ko` paths.
 Paths not already in the locked GKI list are recorded as
 `OP13_MODULE_IMPLICIT_OUTS` in `kernel_platform/common/modules.bzl` and appended
 to the audited arm64 targets' `module_implicit_outs` in `BUILD.bazel`. The OOS

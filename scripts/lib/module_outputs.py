@@ -70,9 +70,84 @@ MSM_DIST_BZL_POSTIMAGE_BY_PREIMAGE: Mapping[str, str] = MappingProxyType(
     }
 )
 
+# The locked media Kconfig defaults these ancillary tuner symbols to ``m``
+# when ``MEDIA_SUBDRV_AUTOSELECT`` is disabled.  AirSpy/HackRF enable the SDR
+# media type, so this is part of the resolved NetHunter/full module closure on
+# every base.  ``MEDIA_TUNER_SIMPLE`` deliberately emits two Kbuild outputs.
+MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL: Mapping[str, tuple[str, ...]] = (
+    MappingProxyType(
+        {
+            "CONFIG_MEDIA_TUNER_E4000": ("drivers/media/tuners/e4000.ko",),
+            "CONFIG_MEDIA_TUNER_FC0011": ("drivers/media/tuners/fc0011.ko",),
+            "CONFIG_MEDIA_TUNER_FC0012": ("drivers/media/tuners/fc0012.ko",),
+            "CONFIG_MEDIA_TUNER_FC0013": ("drivers/media/tuners/fc0013.ko",),
+            "CONFIG_MEDIA_TUNER_FC2580": ("drivers/media/tuners/fc2580.ko",),
+            "CONFIG_MEDIA_TUNER_IT913X": ("drivers/media/tuners/it913x.ko",),
+            "CONFIG_MEDIA_TUNER_M88RS6000T": (
+                "drivers/media/tuners/m88rs6000t.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_MAX2165": ("drivers/media/tuners/max2165.ko",),
+            "CONFIG_MEDIA_TUNER_MC44S803": (
+                "drivers/media/tuners/mc44s803.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_MSI001": ("drivers/media/tuners/msi001.ko",),
+            "CONFIG_MEDIA_TUNER_MT2060": ("drivers/media/tuners/mt2060.ko",),
+            "CONFIG_MEDIA_TUNER_MT2063": ("drivers/media/tuners/mt2063.ko",),
+            "CONFIG_MEDIA_TUNER_MT20XX": ("drivers/media/tuners/mt20xx.ko",),
+            "CONFIG_MEDIA_TUNER_MT2131": ("drivers/media/tuners/mt2131.ko",),
+            "CONFIG_MEDIA_TUNER_MT2266": ("drivers/media/tuners/mt2266.ko",),
+            "CONFIG_MEDIA_TUNER_MXL301RF": (
+                "drivers/media/tuners/mxl301rf.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_MXL5005S": (
+                "drivers/media/tuners/mxl5005s.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_MXL5007T": (
+                "drivers/media/tuners/mxl5007t.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_QM1D1B0004": (
+                "drivers/media/tuners/qm1d1b0004.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_QM1D1C0042": (
+                "drivers/media/tuners/qm1d1c0042.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_QT1010": ("drivers/media/tuners/qt1010.ko",),
+            "CONFIG_MEDIA_TUNER_R820T": ("drivers/media/tuners/r820t.ko",),
+            "CONFIG_MEDIA_TUNER_SI2157": ("drivers/media/tuners/si2157.ko",),
+            "CONFIG_MEDIA_TUNER_SIMPLE": (
+                "drivers/media/tuners/tuner-simple.ko",
+                "drivers/media/tuners/tuner-types.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_TDA18212": (
+                "drivers/media/tuners/tda18212.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_TDA18218": (
+                "drivers/media/tuners/tda18218.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_TDA18250": (
+                "drivers/media/tuners/tda18250.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_TDA18271": (
+                "drivers/media/tuners/tda18271.ko",
+            ),
+            "CONFIG_MEDIA_TUNER_TDA827X": ("drivers/media/tuners/tda827x.ko",),
+            "CONFIG_MEDIA_TUNER_TDA8290": ("drivers/media/tuners/tda8290.ko",),
+            "CONFIG_MEDIA_TUNER_TDA9887": ("drivers/media/tuners/tda9887.ko",),
+            "CONFIG_MEDIA_TUNER_TEA5761": ("drivers/media/tuners/tea5761.ko",),
+            "CONFIG_MEDIA_TUNER_TEA5767": ("drivers/media/tuners/tea5767.ko",),
+            "CONFIG_MEDIA_TUNER_TUA9001": ("drivers/media/tuners/tua9001.ko",),
+            "CONFIG_MEDIA_TUNER_XC2028": ("drivers/media/tuners/xc2028.ko",),
+            "CONFIG_MEDIA_TUNER_XC4000": ("drivers/media/tuners/xc4000.ko",),
+            "CONFIG_MEDIA_TUNER_XC5000": ("drivers/media/tuners/xc5000.ko",),
+        }
+    )
+)
+
 # Exact Kbuild mappings from the three locked common trees and the pinned
 # MemKernel source.  Symbols selected indirectly by Kconfig are included so a
 # caller can pass the canonical final =m set rather than only fragment text.
+# The primary-path mapping remains one-to-one for callers that inspect it;
+# ``MODULE_EXTRA_OUTPUTS_BY_SYMBOL`` records additional outputs from one symbol.
 MODULE_OUTPUT_BY_SYMBOL: Mapping[str, str] = MappingProxyType(
     {
         "CONFIG_ATH10K": "drivers/net/wireless/ath/ath10k/ath10k_core.ko",
@@ -118,6 +193,10 @@ MODULE_OUTPUT_BY_SYMBOL: Mapping[str, str] = MappingProxyType(
         "CONFIG_CFG80211": "net/wireless/cfg80211.ko",
         "CONFIG_CRYPTO_MICHAEL_MIC": "crypto/michael_mic.ko",
         "CONFIG_MAC80211": "net/mac80211/mac80211.ko",
+        **{
+            symbol: paths[0]
+            for symbol, paths in MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL.items()
+        },
         "CONFIG_MEMKERNEL": "drivers/memkernel/memkernel.ko",
         "CONFIG_MHI_BUS": "drivers/bus/mhi/host/mhi.ko",
         "CONFIG_MT7601U": "drivers/net/wireless/mediatek/mt7601u/mt7601u.ko",
@@ -150,6 +229,32 @@ MODULE_OUTPUT_BY_SYMBOL: Mapping[str, str] = MappingProxyType(
         "CONFIG_USB_SERIAL_PL2303": "drivers/usb/serial/pl2303.ko",
     }
 )
+MODULE_EXTRA_OUTPUTS_BY_SYMBOL: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        symbol: paths[1:]
+        for symbol, paths in MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL.items()
+        if len(paths) > 1
+    }
+)
+
+
+def module_output_paths_for_symbol(symbol: str) -> tuple[str, ...]:
+    """Return every audited Kbuild output emitted by one mapped symbol."""
+
+    return (
+        MODULE_OUTPUT_BY_SYMBOL[symbol],
+        *MODULE_EXTRA_OUTPUTS_BY_SYMBOL.get(symbol, ()),
+    )
+
+
+def mapped_module_output_paths() -> tuple[str, ...]:
+    """Return the flattened programmer-owned module-output allowlist."""
+
+    return tuple(
+        path
+        for symbol in MODULE_OUTPUT_BY_SYMBOL
+        for path in module_output_paths_for_symbol(symbol)
+    )
 
 # Mapped outputs already present in get_gki_modules_list("arm64").  They are
 # retained in the resolution record but must not be repeated in the custom
@@ -270,7 +375,11 @@ def resolve_module_outputs(active_symbols: Iterable[object]) -> dict[str, object
         symbols.append(value)
 
     requested_paths = _unique_sorted_paths(
-        (MODULE_OUTPUT_BY_SYMBOL[symbol] for symbol in symbols),
+        (
+            path
+            for symbol in symbols
+            for path in module_output_paths_for_symbol(symbol)
+        ),
         where="resolved module outputs",
     )
     official_paths = tuple(path for path in requested_paths if path in OFFICIAL_GKI_MODULE_OUTPUTS)
@@ -580,17 +689,45 @@ def verify_produced_module_outputs(
     }
 
 
-# Validate programmer-owned constants at import time.  User input never reaches
-# this path; a bad mapping is a repository defect and should stop every caller.
-_allowlisted_paths = list(MODULE_OUTPUT_BY_SYMBOL.values())
-if len(_allowlisted_paths) != len(set(_allowlisted_paths)):
-    raise RuntimeError("MODULE_OUTPUT_BY_SYMBOL contains repeated .ko paths")
-for _symbol, _path in MODULE_OUTPUT_BY_SYMBOL.items():
-    if not _SYMBOL_RE.fullmatch(_symbol):
-        raise RuntimeError(f"invalid allowlisted Kconfig symbol: {_symbol}")
-    try:
-        _validate_relative_ko_path(_path, where=f"MODULE_OUTPUT_BY_SYMBOL[{_symbol}]")
-    except BuildToolError as exc:
-        raise RuntimeError(str(exc)) from exc
-if not OFFICIAL_GKI_MODULE_OUTPUTS.issubset(set(_allowlisted_paths)):
-    raise RuntimeError("OFFICIAL_GKI_MODULE_OUTPUTS contains a path absent from the symbol allowlist")
+def _validate_module_output_constants() -> None:
+    """Fail import when a programmer-owned symbol/output contract is invalid."""
+
+    unknown_extra_symbols = set(MODULE_EXTRA_OUTPUTS_BY_SYMBOL) - set(
+        MODULE_OUTPUT_BY_SYMBOL
+    )
+    if unknown_extra_symbols:
+        raise RuntimeError(
+            "MODULE_EXTRA_OUTPUTS_BY_SYMBOL contains unknown symbols: "
+            + ", ".join(sorted(unknown_extra_symbols))
+        )
+    for symbol, expected_paths in MEDIA_TUNER_MODULE_OUTPUTS_BY_SYMBOL.items():
+        if symbol not in MODULE_OUTPUT_BY_SYMBOL:
+            raise RuntimeError(f"media tuner symbol is absent from the allowlist: {symbol}")
+        if module_output_paths_for_symbol(symbol) != expected_paths:
+            raise RuntimeError(f"media tuner output mapping differs for {symbol}")
+
+    allowlisted_paths = list(mapped_module_output_paths())
+    if len(allowlisted_paths) != len(set(allowlisted_paths)):
+        raise RuntimeError("module output allowlist contains repeated .ko paths")
+    for symbol in MODULE_OUTPUT_BY_SYMBOL:
+        if not _SYMBOL_RE.fullmatch(symbol):
+            raise RuntimeError(f"invalid allowlisted Kconfig symbol: {symbol}")
+        outputs = module_output_paths_for_symbol(symbol)
+        if not outputs:
+            raise RuntimeError(f"allowlisted Kconfig symbol has no outputs: {symbol}")
+        for index, path in enumerate(outputs):
+            try:
+                _validate_relative_ko_path(
+                    path,
+                    where=f"module outputs for {symbol}[{index}]",
+                )
+            except BuildToolError as exc:
+                raise RuntimeError(str(exc)) from exc
+    if not OFFICIAL_GKI_MODULE_OUTPUTS.issubset(set(allowlisted_paths)):
+        raise RuntimeError(
+            "OFFICIAL_GKI_MODULE_OUTPUTS contains a path absent from the symbol allowlist"
+        )
+
+
+# User input never reaches this path; a bad repository mapping stops every caller.
+_validate_module_output_constants()

@@ -102,6 +102,7 @@
     "CONFIG_IP6_NF_TARGET_HL": "y",
     "CONFIG_IP_SET": "y",
     "CONFIG_IP6_NF_NAT": "y",
+    "CONFIG_MEDIA_SUBDRV_AUTOSELECT": "n",
     "CONFIG_BT_HCIBTUSB": "m",
     "CONFIG_BT_HCIVHCI": "m",
     "CONFIG_USB_AIRSPY": "y",

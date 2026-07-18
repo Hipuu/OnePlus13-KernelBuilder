@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -48,6 +49,26 @@ class KconfigSurfaceContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("CONFIG_USB_SERIAL=m", text)
         self.assertNotIn("CONFIG_USB_SERIAL_CONSOLE", text)
+
+    def test_sdr_tuner_closure_pins_media_subdriver_autoselection_off(self) -> None:
+        fragment = (
+            ROOT / "patches" / "nethunter" / "config-nethunter-common.config"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            fragment.count("# CONFIG_MEDIA_SUBDRV_AUTOSELECT is not set"),
+            1,
+        )
+        for profile in ("nethunter", "full"):
+            with self.subTest(profile=profile):
+                data = json.loads(
+                    (ROOT / "configs" / "features" / f"{profile}.yml").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    data["required_symbols"]["CONFIG_MEDIA_SUBDRV_AUTOSELECT"],
+                    "n",
+                )
 
     def test_patch_rehearsal_preserves_failed_kconfig_evidence(self) -> None:
         text = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
