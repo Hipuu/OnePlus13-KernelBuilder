@@ -65,6 +65,15 @@ Do not restore deprecated sched_ext storage or weaken the preimage gate; an
 unexpected digest means the module lock and compatibility contract must be
 reviewed together.
 
+For an OOS15 error from `include/linux/sched/sched_ext.h` reporting that
+`oplus_task_struct` has no member named `scx`, inspect
+`.op13/oos15-hmbird-sched-prop.json`. The CN and Global Fengchi inputs create
+the same stale compatibility header in both kernel trees. The locked transform
+preserves each helper's null/error behavior while moving only its three
+`sched_prop` accesses to `hmbird_entity`. Missing or changed preimage evidence
+must be reviewed with the pinned Fengchi patch instead of restoring SCX
+storage. This failure is independent of KernelSU/SUSFS integration.
+
 A compiler redefinition of `scaling_min_freq_limit` in
 `drivers/cpufreq/cpufreq.c` means the local minimum-limit hook reused the
 sysfs attribute identifier for its per-CPU backing array. The locked patch

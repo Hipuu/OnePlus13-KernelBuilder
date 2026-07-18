@@ -59,6 +59,18 @@ The postimage matches the fork-handler cleanup already present in the locked
 Global and OOS16 module sources and is independently fingerprinted; no
 KernelSU or SUSFS input is changed by this base-source repair.
 
+Both locked OOS15 Fengchi patches also create the same executable
+`include/linux/sched/sched_ext.h` in the common and MSM trees. Its three
+compatibility helpers still address `oplus_task_struct.scx.sched_prop`, even
+though Fengchi moves that field to `hmbird_entity`. Immediately after the
+vendor integration stamp is verified, an OOS15 CN/Global-only transaction
+accepts the exact 1,776-byte preimage (Git blob
+`9f1afdb8a04b183e12ea882633839bd045f54934`, SHA-256
+`a013e0caa83a1ec80efd0b0c5f6cca06aeefa0a4449e5bc678ec95392de64b84`) in
+both trees and redirects only those three accesses. The null/error returns and
+public helper names stay unchanged. Both files roll back unless the exact
+1,788-byte postimage is written and stamped successfully.
+
 ## Reproducible inputs
 
 `dependencies/lock.yml` pins every dependency. Each release profile points to

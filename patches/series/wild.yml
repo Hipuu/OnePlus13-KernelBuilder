@@ -41,6 +41,24 @@
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
+      "id": "hmbird-sched-prop-oos15",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-oos15-hmbird-sched-prop.py",
+        "--source-dir",
+        "{source_dir}",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        ".op13/oos15-hmbird-sched-prop.json"
+      ],
+      "bases": ["oos15-cn", "oos15-global"],
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
       "id": "hmbird-sched-assist-oos15-cn",
       "type": "exec",
       "cwd": ".",
