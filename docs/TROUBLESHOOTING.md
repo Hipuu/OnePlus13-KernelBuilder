@@ -82,6 +82,16 @@ keeps the public `scaling_min_freq_limit` sysfs name and uses
 fix applies to both common and MSM kernel trees and is independent of the
 KernelSU/SUSFS driver integration.
 
+An exit status `126` or `Permission denied` from
+`drivers/of/overwriter/overwrite_configs/convert_configs.sh` means the pinned
+HMBIRD overwriter's generated helper was not executable. Inspect
+`.op13/hmbird-overwriter-mode.json`. The post-patch gate verifies the exact
+canonical WildKernels patch and both exact 3,528-byte converter copies before
+changing only their modes from `0644` to `0755`; it rolls both trees back if
+the transaction or stamp fails. A changed patch, converter digest, or starting
+mode requires a lock review rather than bypassing the gate. This failure is
+independent of KernelSU/SUSFS integration.
+
 ## Disk or memory exhaustion
 
 For Actions, read `disk-cleanup.txt`, `disk-layout.txt`,

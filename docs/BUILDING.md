@@ -71,6 +71,17 @@ both trees and redirects only those three accesses. The null/error returns and
 public helper names stay unchanged. Both files roll back unless the exact
 1,788-byte postimage is written and stamped successfully.
 
+The locked WildKernels device-tree overwriter patch creates
+`convert_configs.sh` as mode `0644`, while its Kbuild Makefile invokes that
+path directly. Full and Wild builds on all three bases therefore run one
+dual-tree, byte-preserving mode transaction immediately after the overwriter
+patch. It accepts only WildKernels commit
+`2ee34500cb4c3ee954ba36090e11f6ff08b3ec2f`, canonical patch Git blob
+`7a573dbe50eecaa2ca89b325dce3b274a2d4bd91`, and the exact 3,528-byte
+converter blob `b05dabb860650cc721702f63fc22f093de621958`; both common and MSM copies
+must start at `0644` before either is changed to `0755`. The transaction
+changes no file bytes and is independent of KernelSU/SUSFS integration.
+
 ## Reproducible inputs
 
 `dependencies/lock.yml` pins every dependency. Each release profile points to

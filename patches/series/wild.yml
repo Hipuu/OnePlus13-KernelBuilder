@@ -96,6 +96,26 @@
       "feature": "oneplus.hmbird_fengchi_scx"
     },
     {
+      "id": "hmbird-overwriter-executable",
+      "type": "exec",
+      "dependency": "wild_kernel_patches",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-hmbird-overwriter-mode.py",
+        "--source-dir",
+        "{source_dir}",
+        "--wild-dir",
+        "{dependency_dir:wild_kernel_patches}",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        ".op13/hmbird-overwriter-mode.json"
+      ],
+      "feature": "oneplus.hmbird_fengchi_scx"
+    },
+    {
       "id": "hmbird-ogki-device-tree-config",
       "type": "apply",
       "kernel_trees": ["common", "msm-kernel"],
