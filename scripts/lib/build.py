@@ -17,6 +17,7 @@ from .config import (
     FeatureProfile,
     Profile,
     resolve_inside,
+    sha256_bytes,
     sha256_file,
 )
 from .context import (
@@ -40,7 +41,9 @@ from .module_outputs import (
 from .runtime import CommandRunner, fetch_dependencies
 
 
-BUILD_TARGETS = {"kernel", "modules", "mixed", "monolithic"}
+SUPPORTED_BUILD_TARGETS = {"kernel", "modules", "mixed"}
+RESERVED_BUILD_TARGETS = {"monolithic"}
+BUILD_TARGETS = SUPPORTED_BUILD_TARGETS | RESERVED_BUILD_TARGETS
 KERNEL_PHASE_TARGETS = {"kernel", "mixed"}
 MODULE_PHASE_TARGETS = {"modules", "mixed"}
 ROOT_VARIANTS = {"kernelsu", "kernelsu-next", "none"}
@@ -57,7 +60,7 @@ def assert_build_target_contract(build_target: str) -> None:
 
     if build_target not in BUILD_TARGETS:
         raise BuildToolError(f"unsupported build target {build_target!r}")
-    if build_target == "monolithic":
+    if build_target in RESERVED_BUILD_TARGETS:
         raise BuildToolError(
             "build target 'monolithic' is disabled: the pinned OnePlus 13 "
             "sun/perf entry point is a mixed GKI pipeline and exposes no "
@@ -1339,13 +1342,71 @@ def _clean_module_output(output_dir: Path, kernel_output: Path) -> None:
         shutil.rmtree(output_dir)
 
 
-def _module_vermagic(runner: CommandRunner, module: Path) -> str:
+def _module_vermagic(runner: CommandRunner, module: Path) -> tuple[str, str]:
     result = runner.run(["modinfo", "-F", "vermagic", str(module)], capture=True)
-    vermagic = result.stdout.strip()
+    vermagic = (result.stdout or "").strip()
+    if not vermagic or any(character in vermagic for character in "\x00\r\n"):
+        raise BuildToolError(f"invalid module vermagic for {module}: {vermagic!r}")
     release = vermagic.split()[0] if vermagic else ""
     if not release or any(character.isspace() for character in release):
         raise BuildToolError(f"invalid module vermagic for {module}: {vermagic!r}")
-    return release
+    return vermagic, release
+
+
+def _assert_full_vermagic(expected: str, observed: str, module: Path) -> None:
+    if observed != expected:
+        raise BuildToolError(
+            f"full module vermagic mismatch for {module}: "
+            f"{observed!r}, expected {expected!r}"
+        )
+
+
+def _run_depmod_verification(
+    runner: CommandRunner,
+    *,
+    system_map: Path,
+    staging: Path,
+    kernel_release: str,
+    log_path: Path | None = None,
+) -> dict[str, Any]:
+    argv = [
+        "depmod",
+        "-e",
+        "-F",
+        str(system_map),
+        "-b",
+        str(staging),
+        kernel_release,
+    ]
+    result = runner.run(argv, capture=True, check=False)
+    if not isinstance(result.returncode, int):
+        raise BuildToolError("depmod returned no numeric status")
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    output = stdout + stderr
+    output_bytes = output.encode("utf-8")
+    proof = {
+        "schema_version": 1,
+        "status": "passed",
+        "argv": argv,
+        "returncode": result.returncode,
+        "kernel_release": kernel_release,
+        "system_map_sha256": sha256_file(system_map),
+        "output_sha256": sha256_bytes(output_bytes),
+        "output_size": len(output_bytes),
+    }
+    if log_path is not None:
+        with log_path.open("a", encoding="utf-8", newline="\n") as log:
+            log.write("+ " + CommandRunner._display(argv) + "\n")
+            log.write(output)
+    if result.returncode != 0:
+        detail = f"\n{output.strip()}" if output.strip() else ""
+        raise BuildToolError(
+            f"depmod unresolved-symbol validation failed ({result.returncode}){detail}"
+        )
+    if "needs unknown symbol" in output.lower():
+        raise BuildToolError(f"depmod found unresolved symbols:\n{output.strip()}")
+    return proof
 
 
 def _official_modules_order_path(root: Path) -> Path:
@@ -1530,7 +1591,7 @@ def _stage_official_modules(
     expected_order_record: Mapping[str, Any],
     expected_module_records: Iterable[object],
     memkernel_enabled: bool,
-) -> tuple[str, list[dict[str, Any]], dict[str, object]]:
+) -> tuple[str, str, list[dict[str, Any]], dict[str, object]]:
     dist_root = kernel_output / "kernel-dist-modules"
     if requested_symbols and not dist_root.is_dir():
         raise BuildToolError(
@@ -1549,7 +1610,8 @@ def _stage_official_modules(
     )
     ordered_names = {path.as_posix() for path in ordered_paths}
     releases: set[str] = set()
-    resolved: list[tuple[Path, Path]] = []
+    reference_vermagic: str | None = None
+    resolved: list[tuple[Path, Path, str]] = []
     used_sources: set[Path] = set()
     for relative in ordered_paths:
         module = _match_dist_module(dist_root, relative)
@@ -1559,28 +1621,36 @@ def _stage_official_modules(
                 f"one official .ko was matched to multiple modules.order paths: {module}"
             )
         used_sources.add(source_key)
-        resolved.append((relative, module))
-        releases.add(_module_vermagic(runner, module))
+        vermagic, release = _module_vermagic(runner, module)
+        if reference_vermagic is None:
+            reference_vermagic = vermagic
+        else:
+            _assert_full_vermagic(reference_vermagic, vermagic, module)
+        resolved.append((relative, module, vermagic))
+        releases.add(release)
     if len(releases) != 1:
         raise BuildToolError(
             "official sun/perf module outputs do not identify one exact kernel release"
         )
+    if reference_vermagic is None:
+        raise BuildToolError("official sun/perf module outputs have no vermagic reference")
     kernel_release = next(iter(releases))
     destination_root = staging / "lib" / "modules" / kernel_release / "extra" / "official"
     records: list[dict[str, Any]] = []
-    for relative, module in resolved:
+    for relative, module, vermagic in resolved:
         destination = destination_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(module, destination)
         record = record_for_file(destination, role="in-tree-module", root=staging)
         record["official_path"] = relative.as_posix()
+        record["vermagic"] = vermagic
         records.append(record)
     if memkernel_enabled and "drivers/memkernel/memkernel.ko" not in ordered_names:
         raise BuildToolError(
             "CONFIG_MEMKERNEL=m but exact sun/perf emitted no memkernel.ko; add the "
             "MemKernel output to the audited common Kleaf arm64 module_implicit_outs"
         )
-    return kernel_release, records, output_verification
+    return kernel_release, reference_vermagic, records, output_verification
 
 
 def _external_module_commands(
@@ -1684,6 +1754,12 @@ def build_external_modules(
     log_path = metadata_dir / "modules-build.log"
     if smoke:
         kernel_release = "6.6.0-op13-smoke"
+        kernel_vermagic = f"{kernel_release} SMP preempt mod_unload aarch64"
+        depmod_verification = {
+            "schema_version": 1,
+            "status": "not-run-smoke",
+            "kernel_release": kernel_release,
+        }
         module_root = staging / "lib" / "modules" / kernel_release / "extra"
         module_root.mkdir(parents=True, exist_ok=True)
         if requested_module_symbols:
@@ -1692,7 +1768,7 @@ def build_external_modules(
             in_tree_record.update(
                 {
                     "modules": [record_for_file(in_tree_module, role="in-tree-module", root=staging)],
-                    "vermagic": kernel_release,
+                    "vermagic": kernel_vermagic,
                     "smoke": True,
                 }
             )
@@ -1709,7 +1785,7 @@ def build_external_modules(
                     "dependency": dependency_id,
                     "locked_commit": dependency.commit,
                     "modules": [record_for_file(module, role="external-module", root=staging)],
-                    "vermagic": kernel_release,
+                    "vermagic": kernel_vermagic,
                     "smoke": True,
                 }
             )
@@ -1725,7 +1801,12 @@ def build_external_modules(
             raise BuildToolError("preserved kernel-kit Module.symvers differs from the kernel lineage")
         fetch_dependencies(lock, cache_root, selected=selected_dependencies, dry_run=False, offline=False)
         runner = CommandRunner()
-        kernel_release, installed_in_tree, output_verification = _stage_official_modules(
+        (
+            kernel_release,
+            kernel_vermagic,
+            installed_in_tree,
+            output_verification,
+        ) = _stage_official_modules(
             kernel_output=kernel_output,
             staging=staging,
             runner=runner,
@@ -1750,7 +1831,7 @@ def build_external_modules(
         in_tree_record.update(
             {
                 "modules": installed_in_tree,
-                "vermagic": kernel_release,
+                "vermagic": kernel_vermagic,
                 "module_config_sha256": sha256_file(kernel_kit / ".config"),
                 "module_symvers_sha256": sha256_file(kernel_kit / "Module.symvers"),
                 "module_outputs": output_verification,
@@ -1840,11 +1921,12 @@ def build_external_modules(
                         continue
                     destination = destination_root / module.name
                     shutil.copy2(module, destination)
-                    observed_release = _module_vermagic(runner, destination)
+                    observed_vermagic, observed_release = _module_vermagic(runner, destination)
+                    _assert_full_vermagic(kernel_vermagic, observed_vermagic, destination)
                     if observed_release != kernel_release:
                         raise BuildToolError(
-                            f"module vermagic mismatch for {destination}: "
-                            f"{observed_release!r}, expected {kernel_release}"
+                            f"module kernel release mismatch for {destination}: "
+                            f"{observed_release!r}, expected {kernel_release!r}"
                         )
                     installed_names[module.name] = digest
                     installed.append(record_for_file(destination, role="external-module", root=staging))
@@ -1853,7 +1935,7 @@ def build_external_modules(
                         "dependency": dependency_id,
                         "locked_commit": dependency.commit,
                         "modules": installed,
-                        "vermagic": kernel_release,
+                        "vermagic": kernel_vermagic,
                         "builder": "kernel_platform/build/build_module.sh",
                     }
                 )
@@ -1865,19 +1947,19 @@ def build_external_modules(
         system_map = kernel_output / "System.map"
         if not system_map.is_file():
             raise BuildToolError("kernel artifact lacks System.map for unresolved-symbol validation")
-        depmod = runner.run(
-            ["depmod", "-e", "-F", str(system_map), "-b", str(staging), kernel_release],
-            capture=True,
+        depmod_verification = _run_depmod_verification(
+            runner,
+            system_map=system_map,
+            staging=staging,
+            kernel_release=kernel_release,
+            log_path=log_path,
         )
-        depmod_output = (depmod.stdout or "") + (depmod.stderr or "")
-        if "needs unknown symbol" in depmod_output.lower():
-            raise BuildToolError(f"depmod found unresolved symbols:\n{depmod_output.strip()}")
-        with log_path.open("a", encoding="utf-8", newline="\n") as log:
-            log.write(depmod_output)
     modules_record = {
         "build_target": source_target,
         "kernel_release": kernel_release,
+        "kernel_vermagic": kernel_vermagic,
         "module_symvers_sha256": sha256_file(symvers),
+        "depmod_verification": depmod_verification,
         "in_tree_modules": in_tree_record,
         "external_dependency_ids": list(selected_dependencies),
         "external_modules": records,

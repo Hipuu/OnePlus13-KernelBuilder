@@ -108,6 +108,46 @@ class SmokePipelineTests(unittest.TestCase):
         self.assertEqual(report["external_module_count"], 1)
         self.assertEqual(report["in_tree_module_count"], 1)
         self.assertFalse(stale_module.exists())
+        build_context_path = self.build / ".op13" / "build-context.json"
+        built_context = load_context(build_context_path)
+        original_required = dict(built_context["configuration"]["required_symbols"])
+        built_context["configuration"]["required_symbols"]["CONFIG_UNRECORDED_FINAL_GATE"] = "y"
+        write_context(build_context_path, built_context)
+        with self.assertRaisesRegex(
+            BuildToolError,
+            "CONFIG_UNRECORDED_FINAL_GATE: expected y, got n",
+        ):
+            verify_build_output(
+                output_dir=self.build,
+                profile=self.profile,
+                feature=self.feature,
+                lock=self.lock,
+                root_variant="none",
+                build_target="mixed",
+                smoke=True,
+            )
+        built_context["configuration"]["required_symbols"] = original_required
+        write_context(build_context_path, built_context)
+        original_vermagic = built_context["modules"]["kernel_vermagic"]
+        built_context["modules"]["kernel_vermagic"] = (
+            "6.6.0-op13-smoke SMP mod_unload aarch64"
+        )
+        write_context(build_context_path, built_context)
+        with self.assertRaisesRegex(
+            BuildToolError,
+            "in-tree module full vermagic differs",
+        ):
+            verify_build_output(
+                output_dir=self.build,
+                profile=self.profile,
+                feature=self.feature,
+                lock=self.lock,
+                root_variant="none",
+                build_target="mixed",
+                smoke=True,
+            )
+        built_context["modules"]["kernel_vermagic"] = original_vermagic
+        write_context(build_context_path, built_context)
         dist = self.root / "out" / "dist"
         records = package_build(
             root=self.root,
@@ -218,7 +258,6 @@ class SmokePipelineTests(unittest.TestCase):
             )
         unrecorded.unlink()
 
-        build_context_path = self.build / ".op13" / "build-context.json"
         built_context = load_context(build_context_path)
         external_record = built_context["modules"]["external_modules"][0]["modules"][0]
         external_module = staging / external_record["path"]

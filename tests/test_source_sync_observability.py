@@ -23,8 +23,12 @@ class HostedSourceSyncObservabilityTests(unittest.TestCase):
         required = (
             "checkout_jobs=2",
             "telemetry_interval_seconds=60",
+            "sync_started_epoch=",
             "source-sync.log",
             "source-sync-telemetry.log",
+            "[source-sync heartbeat]",
+            "elapsed_seconds=",
+            "workspace_available_bytes=",
             "cat /proc/loadavg",
             "free -h",
             'df -h / "$workspace_root"',
@@ -66,6 +70,26 @@ class HostedSourceSyncObservabilityTests(unittest.TestCase):
                         "bash scripts/run-hosted-source-sync.sh"
                     )
                     self.assertLess(create_source, observed_sync)
+
+    def test_oos16_compile_supersedes_a_duplicate_patch_rehearsal(self) -> None:
+        workflow = self._text(".github/workflows/validate.yml")
+        rehearsal = self._patch_rehearsal_job()
+        self.assertNotIn("- base: oos16", rehearsal)
+        self.assertEqual(rehearsal.count("- base: oos15-global"), 1)
+        self.assertEqual(rehearsal.count("- base: oos15-cn"), 1)
+
+        start = workflow.index("  oos16-full-build:\n")
+        full_build = workflow[start:]
+        for value in (
+            "base: oos16",
+            "root: kernelsu-next",
+            "profile: full",
+            "target: mixed",
+            "clean: true",
+            "debug: true",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value, full_build)
 
 
 if __name__ == "__main__":

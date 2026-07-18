@@ -83,10 +83,19 @@ done
 
 checkout_jobs=2
 telemetry_interval_seconds=60
+sync_started_epoch=$(date -u +%s)
 
 record_snapshot() {
+  local snapshot_epoch snapshot_timestamp elapsed_seconds load_one workspace_available_bytes
+  snapshot_epoch=$(date -u +%s)
+  snapshot_timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+  elapsed_seconds=$((snapshot_epoch - sync_started_epoch))
+  load_one=$(cut -d ' ' -f1 /proc/loadavg)
+  workspace_available_bytes=$(df --output=avail -B1 "$workspace_root" |
+    tail -n 1 | tr -d ' ')
   {
-    echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') ==="
+    echo "=== $snapshot_timestamp ==="
+    echo "elapsed_seconds=$elapsed_seconds"
     echo "checkout_jobs=$checkout_jobs"
     echo "telemetry_interval_seconds=$telemetry_interval_seconds"
     echo '--- load ---'
@@ -100,6 +109,8 @@ record_snapshot() {
       sed -n '1,21p'
     echo
   } >> "$telemetry_log"
+  printf '[source-sync heartbeat] utc=%s elapsed_seconds=%s load1=%s workspace_available_bytes=%s\n' \
+    "$snapshot_timestamp" "$elapsed_seconds" "$load_one" "$workspace_available_bytes"
 }
 
 observer_pid=

@@ -19,7 +19,9 @@ artifact, and preserve the original run ID.
   the asset.
 - Hosted jobs write `source-sync.log` and one-minute
   `source-sync-telemetry.log` snapshots with load, RAM, disk, and top resident
-  processes. A GitHub annotation that the runner lost communication without a
+  processes. The live job log also receives a one-minute
+  `[source-sync heartbeat]` line containing elapsed time, load, and remaining
+  workspace bytes. A GitHub annotation that the runner lost communication without a
   finalized log or artifact is infrastructure loss rather than a surfaced
   manifest error; rerun it once before changing a lock. Hosted checkout uses
   two workers while repo network fetches remain serial.
@@ -28,8 +30,9 @@ artifact, and preserve the original run ID.
 
 Inspect the patch log and every `.rej`/`.orig` in the debug bundle. Confirm the
 base, KMI, root variant, dependency commit, and patch-series order. Patch
-failures are not warnings: update or condition the patch and make all three
-base rehearsals pass on disposable locked-source checkouts.
+failures are not warnings: update or condition the patch and make both OOS 15
+rehearsals plus the OOS 16 full compile pass on disposable locked-source
+checkouts.
 
 An unexpected reverse check ("already applied") also needs investigation; it
 can indicate that the official source incorporated the change or that two

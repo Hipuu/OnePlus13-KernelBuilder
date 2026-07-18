@@ -161,7 +161,10 @@ before source synchronization. Hosted jobs keep repo network fetches serial
 (`--jobs-network 1`) and use two checkout workers, leaving capacity for the
 runner agent and filesystem; the local CLI default remains four workers. A
 60-second observer records load, memory, filesystem space, and the highest-RSS
-processes beside the complete source-sync log in `out/debug`. This avoids
+processes beside the complete source-sync log in `out/debug`. It also emits a
+concise live Actions heartbeat with elapsed time, one-minute load, and remaining
+workspace bytes, so a quiet multi-gigabyte fetch remains distinguishable from a
+stalled runner. This avoids
 transient disk/resource exhaustion without changing a locked revision or the
 canonical `out/source` layout.
 
@@ -331,8 +334,10 @@ Locked external modules use the other official OnePlus path. The module stage
 runs `kernel_platform/build/brunch` to generate the pinned `build.config`, then
 invokes `kernel_platform/build/build_module.sh` with the preserved kernel kit,
 `Module.symvers`, target, and variant. Emitted `.ko` files are staged only after
-their vermagic matches the in-tree module release; `depmod -e` checks the
-combined staging tree for unresolved symbols.
+their complete vermagic matches the in-tree reference; `depmod -e` checks the
+combined staging tree for unresolved symbols. The build context records the
+exact command, exit status, `System.map` digest, and depmod-output digest, and
+artifact verification revalidates that proof before packaging.
 
 ## Configuration pipeline
 

@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from lib.build import (
+    BUILD_TARGETS,
+    RESERVED_BUILD_TARGETS,
+    SUPPORTED_BUILD_TARGETS,
     _compare_kernel_lineage,
     _fragment_paths,
     assert_build_target_contract,
@@ -18,6 +21,7 @@ from lib.build import (
     configure_kernel,
     parse_fragment,
 )
+from lib.artifacts import verify_build_output
 from lib.config import KconfigFragment, discover_configs
 from lib.context import load_context, new_context, write_context
 from lib.errors import BuildToolError
@@ -83,10 +87,23 @@ class BuildTargetContractTests(unittest.TestCase):
         )
 
     def test_monolithic_is_a_fail_closed_reserved_selector(self) -> None:
+        self.assertEqual(SUPPORTED_BUILD_TARGETS, {"kernel", "modules", "mixed"})
+        self.assertEqual(RESERVED_BUILD_TARGETS, {"monolithic"})
+        self.assertEqual(BUILD_TARGETS, SUPPORTED_BUILD_TARGETS | RESERVED_BUILD_TARGETS)
         with self.assertRaisesRegex(BuildToolError, "mixed GKI pipeline"):
             assert_build_target_contract("monolithic")
         with self.assertRaisesRegex(BuildToolError, "mixed GKI pipeline"):
             self._configure("monolithic")
+        with self.assertRaisesRegex(BuildToolError, "mixed GKI pipeline"):
+            verify_build_output(
+                output_dir=self.build,
+                profile=self.profile,
+                feature=self.feature,
+                lock=self.lock,
+                root_variant="none",
+                build_target="monolithic",
+                smoke=True,
+            )
 
     def test_fragment_scope_matrix_is_distinct(self) -> None:
         module_fragment = self.root / "patches" / "common" / "module.config"

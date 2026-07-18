@@ -203,8 +203,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - base: oos16
-            root: kernelsu-next
           - base: oos15-global
             root: kernelsu-next
           - base: oos15-cn

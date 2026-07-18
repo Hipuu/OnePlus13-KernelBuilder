@@ -110,8 +110,9 @@ preserved kernel kit
 and OnePlus's official `kernel_platform/build/build_module.sh` helper. Both
 paths use the same final `.config`, kernel release, and `Module.symvers` as the
 kernel artifact, so the ZIP contains the enabled Bluetooth, CAN, ATH, MT76,
-MemKernel, and RTW88 modules. Verification checks recorded files, vermagic,
-unresolved symbols, and `depmod` before packaging.
+MemKernel, and RTW88 modules. Verification requires exact full-vermagic
+equality (release plus build flags), recorded file identity, and a successful
+`depmod -e` unresolved-symbol proof before packaging.
 
 The wireless firmware ZIP is a separately checksummed release asset. Firmware
 is never treated as kernel source and retains its upstream distribution terms.

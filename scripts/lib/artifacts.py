@@ -14,9 +14,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .build import (
-    BUILD_TARGETS,
     ROOT_VARIANTS,
     _validate_official_module_payload_records,
+    assert_build_target_contract,
     assert_symbols,
     expected_symbols,
     parse_dotconfig,
@@ -55,6 +55,75 @@ def _record_matches(path: Path, record: Mapping[str, Any], role: str) -> None:
         raise BuildToolError(f"{role} size differs from build lineage")
     if sha256_file(path) != record.get("sha256"):
         raise BuildToolError(f"{role} digest differs from build lineage")
+
+
+def _recorded_vermagic(value: object, *, where: str) -> tuple[str, str]:
+    if not isinstance(value, str) or not value or any(
+        character in value for character in "\x00\r\n"
+    ):
+        raise BuildToolError(f"{where} full vermagic is invalid")
+    release = value.split()[0]
+    if not release or any(character.isspace() for character in release):
+        raise BuildToolError(f"{where} kernel release is invalid")
+    return value, release
+
+
+def _verify_depmod_proof(
+    proof: object,
+    *,
+    output_dir: Path,
+    kernel_release: str,
+    system_map_sha256: object,
+    smoke: bool,
+) -> None:
+    if not isinstance(proof, dict):
+        raise BuildToolError("depmod verification proof is absent")
+    if proof.get("kernel_release") != kernel_release:
+        raise BuildToolError("depmod verification kernel release differs from module lineage")
+    if smoke:
+        if proof.get("status") != "not-run-smoke":
+            raise BuildToolError("smoke depmod verification status is invalid")
+        return
+    returncode = proof.get("returncode")
+    if (
+        proof.get("status") != "passed"
+        or not isinstance(returncode, int)
+        or isinstance(returncode, bool)
+        or returncode != 0
+    ):
+        raise BuildToolError("depmod verification did not record a successful result")
+    if proof.get("system_map_sha256") != system_map_sha256:
+        raise BuildToolError("depmod verification System.map differs from kernel lineage")
+    argv = proof.get("argv")
+    if (
+        not isinstance(argv, list)
+        or len(argv) != 7
+        or not all(isinstance(argument, str) for argument in argv)
+    ):
+        raise BuildToolError("depmod verification command is invalid")
+    if argv[:3] != ["depmod", "-e", "-F"] or argv[4] != "-b" or argv[6:] != [
+        kernel_release
+    ]:
+        raise BuildToolError("depmod verification command contract differs")
+    try:
+        system_map_argument = Path(str(argv[3])).resolve()
+        staging_argument = Path(str(argv[5])).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BuildToolError("depmod verification paths are invalid") from exc
+    if system_map_argument != (output_dir / "System.map").resolve():
+        raise BuildToolError("depmod verification used a different System.map")
+    if staging_argument != (output_dir / "modules" / "staging").resolve():
+        raise BuildToolError("depmod verification used a different staging tree")
+    output_sha256 = proof.get("output_sha256")
+    output_size = proof.get("output_size")
+    if (
+        not isinstance(output_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", output_sha256) is None
+        or not isinstance(output_size, int)
+        or isinstance(output_size, bool)
+        or output_size < 0
+    ):
+        raise BuildToolError("depmod verification output evidence is invalid")
 
 
 def _resolve_staged_module(output_dir: Path, record: Mapping[str, Any], *, role: str) -> Path:
@@ -97,11 +166,10 @@ def verify_build_output(
 ) -> dict[str, Any]:
     if root_variant not in ROOT_VARIANTS:
         raise BuildToolError(f"unsupported root variant {root_variant!r}")
-    if build_target not in BUILD_TARGETS:
-        raise BuildToolError(f"unsupported build target {build_target!r}")
+    assert_build_target_contract(build_target)
     context_path = output_dir / ".op13" / "build-context.json"
     context = load_context(context_path)
-    required_stage = "modules-built" if build_target in {"modules", "mixed", "monolithic"} else "kernel-built"
+    required_stage = "modules-built" if build_target in {"modules", "mixed"} else "kernel-built"
     validate_lineage(context, profile, lock, minimum_stage=required_stage)
     if bool(context.get("smoke")) != bool(smoke):
         raise BuildToolError("smoke output must be verified explicitly and cannot be released as real")
@@ -125,6 +193,10 @@ def verify_build_output(
         lto=str(configuration.get("lto")),
     )
     assert_symbols(config_path, required)
+    sealed_required = configuration.get("required_symbols")
+    if not isinstance(sealed_required, dict):
+        raise BuildToolError("sealed common-tree Kconfig request is absent")
+    assert_symbols(config_path, sealed_required)
     kernel = context.get("kernel")
     if not isinstance(kernel, dict):
         raise BuildToolError("kernel record is absent")
@@ -139,6 +211,26 @@ def verify_build_output(
     if not smoke and (output_dir / "Image").stat().st_size < 1024 * 1024:
         raise BuildToolError("Image is implausibly small")
     if not smoke:
+        image_config_record = kernel.get("image_config")
+        module_config_record = kernel.get("module_config")
+        if not isinstance(image_config_record, dict) or not isinstance(module_config_record, dict):
+            raise BuildToolError("kernel record lacks its built common/MSM configuration lineage")
+        _record_matches(config_path, image_config_record, "Image .config")
+        module_config_path = output_dir / "kernel-kit" / ".config"
+        _record_matches(module_config_path, module_config_record, "kernel-kit .config")
+        tree_configs = configuration.get("kernel_tree_configs")
+        if not isinstance(tree_configs, dict):
+            raise BuildToolError("sealed per-tree Kconfig requests are absent")
+        common_tree = tree_configs.get("common")
+        msm_tree = tree_configs.get("msm-kernel")
+        if not isinstance(common_tree, dict) or not isinstance(msm_tree, dict):
+            raise BuildToolError("sealed common/MSM Kconfig requests are absent")
+        common_required = common_tree.get("required_symbols")
+        msm_required = msm_tree.get("required_symbols")
+        if not isinstance(common_required, dict) or not isinstance(msm_required, dict):
+            raise BuildToolError("sealed common/MSM Kconfig symbol requests are absent")
+        assert_symbols(config_path, common_required)
+        assert_symbols(module_config_path, msm_required)
         order_record = kernel.get("official_modules_order")
         module_records = kernel.get("official_modules")
         if not isinstance(order_record, dict) or not isinstance(module_records, list):
@@ -156,9 +248,29 @@ def verify_build_output(
             raise BuildToolError("external modules record is absent")
         if modules.get("module_symvers_sha256") != symvers_record.get("sha256"):
             raise BuildToolError("modules were not built with this Module.symvers")
+        kernel_vermagic, kernel_release = _recorded_vermagic(
+            modules.get("kernel_vermagic"),
+            where="module build",
+        )
+        if modules.get("kernel_release") != kernel_release:
+            raise BuildToolError("module build kernel release differs from full vermagic")
+        _verify_depmod_proof(
+            modules.get("depmod_verification"),
+            output_dir=output_dir,
+            kernel_release=kernel_release,
+            system_map_sha256=system_map_record.get("sha256"),
+            smoke=smoke,
+        )
+        modules_log = output_dir / "modules" / ".op13" / "modules-build.log"
+        modules_log_record = modules.get("build_log")
+        if not isinstance(modules_log_record, dict):
+            raise BuildToolError("module build log record is absent")
+        _record_matches(modules_log, modules_log_record, "module build log")
         in_tree = modules.get("in_tree_modules")
         if not isinstance(in_tree, dict):
             raise BuildToolError("in-tree module record is absent")
+        if in_tree.get("vermagic") != kernel_vermagic:
+            raise BuildToolError("in-tree module full vermagic differs from module lineage")
         configured_modules = sorted(
             symbol for symbol, value in parse_dotconfig(config_path).items() if value == "m"
         )
@@ -230,6 +342,10 @@ def verify_build_output(
             if not isinstance(dependency, dict):
                 raise BuildToolError("invalid external module record")
             dependency_id = str(dependency["dependency"])
+            if dependency.get("vermagic") != kernel_vermagic:
+                raise BuildToolError(
+                    f"external module {dependency_id} full vermagic differs from module lineage"
+                )
             locked_dependency = lock.dependencies.get(dependency_id)
             if (
                 locked_dependency is None
@@ -567,7 +683,7 @@ def package_build(
         anykernel_zip = output_dir / f"{base_name}-AnyKernel3.zip"
         deterministic_zip(anykernel_work, anykernel_zip, epoch=epoch)
         records.append(record_for_file(anykernel_zip, role="anykernel3-zip"))
-        if build_target in {"modules", "mixed", "monolithic"}:
+        if build_target in {"modules", "mixed"}:
             module_staging = input_dir / "modules" / "staging"
             if not module_staging.is_dir():
                 raise BuildToolError("module packaging requested but module staging is missing")
