@@ -201,7 +201,10 @@ jobs:
               ("release.yml", "id-token"),
               ("source-monitor.yml", "issues"),
           }
-          use_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
+          use_pattern = re.compile(
+              r"^[ \t]*uses:[ \t]*([^# \t\r\n]+)",
+              re.MULTILINE,
+          )
           for path in workflows:
               text = path.read_text(encoding="utf-8")
               for use in use_pattern.findall(text):
@@ -214,20 +217,20 @@ jobs:
                   if not re.fullmatch(r"[0-9a-f]{40}", ref):
                       failures.append(f"{path}: action ref is not a full commit SHA: {use}")
               if re.search(
-                  r"^\s*permissions:\s*(?:read-all|write-all)\s*$",
+                  r"^[ \t]*permissions:[ \t]*(?:read-all|write-all)[ \t]*$",
                   text,
                   re.MULTILINE,
               ):
                   failures.append(f"{path}: broad permission shorthand is forbidden")
               inline_permissions = re.findall(
-                  r"^\s*permissions:\s*([^\s].*)$",
+                  r"^[ \t]*permissions:[ \t]*([^ \t\r\n].*)$",
                   text,
                   re.MULTILINE,
               )
               if any(value.strip() != "{}" for value in inline_permissions):
                   failures.append(f"{path}: inline permission mappings are forbidden")
               for scope in re.findall(
-                  r"^\s+([a-z][a-z-]*):\s+write\s*$",
+                  r"^[ \t]+([a-z][a-z-]*):[ \t]+write[ \t]*$",
                   text,
                   re.MULTILINE,
               ):

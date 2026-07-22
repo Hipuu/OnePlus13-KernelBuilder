@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -105,13 +109,16 @@ class WorkflowPermissionContractTests(unittest.TestCase):
         writes: list[tuple[str, str, str]] = []
         for path in _workflow_paths():
             text = path.read_text(encoding="utf-8")
-            self.assertNotRegex(
-                text,
-                r"^\s*permissions:\s*(?:read-all|write-all)\s*$",
+            self.assertIsNone(
+                re.search(
+                    r"^[ \t]*permissions:[ \t]*(?:read-all|write-all)[ \t]*$",
+                    text,
+                    re.MULTILINE,
+                ),
                 f"{path.name}: broad permission shorthand is forbidden",
             )
             for permission in re.findall(
-                r"^\s+([a-z][a-z-]*):\s+write\s*$",
+                r"^[ \t]+([a-z][a-z-]*):[ \t]+write[ \t]*$",
                 text,
                 re.MULTILINE,
             ):
@@ -124,7 +131,7 @@ class WorkflowPermissionContractTests(unittest.TestCase):
                 for job_name, lines in _job_blocks(path):
                     block = "\n".join(lines)
                     if re.search(
-                        rf"^\s+{re.escape(permission)}:\s+write\s*$",
+                        rf"^[ \t]+{re.escape(permission)}:[ \t]+write[ \t]*$",
                         block,
                         re.MULTILINE,
                     ):
@@ -153,7 +160,52 @@ class WorkflowPermissionContractTests(unittest.TestCase):
             if job_name == "publish":
                 continue
             block = "\n".join(lines)
-            self.assertNotRegex(block, r"^\s+\S+:\s+write\s*$")
+            self.assertIsNone(
+                re.search(
+                    r"^[ \t]+\S+:[ \t]+write[ \t]*$",
+                    block,
+                    re.MULTILINE,
+                )
+            )
+
+    def test_inline_permission_detection_never_crosses_a_line_boundary(self) -> None:
+        pattern = re.compile(
+            r"^[ \t]*permissions:[ \t]*([^ \t\r\n].*)$",
+            re.MULTILINE,
+        )
+        self.assertEqual(pattern.findall("permissions:\n  contents: read\n"), [])
+        self.assertEqual(pattern.findall("permissions: {}\n"), ["{}"])
+        self.assertEqual(pattern.findall("permissions: write-all\n"), ["write-all"])
+        for path in _workflow_paths():
+            values = pattern.findall(path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                all(value.strip() == "{}" for value in values),
+                f"{path.name}: inline permission mappings are forbidden",
+            )
+
+    def test_embedded_workflow_policy_accepts_the_checked_in_workflows(self) -> None:
+        validate = (WORKFLOW_DIRECTORY / "validate.yml").read_text(encoding="utf-8")
+        step = validate.split(
+            "      - name: Enforce workflow pinning and credential policy\n",
+            1,
+        )[1].split("\n  patch-rehearsal:\n", 1)[0]
+        embedded = step.split("          python3 - <<'PY'\n", 1)[1].split(
+            "\n          PY",
+            1,
+        )[0]
+        script = textwrap.dedent(embedded)
+        with tempfile.TemporaryDirectory() as temporary_name:
+            root = Path(temporary_name)
+            destination = root / ".github" / "workflows"
+            destination.mkdir(parents=True)
+            for path in _workflow_paths():
+                shutil.copy2(path, destination / path.name)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                exec(compile(script, "workflow-permission-policy", "exec"), {})
+            finally:
+                os.chdir(previous)
 
     def test_every_checkout_disables_persisted_credentials(self) -> None:
         checkout_count = 0
