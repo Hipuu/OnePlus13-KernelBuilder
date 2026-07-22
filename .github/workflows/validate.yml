@@ -394,7 +394,7 @@ jobs:
         with:
           root-reserve-mb: ${{ steps.prepare-storage.outputs.root_reserve_mb }}
           temp-reserve-mb: ${{ steps.prepare-storage.outputs.temp_reserve_mb }}
-          swap-size-mb: 4096
+          swap-size-mb: 8192
           overprovision-lvm: 'false'
           build-mount-path: ${{ github.workspace }}
           build-mount-path-ownership: runner:runner

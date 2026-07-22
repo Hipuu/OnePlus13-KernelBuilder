@@ -146,7 +146,7 @@ unused runner-image paths. The storage preflight accepts both hosted layouts:
 the older separate `/` and `/mnt` filesystems and the newer consolidated
 145-GiB root filesystem where `/mnt` is an ordinary directory. The
 immutable-pinned disk action always creates two exact loop-backed LVM physical
-volumes, recreates 4 GiB of swap, and mounts the ext4 build volume at the whole
+volumes, recreates 8 GiB of swap, and mounts the ext4 build volume at the whole
 GitHub workspace. Separate-device mode reserves 8.25 GiB on `/` and 1 GiB on
 `/mnt`. Shared-device mode stages the action's sequential allocations with
 9.25/8.25-GiB reserve inputs, producing a 1-GiB second PV while still leaving
@@ -167,6 +167,12 @@ workspace bytes, so a quiet multi-gigabyte fetch remains distinguishable from a
 stalled runner. This avoids
 transient disk/resource exhaustion without changing a locked revision or the
 canonical `out/source` layout.
+
+Hosted OOS 16 compilation additionally fixes Bazel to two concurrent actions,
+two local CPU resources, and 6144 MiB of schedulable RAM. Together with the
+8-GiB swap volume, this leaves runner-agent headroom while retaining enough
+parallelism for the six-hour hosted-job ceiling. OOS 15 and local builds retain
+the upstream tool defaults.
 
 Set optional repository variables `KERNEL_BRANDING` and `BUILD_TIMESTAMP` for
 single-line build metadata. A manual modules-only build resolves the newest

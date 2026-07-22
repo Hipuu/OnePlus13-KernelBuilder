@@ -134,6 +134,12 @@ only the disposable `.op13/config-work` source copies while retaining the
 build context, configuration records, kernel log, final `.config`, `vmlinux`,
 `System.map`, `Module.symvers`, and modules.
 
+After a repeated OOS 16 compile-phase runner loss, keep the sealed hosted policy
+at two Bazel jobs, two local CPU resources, 6144 MiB of schedulable RAM, and an
+8-GiB swap volume. If another runner disappears, compare the last surviving
+heartbeat when available before reducing concurrency to one; a one-job clean
+compile can approach the six-hour hosted-job ceiling.
+
 ## Strict GKI symbol-list failure
 
 If the final Bazel actions report `from_kuid` for

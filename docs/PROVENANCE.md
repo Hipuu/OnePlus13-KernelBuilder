@@ -233,13 +233,15 @@ continues to resolve from the exact common-kernel commit unless an explicitly
 validated timestamp was selected.
 
 For hosted OOS 16 compilation, the repository fixes
-`EXTRA_KBUILD_ARGS` to `--jobs=2 --local_ram_resources=8192`. The value is not a
+`EXTRA_KBUILD_ARGS` to
+`--jobs=2 --local_cpu_resources=2 --local_ram_resources=6144`. The value is not a
 workflow input: `build.py` derives it only from the `oos16` profile plus the
 GitHub Actions environment and overwrites any inherited value before invoking
 the official OnePlus script. OOS 15 and local builds explicitly pass an empty
-value and retain the upstream tool default. The selected policy, job count, and
-RAM value are sealed in `kernel.resource_policy`, so they travel through the
-debug bundle and `BUILD-MANIFEST.json`.
+value and retain the upstream tool default. The selected policy, job count, CPU
+and RAM resource values, and 8192-MiB hosted swap contract are sealed in
+`kernel.resource_policy`, so they travel through the debug bundle and
+`BUILD-MANIFEST.json`.
 
 ## Vendor-module KMI closure
 

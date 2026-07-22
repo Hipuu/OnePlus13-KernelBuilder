@@ -224,6 +224,14 @@ done < <(sudo swapon --show=NAME --noheadings)
 if [[ "$swap_active" != true ]]; then
   fail_layout "pooled swap logical volume is not active"
 fi
+if ! swap_size_bytes=$(sudo blockdev --getsize64 "$expected_swap_device" 2>> "$layout_log"); then
+  fail_layout "pooled swap logical volume size is unreadable"
+fi
+expected_swap_size_bytes=$((8 * 1024 * 1024 * 1024))
+if [[ ! "$swap_size_bytes" =~ ^[0-9]+$ ]] ||
+   ((swap_size_bytes != expected_swap_size_bytes)); then
+  fail_layout "pooled swap logical volume is not exactly 8 GiB"
+fi
 
 probe="$out_root/.op13-disk-write-probe"
 if ! (umask 077 && printf 'writable\n' > "$probe" && test -s "$probe"); then
@@ -247,7 +255,7 @@ fi
 
 required_commands=(
   bash python3 jq gh git curl make patch depmod zip unzip sha256sum tar xz zstd
-  findmnt mountpoint losetup pvs lvs swapon stat
+  blockdev findmnt mountpoint losetup pvs lvs swapon stat
 )
 for required_command in "${required_commands[@]}"; do
   if ! command -v "$required_command" >> "$layout_log"; then
@@ -269,6 +277,7 @@ done
   echo "workspace_device=$workspace_device"
   echo "root_loop_device=${root_loops[0]}"
   echo "temp_loop_device=${temp_loops[0]}"
+  echo "swap_size_bytes=$swap_size_bytes"
   echo "root_available_bytes=$root_available"
   echo "workspace_available_bytes=$out_available"
   echo '--- findmnt ---'
@@ -289,5 +298,6 @@ df -h / /mnt "$out_root" > "$debug_root/disk-after-lvm.txt"
   echo "- Storage topology: ${storage_mode}"
   echo "- Root reserve available: ${root_available} bytes"
   echo "- Pooled workspace available: ${out_available} bytes"
+  echo "- Pooled swap capacity: ${swap_size_bytes} bytes"
   echo "- Workspace mount source: ${mount_source}"
 } >> "$GITHUB_STEP_SUMMARY"

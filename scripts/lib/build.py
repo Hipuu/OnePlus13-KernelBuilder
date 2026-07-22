@@ -57,19 +57,32 @@ SYMBOL_LINE_RE = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 SYMBOL_UNSET_RE = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
 CLANG_VERSION_RE = re.compile(r"^CLANG_VERSION=([A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
 MAX_BUILD_EPOCH = int(datetime(2107, 12, 31, 23, 59, 58, tzinfo=timezone.utc).timestamp())
-OOS16_HOSTED_EXTRA_KBUILD_ARGS = "--jobs=2 --local_ram_resources=8192"
+KERNEL_RESOURCE_POLICY_SCHEMA_VERSION = 2
+OOS16_HOSTED_BAZEL_JOBS = 2
+OOS16_HOSTED_LOCAL_CPU_RESOURCES = 2
+OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB = 6144
+OOS16_HOSTED_SWAP_MIB = 8192
+OOS16_HOSTED_EXTRA_KBUILD_ARGS = (
+    f"--jobs={OOS16_HOSTED_BAZEL_JOBS} "
+    f"--local_cpu_resources={OOS16_HOSTED_LOCAL_CPU_RESOURCES} "
+    f"--local_ram_resources={OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB}"
+)
 
 
 def _effective_kernel_resource_policy(profile_id: str) -> dict[str, Any]:
     bounded = profile_id == "oos16" and os.environ.get("GITHUB_ACTIONS") == "true"
     value = OOS16_HOSTED_EXTRA_KBUILD_ARGS if bounded else ""
     return {
-        "schema_version": 1,
+        "schema_version": KERNEL_RESOURCE_POLICY_SCHEMA_VERSION,
         "profile": profile_id,
         "policy": "oos16-hosted-bounded" if bounded else "tool-default",
         "extra_kbuild_args": value or None,
-        "bazel_jobs": 2 if bounded else None,
-        "local_ram_resources_mib": 8192 if bounded else None,
+        "bazel_jobs": OOS16_HOSTED_BAZEL_JOBS if bounded else None,
+        "local_cpu_resources": OOS16_HOSTED_LOCAL_CPU_RESOURCES if bounded else None,
+        "local_ram_resources_mib": (
+            OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB if bounded else None
+        ),
+        "hosted_swap_mib": OOS16_HOSTED_SWAP_MIB if bounded else None,
         "workflow_input": False,
     }
 

@@ -324,7 +324,7 @@ jobs:
         with:
           root-reserve-mb: ${{ steps.prepare-storage.outputs.root_reserve_mb }}
           temp-reserve-mb: ${{ steps.prepare-storage.outputs.temp_reserve_mb }}
-          swap-size-mb: 4096
+          swap-size-mb: 8192
           overprovision-lvm: 'false'
           build-mount-path: ${{ github.workspace }}
           build-mount-path-ownership: runner:runner
@@ -894,7 +894,7 @@ jobs:
       - name: Build kernel
         if: inputs.target != 'modules'
         env:
-          EXTRA_KBUILD_ARGS: ${{ inputs.base == 'oos16' && '--jobs=2 --local_ram_resources=8192' || '' }}
+          EXTRA_KBUILD_ARGS: ${{ inputs.base == 'oos16' && '--jobs=2 --local_cpu_resources=2 --local_ram_resources=6144' || '' }}
         run: |
           set -euo pipefail
           args=(--source-dir "$SOURCE_DIR" --output "$BUILD_DIR")

@@ -16,7 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from lib.build import (
+    KERNEL_RESOURCE_POLICY_SCHEMA_VERSION,
+    OOS16_HOSTED_BAZEL_JOBS,
     OOS16_HOSTED_EXTRA_KBUILD_ARGS,
+    OOS16_HOSTED_LOCAL_CPU_RESOURCES,
+    OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB,
+    OOS16_HOSTED_SWAP_MIB,
     _effective_kernel_resource_policy,
 )
 
@@ -330,13 +335,10 @@ class KernelBuildObservabilityTests(unittest.TestCase):
         self.assertEqual(step.count("-- bash scripts/build-kernel.sh"), 1)
         self.assertIn('--debug-dir "$DEBUG_DIR"', step)
         self.assertIn('"${args[@]}"', step)
-        for limit in (
-            "--local_cpu_resources",
-            "BAZEL_JOBS",
-            "ulimit",
-        ):
+        run_script = step[step.index("        run: |\n") :]
+        for limit in ("--jobs", "--local_cpu_resources", "--local_ram_resources", "ulimit"):
             with self.subTest(limit=limit):
-                self.assertNotIn(limit, step)
+                self.assertNotIn(limit, run_script)
 
     def test_workflow_applies_one_constant_oos16_resource_policy(self) -> None:
         workflow = self._text(".github/workflows/build.yml")
@@ -348,7 +350,7 @@ class KernelBuildObservabilityTests(unittest.TestCase):
         step = workflow[start:end]
         expected = (
             "          EXTRA_KBUILD_ARGS: ${{ inputs.base == 'oos16' && "
-            "'--jobs=2 --local_ram_resources=8192' || '' }}\n"
+            "'--jobs=2 --local_cpu_resources=2 --local_ram_resources=6144' || '' }}\n"
         )
         self.assertIn(expected, step)
         self.assertEqual(workflow.count("EXTRA_KBUILD_ARGS:"), 1)
@@ -370,10 +372,22 @@ class KernelBuildObservabilityTests(unittest.TestCase):
             oos16["extra_kbuild_args"],
             OOS16_HOSTED_EXTRA_KBUILD_ARGS,
         )
-        self.assertEqual(oos16["bazel_jobs"], 2)
-        self.assertEqual(oos16["local_ram_resources_mib"], 8192)
+        self.assertEqual(
+            oos16["schema_version"], KERNEL_RESOURCE_POLICY_SCHEMA_VERSION
+        )
+        self.assertEqual(oos16["bazel_jobs"], OOS16_HOSTED_BAZEL_JOBS)
+        self.assertEqual(
+            oos16["local_cpu_resources"], OOS16_HOSTED_LOCAL_CPU_RESOURCES
+        )
+        self.assertEqual(
+            oos16["local_ram_resources_mib"],
+            OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB,
+        )
+        self.assertEqual(oos16["hosted_swap_mib"], OOS16_HOSTED_SWAP_MIB)
         self.assertEqual(oos15["policy"], "tool-default")
         self.assertIsNone(oos15["extra_kbuild_args"])
+        self.assertIsNone(oos15["local_cpu_resources"])
+        self.assertIsNone(oos15["hosted_swap_mib"])
 
         with patch.dict(
             os.environ,

@@ -73,7 +73,7 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
                     "temp-reserve-mb: ${{ steps.prepare-storage.outputs.temp_reserve_mb }}",
                     text,
                 )
-                self.assertIn("swap-size-mb: 4096", text)
+                self.assertIn("swap-size-mb: 8192", text)
                 self.assertIn("overprovision-lvm: 'false'", text)
                 self.assertIn("build-mount-path: ${{ github.workspace }}", text)
                 self.assertIn("build-mount-path-ownership: runner:runner", text)
@@ -168,6 +168,9 @@ class HostedRunnerDiskContractTests(unittest.TestCase):
             'if ((${#build_pvs[@]} != 2))',
             "/dev/mapper/buildvg-swap",
             "sudo swapon --show=NAME --noheadings",
+            'sudo blockdev --getsize64 "$expected_swap_device"',
+            "expected_swap_size_bytes=$((8 * 1024 * 1024 * 1024))",
+            "pooled swap logical volume is not exactly 8 GiB",
             "minimum_root_available=$((8 * 1024 * 1024 * 1024))",
             "minimum_available=$((100 * 1024 * 1024 * 1024))",
             "less than 8 GiB remains reserved on the root filesystem",

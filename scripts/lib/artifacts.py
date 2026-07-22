@@ -27,6 +27,12 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .build import (
+    KERNEL_RESOURCE_POLICY_SCHEMA_VERSION,
+    OOS16_HOSTED_BAZEL_JOBS,
+    OOS16_HOSTED_EXTRA_KBUILD_ARGS,
+    OOS16_HOSTED_LOCAL_CPU_RESOURCES,
+    OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB,
+    OOS16_HOSTED_SWAP_MIB,
     ROOT_VARIANTS,
     _validate_official_module_payload_records,
     assert_build_target_contract,
@@ -490,7 +496,11 @@ def verify_build_output(
     if not isinstance(kernel, dict):
         raise BuildToolError("kernel record is absent")
     resource_policy = kernel.get("resource_policy")
-    if not isinstance(resource_policy, dict) or resource_policy.get("schema_version") != 1:
+    if (
+        not isinstance(resource_policy, dict)
+        or resource_policy.get("schema_version")
+        != KERNEL_RESOURCE_POLICY_SCHEMA_VERSION
+    ):
         raise BuildToolError("kernel resource-policy evidence is absent")
     if (
         resource_policy.get("profile") != profile.id
@@ -501,9 +511,13 @@ def verify_build_output(
         if (
             profile.id != "oos16"
             or resource_policy.get("extra_kbuild_args")
-            != "--jobs=2 --local_ram_resources=8192"
-            or resource_policy.get("bazel_jobs") != 2
-            or resource_policy.get("local_ram_resources_mib") != 8192
+            != OOS16_HOSTED_EXTRA_KBUILD_ARGS
+            or resource_policy.get("bazel_jobs") != OOS16_HOSTED_BAZEL_JOBS
+            or resource_policy.get("local_cpu_resources")
+            != OOS16_HOSTED_LOCAL_CPU_RESOURCES
+            or resource_policy.get("local_ram_resources_mib")
+            != OOS16_HOSTED_LOCAL_RAM_RESOURCES_MIB
+            or resource_policy.get("hosted_swap_mib") != OOS16_HOSTED_SWAP_MIB
         ):
             raise BuildToolError("bounded OOS16 resource-policy evidence is invalid")
     elif resource_policy.get("policy") == "tool-default":
@@ -512,7 +526,9 @@ def verify_build_output(
             for field in (
                 "extra_kbuild_args",
                 "bazel_jobs",
+                "local_cpu_resources",
                 "local_ram_resources_mib",
+                "hosted_swap_mib",
             )
         ):
             raise BuildToolError("default kernel resource-policy evidence is invalid")
