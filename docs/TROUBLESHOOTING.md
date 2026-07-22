@@ -2,7 +2,7 @@
 
 Start with the failed stage, not the last line of the job. Re-run with
 `debug=true`, download the
-`debug-<base>-<root>-<profile>-<target>-<optimization>-<lto>-<run-id>`
+`debug-<base>-<root>-<profile>-<target>-<optimization>-<lto>-<run-id>-attempt-<n>`
 artifact, and preserve the original run ID.
 
 ## Source synchronization fails
@@ -11,7 +11,8 @@ artifact, and preserve the original run ID.
   `locked_manifest` exists under `manifests/lockfiles/`.
 - Check that every project in the locked XML has a full revision SHA. A moving
   OnePlus branch in the upstream manifest is provenance, not a checkout input.
-- Compare the failing project URL with `out/source/resolved-manifest.xml` and
+- Compare the failing project URL with
+  `out/source/.op13/<base>-manifest-resolved.xml` and
   the dependency lock. Do not fix the job by changing a commit to `main`,
   `master`, `dev`, or another branch name.
 - For a download, recalculate the file SHA-256 from a trusted upstream release
@@ -28,11 +29,14 @@ artifact, and preserve the original run ID.
 
 ## A patch fails or is already applied
 
-Inspect the patch log and every `.rej`/`.orig` in the debug bundle. Confirm the
-base, KMI, root variant, dependency commit, and patch-series order. Patch
-failures are not warnings: update or condition the patch and make both OOS 15
-rehearsals plus the OOS 16 full compile pass on disposable locked-source
-checkouts.
+Inspect `patch-operations.json` in the debug bundle. It is written after every
+operation; a required failure records the exact operation, kernel tree, and
+bounded command output before the patch command exits. Any `.rej`/`.orig`
+bytes are copied under `patch-residue/files/` and bound by
+`patch-residue/PATCH-RESIDUE-MANIFEST.json`. Confirm the base, KMI, root
+variant, dependency commit, and patch-series order. Patch failures are not
+warnings: update or condition the patch and make both OOS 15 rehearsals plus
+the OOS 16 full compile pass on disposable locked-source checkouts.
 
 An unexpected reverse check ("already applied") also needs investigation; it
 can indicate that the official source incorporated the change or that two
@@ -120,6 +124,27 @@ larger case-sensitive Linux filesystem. Do not delete source projects in the
 middle of a build, because modules and DTBs must remain tied to the same
 manifest.
 
+During the kernel phase, `kernel-build-telemetry.log` records an immediate,
+one-minute, and final UTC snapshot with elapsed time, load, `MemAvailable`,
+swap, workspace capacity, and the highest-RSS processes. The live log receives
+matching `[kernel-build heartbeat]` summaries. A single lost-runner annotation
+without a final log or artifact is not enough evidence to impose Bazel job or
+memory limits; rerun once and compare the telemetry first. Debug upload omits
+only the disposable `.op13/config-work` source copies while retaining the
+build context, configuration records, kernel log, final `.config`, `vmlinux`,
+`System.map`, `Module.symvers`, and modules.
+
+## Strict GKI symbol-list failure
+
+If the final Bazel actions report `from_kuid` for
+`oplus_bsp_mm_osvelte.ko` or `from_kuid_munged` for `msm_sysstats.ko`, inspect
+`kernel_platform/common/.op13-kmi-symbol-exports.json` first. The repository
+integrates those two vendor-module requirements through exact per-base
+pre/postimage contracts; do not disable strict mode or append an unbounded
+symbol set. A missing stamp means the common patch series did not complete. A
+pre/postimage error means the locked OnePlus source changed and requires a
+reviewed contract update rather than a retry.
+
 ## Modules-only build cannot find a kernel artifact
 
 A manual modules-only Actions run resolves the newest unexpired matching kernel
@@ -127,7 +152,7 @@ artifact. To select a specific run, set the repository variable
 `KERNEL_ARTIFACT_RUN_ID`. The referenced run must use the same base, root
 variant, feature profile, optimization, LTO mode, branding, and current commit
 SHA and still retain the reusable
-`kernel-build-<base>-<root>-<profile>-mixed-<optimization>-<lto>-<branding>`
+`kernel-build-<base>-<root>-<profile>-mixed-<optimization>-<lto>-<branding>-timestamp-<key>`
 artifact. A selected run ID does not bypass those checks. Start a new matching
 mixed run when the artifact has expired.
 

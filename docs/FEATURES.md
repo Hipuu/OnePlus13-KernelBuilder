@@ -5,6 +5,16 @@ same complete 52-flag catalog, a boolean value for every flag, ordered patch
 manifests, Kconfig fragments, final required symbols, and locked external-module
 IDs. Profiles do not inherit from one another.
 
+`configs/feature-evidence.yml` binds every catalog key to selected patch
+operations, requested Kconfig values, locked external modules, or an exact
+source-level capability reference. Repository validation fails when an enabled
+flag has no matching evidence in a feature profile and OxygenOS base. Patch
+selection uses `profile-base-capability` semantics: the evidence is resolved
+across the profile's supported root variants, so the nine reported
+feature-profile/base combinations are capability checks rather than per-root
+activation claims. This static registry does not replace the build-time
+`olddefconfig` and final `.config` assertions.
+
 ## Profile comparison
 
 | Capability | `wild` | `nethunter` | `full` |
@@ -20,7 +30,8 @@ IDs. Profiles do not inherit from one another.
 | TMPFS XATTR/ACL | yes | yes | yes |
 | Unicode and fake-config fixes | yes | no | yes |
 | Oryon-specific optimization set | yes | no | yes |
-| Memory, I/O, and scheduler optimization set | yes | yes | yes |
+| Memory optimization | Wild patches + LRU | LRU only | Wild patches + LRU |
+| I/O and scheduler optimization patch sets | yes | no | yes |
 | O2/O3 and Thin/Full LTO controls | yes | yes | yes |
 | BBR, BBRv3, and FQ | yes | yes | yes |
 | CAKE and PIE | yes | no | yes |
@@ -58,7 +69,9 @@ The Wild patch manifest covers HMBIRD/Fengchi SCX integration, module
 overlay/interception, fake-config behavior, NTSync and Unicode compatibility,
 Droidspaces, Baseband Guard, and the Oryon/memory/I/O/scheduler patch groups.
 Every patch has a pinned upstream dependency and an explicit profile/KMI
-condition.
+condition. The NetHunter profile keeps its narrower generational-LRU memory
+configuration (`CONFIG_LRU_GEN` and `CONFIG_LRU_GEN_ENABLED`) but does not
+advertise the Wild I/O or scheduler patch groups.
 
 Optimization and LTO are inputs rather than separate profiles. The configure
 stage applies the profile defaults, then the selected `O2`/`O3` and

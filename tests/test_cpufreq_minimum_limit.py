@@ -67,7 +67,7 @@ class CpufreqMinimumLimitTests(unittest.TestCase):
             enabled,
             {
                 (feature, base)
-                for feature in ("full", "nethunter", "wild")
+                for feature in ("full", "wild")
                 for base in ("oos15-cn", "oos15-global", "oos16")
             },
         )

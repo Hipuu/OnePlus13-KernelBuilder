@@ -28,6 +28,7 @@ from lib.config import (
 )
 from lib.context import load_context
 from lib.errors import BuildToolError, SourceChanged
+from lib.feature_evidence import validate_feature_evidence
 from lib.patches import apply_patch_series, validate_series_documents
 from lib.runtime import fetch_dependencies, monitor_or_raise, sync_sources
 
@@ -96,6 +97,7 @@ def command_validate(args: argparse.Namespace) -> None:
     summary = validate_repository(root)
     device, lock, profiles, features = discover_configs(root)
     summary["patch_series"] = validate_series_documents(root, profiles, features, lock)
+    summary["feature_evidence"] = validate_feature_evidence(root, profiles, features)
     _scan_pipeline_sources(root)
     summary["pipeline_source_scan"] = "passed"
     _print(summary)

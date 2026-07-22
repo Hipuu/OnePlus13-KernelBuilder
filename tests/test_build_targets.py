@@ -19,6 +19,8 @@ from lib.build import (
     build_external_modules,
     build_kernel,
     configure_kernel,
+    expected_symbols_for_target,
+    parse_dotconfig,
     parse_fragment,
 )
 from lib.artifacts import verify_build_output
@@ -187,6 +189,93 @@ class BuildTargetContractTests(unittest.TestCase):
         self.assertNotIn("CONFIG_BT_HCIBTUSB", msm_symbols)
         self.assertNotIn("CONFIG_CAN", msm_symbols)
         self.assertNotIn("CONFIG_MEMKERNEL", msm_symbols)
+
+    def test_real_kernel_only_profiles_configure_build_and_verify_target_aware_symbols(self) -> None:
+        device, lock, profiles, features = discover_configs(ROOT)
+        module_only = {
+            "CONFIG_ATH10K_USB",
+            "CONFIG_ATH11K",
+            "CONFIG_ATH11K_PCI",
+            "CONFIG_ATH9K_HTC",
+            "CONFIG_CAN_SLCAN",
+            "CONFIG_CFG80211",
+            "CONFIG_CRYPTO_MICHAEL_MIC",
+            "CONFIG_MAC80211",
+            "CONFIG_MEMKERNEL",
+            "CONFIG_MT7601U",
+            "CONFIG_MT7663U",
+            "CONFIG_MT76_USB",
+            "CONFIG_MT76x0U",
+            "CONFIG_MT76x2U",
+            "CONFIG_MT7921U",
+        }
+        for base in ("oos15-cn", "oos15-global", "oos16"):
+            for feature_name in ("nethunter", "full"):
+                with self.subTest(base=base, feature=feature_name):
+                    profile = profiles[base]
+                    feature = features[feature_name]
+                    case = self.root / f"real-{base}-{feature_name}"
+                    source = case / "source"
+                    output = case / "build"
+                    (source / ".op13").mkdir(parents=True)
+                    resolved = source / ".op13" / "resolved.xml"
+                    resolved.write_bytes(profile.locked_manifest.read_bytes())
+                    context_path = source / ".op13" / "build-context.json"
+                    write_context(
+                        context_path,
+                        new_context(profile, lock, resolved, smoke=True),
+                    )
+                    configure_kernel(
+                        root=ROOT,
+                        source_dir=source,
+                        output_dir=output,
+                        context_path=context_path,
+                        profile=profile,
+                        feature=feature,
+                        device=device,
+                        lock=lock,
+                        root_variant="kernelsu-next",
+                        optimization="O2",
+                        lto="thin",
+                        build_target="kernel",
+                        smoke=True,
+                        check_only=False,
+                    )
+                    build_kernel(
+                        source_dir=source,
+                        output_dir=output,
+                        context_path=context_path,
+                        profile=profile,
+                        device=device,
+                        lock=lock,
+                        clean=False,
+                        debug=False,
+                        smoke=True,
+                        dry_run=False,
+                        branding="TargetAwareSmoke",
+                        build_timestamp=None,
+                    )
+                    verify_build_output(
+                        output_dir=output,
+                        profile=profile,
+                        feature=feature,
+                        lock=lock,
+                        root_variant="kernelsu-next",
+                        build_target="kernel",
+                        smoke=True,
+                    )
+                    expected = expected_symbols_for_target(
+                        ROOT,
+                        feature,
+                        root_variant="kernelsu-next",
+                        optimization="O2",
+                        lto="thin",
+                        build_target="kernel",
+                    )
+                    self.assertTrue(module_only.isdisjoint(expected))
+                    self.assertEqual(expected["CONFIG_BT_HCIBTUSB"], "m")
+                    final_config = parse_dotconfig(output / ".config")
+                    self.assertEqual(final_config["CONFIG_BT_HCIBTUSB"], "m")
 
     def test_kernel_phase_rejects_modules_only_configuration(self) -> None:
         self._configure("mixed")

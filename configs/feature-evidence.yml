@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "selection_semantics": "profile-base-capability",
+  "feature_flags": {
+    "root.kernelsu": [
+      {
+        "kind": "patch-operation",
+        "operation": "root:stage-kernelsu"
+      }
+    ],
+    "root.kernelsu_next": [
+      {
+        "kind": "patch-operation",
+        "operation": "root:stage-kernelsu-next"
+      }
+    ],
+    "root.susfs": [
+      {
+        "kind": "patch-operation",
+        "operation": "root:patch-common-susfs"
+      }
+    ],
+    "oneplus.hmbird_fengchi_scx": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:hmbird-fengchi-oneplus13"
+      }
+    ],
+    "oneplus.baseband_guard": [
+      {
+        "kind": "patch-operation",
+        "operation": "common:wire-baseband-guard-lsm"
+      }
+    ],
+    "oneplus.module_overlay_interception": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:module-overlay-source-only"
+      }
+    ],
+    "oneplus.droidspaces": [
+      {
+        "kind": "patch-operation",
+        "operation": "common:droidspaces-oneplus-6.6"
+      }
+    ],
+    "oneplus.ntsync": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:ntsync-android15-6.6-compat"
+      }
+    ],
+    "oneplus.rust_binder": [],
+    "oneplus.tmpfs_xattr_acl": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_TMPFS_XATTR",
+        "value": "y"
+      }
+    ],
+    "oneplus.unicode_fix": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:unicode-normalization-bypass-fix"
+      }
+    ],
+    "oneplus.fake_config": [
+      {
+        "kind": "patch-operation",
+        "operation": "common:fake-proc-config-support"
+      }
+    ],
+    "performance.oryon": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:oryon-copy-prefetch"
+      }
+    ],
+    "performance.memory": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_LRU_GEN_ENABLED",
+        "value": "y"
+      },
+      {
+        "kind": "patch-operation",
+        "operation": "wild:optimized-generic-memory-operations"
+      }
+    ],
+    "performance.io": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:f2fs-shorter-gc-sleep"
+      }
+    ],
+    "performance.scheduler": [
+      {
+        "kind": "patch-operation",
+        "operation": "wild:shorter-alarm-wakeup-window"
+      }
+    ],
+    "performance.optimization_o2_o3": [
+      {
+        "kind": "patch-operation",
+        "operation": "common:kbuild-o3-choice"
+      }
+    ],
+    "performance.lto_thin_full": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "expected[\"CONFIG_LTO_CLANG_FULL\"] = \"y\""
+      }
+    ],
+    "network.bbr": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_TCP_CONG_BBR",
+        "value": "y"
+      }
+    ],
+    "network.bbrv3": [
+      {
+        "kind": "patch-operation",
+        "operation": "common:bbrv3-android15-6.6"
+      }
+    ],
+    "network.qdisc_cake": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_NET_SCH_CAKE",
+        "value": "y"
+      }
+    ],
+    "network.qdisc_pie": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_NET_SCH_PIE",
+        "value": "y"
+      }
+    ],
+    "network.qdisc_fq": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_NET_SCH_FQ",
+        "value": "y"
+      }
+    ],
+    "network.ttl_hl": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_IP_NF_TARGET_TTL",
+        "value": "y"
+      }
+    ],
+    "network.ip_set": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_IP_SET",
+        "value": "y"
+      }
+    ],
+    "network.ipv6_nat": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_IP6_NF_NAT",
+        "value": "y"
+      }
+    ],
+    "nethunter.usb_bluetooth_hci": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_BT_HCIBTUSB",
+        "value": "m"
+      }
+    ],
+    "nethunter.sdr_airspy": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_USB_AIRSPY",
+        "value": "y"
+      }
+    ],
+    "nethunter.sdr_hackrf": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_USB_HACKRF",
+        "value": "y"
+      }
+    ],
+    "nethunter.can_core": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_CAN",
+        "value": "m"
+      }
+    ],
+    "nethunter.can_vcan": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_CAN_VCAN",
+        "value": "m"
+      }
+    ],
+    "nethunter.can_slcan": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_CAN_SLCAN",
+        "value": "m"
+      }
+    ],
+    "nethunter.can_usb": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_CAN_GS_USB",
+        "value": "m"
+      }
+    ],
+    "nethunter.usb_serial": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_USB_SERIAL",
+        "value": "m"
+      }
+    ],
+    "nethunter.wifi_ath": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_ATH9K_HTC",
+        "value": "m"
+      }
+    ],
+    "nethunter.wifi_mt76": [
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_MT76_USB",
+        "value": "m"
+      }
+    ],
+    "nethunter.wifi_rtw88": [
+      {
+        "kind": "external-module",
+        "dependency": "rtw88"
+      }
+    ],
+    "nethunter.memkernel": [
+      {
+        "kind": "patch-operation",
+        "operation": "nethunter:register-memkernel-kconfig"
+      },
+      {
+        "kind": "kconfig-request",
+        "symbol": "CONFIG_MEMKERNEL",
+        "value": "m"
+      }
+    ],
+    "build.kernel_only": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "KERNEL_PHASE_TARGETS = {\"kernel\", \"mixed\"}"
+      }
+    ],
+    "build.modules_only": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "MODULE_PHASE_TARGETS = {\"modules\", \"mixed\"}"
+      }
+    ],
+    "build.mixed": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "SUPPORTED_BUILD_TARGETS = {\"kernel\", \"modules\", \"mixed\"}"
+      }
+    ],
+    "build.monolithic": [],
+    "build.cache": [
+      {
+        "kind": "source-reference",
+        "path": ".github/workflows/build.yml",
+        "contains": "- name: Restore audited Bazel compile cache"
+      }
+    ],
+    "build.debug": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "env[\"V\"] = \"1\""
+      }
+    ],
+    "build.custom_branding": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "\"LOCALVERSION\": f\"-{selected_branding}\""
+      }
+    ],
+    "build.custom_timestamp": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/build.py",
+        "contains": "\"KBUILD_BUILD_TIMESTAMP\": timestamp"
+      }
+    ],
+    "artifact.image": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/artifacts.py",
+        "contains": "record_for_file(image_destination, role=\"kernel-image\")"
+      }
+    ],
+    "artifact.anykernel3": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/artifacts.py",
+        "contains": "record_for_file(anykernel_zip, role=\"anykernel3-zip\")"
+      }
+    ],
+    "artifact.module_zip": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/artifacts.py",
+        "contains": "record_for_file(module_zip, role=\"module-zip\")"
+      }
+    ],
+    "artifact.wireless_firmware": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/artifacts.py",
+        "contains": "feature.flags.get(\"artifact.wireless_firmware\", False)"
+      }
+    ],
+    "artifact.debug_bundle": [
+      {
+        "kind": "source-reference",
+        "path": "scripts/lib/artifacts.py",
+        "contains": "record_for_file(debug_zip, role=\"debug-zip\")"
+      }
+    ],
+    "artifact.raw_partition_images": []
+  }
+}

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -69,6 +70,15 @@ class ContextAndPatchTests(unittest.TestCase):
         self.assertEqual([record["id"] for record in records], ["test:replace-token", "test:append-token"])
         self.assertEqual((source / "fixture.txt").read_text(encoding="utf-8"), "after\ntail\n")
         self.assertEqual(load_context(path)["stage"], "patches-applied")
+        patch_log = json.loads(
+            (self.root / "out" / "debug" / "patch-operations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(patch_log["schema_version"], 2)
+        self.assertEqual(patch_log["status"], "completed")
+        self.assertEqual(patch_log["operations"], records)
+        self.assertNotIn("current_operation", patch_log)
 
     def test_replace_exact_count_prevents_fuzzy_edit(self) -> None:
         source, path = self._context()
@@ -87,6 +97,50 @@ class ContextAndPatchTests(unittest.TestCase):
                 smoke=False,
                 log_dir=self.root / "out" / "debug",
             )
+        patch_log = json.loads(
+            (self.root / "out" / "debug" / "patch-operations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(patch_log["status"], "failed")
+        self.assertEqual(patch_log["failure"]["id"], "test:replace-token")
+        self.assertEqual(patch_log["failure"]["type"], "replace")
+        self.assertIn("expected 1 occurrences", patch_log["failure"]["reason"])
+        self.assertEqual(patch_log["operations"][-1], patch_log["failure"])
+        self.assertEqual(patch_log["current_operation"], patch_log["failure"])
+
+    def test_operational_io_failure_is_wrapped_and_persisted(self) -> None:
+        source, path = self._context()
+        with mock.patch(
+            "lib.patches._execute_operation",
+            side_effect=OSError("fixture read failure"),
+        ):
+            with self.assertRaisesRegex(BuildToolError, "patch operation failed"):
+                apply_patch_series(
+                    root=self.root,
+                    source_dir=source,
+                    cache_root=self.root / ".cache" / "op13",
+                    context_path=path,
+                    profile=self.profiles["oos16"],
+                    feature=self.features["test"],
+                    lock=self.lock,
+                    root_variant="none",
+                    check_only=False,
+                    smoke=False,
+                    log_dir=self.root / "out" / "debug",
+                )
+        patch_log = json.loads(
+            (self.root / "out" / "debug" / "patch-operations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(patch_log["status"], "failed")
+        self.assertEqual(patch_log["failure"]["id"], "test:replace-token")
+        self.assertEqual(patch_log["failure"]["reason"], "fixture read failure")
+        self.assertEqual(patch_log["failure"]["error_type"], "OSError")
+        self.assertIn("apply_patch_series", patch_log["failure"]["traceback"])
+        self.assertIn("OSError: fixture read failure", patch_log["failure"]["traceback"])
+        self.assertEqual(patch_log["current_operation"], patch_log["failure"])
 
     def test_every_series_dependency_must_be_locked(self) -> None:
         series = self.root / "patches" / "series" / "test.yml"

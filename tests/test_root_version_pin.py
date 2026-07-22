@@ -31,6 +31,15 @@ class RootVersionPinTests(unittest.TestCase):
         (self.root_dir / HELPER.STAGE_STAMP).write_text(
             json.dumps({"variant": "kernelsu", "source_commit": self.commit}), encoding="utf-8"
         )
+        (self.root_dir / HELPER.CLASSIC_COMPAT_STAMP).write_text(
+            json.dumps(
+                {
+                    "integration": "classic-kernelsu-susfs-direct-wrapper-calls",
+                    "kernelsu_commit": self.commit,
+                }
+            ),
+            encoding="utf-8",
+        )
         self.pin_spec = {
             "commit": self.commit,
             "version": 30001,
@@ -82,6 +91,17 @@ class RootVersionPinTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(HELPER.PinError, "provenance changed"):
             self._pin("kernelsu-next")
+
+    def test_classic_variant_requires_exact_compatibility_stamp(self) -> None:
+        (self.root_dir / HELPER.CLASSIC_COMPAT_STAMP).unlink()
+        with self.assertRaisesRegex(HELPER.PinError, "compatibility stamp"):
+            self._pin()
+        (self.root_dir / HELPER.CLASSIC_COMPAT_STAMP).write_text(
+            json.dumps({"integration": "changed", "kernelsu_commit": self.commit}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(HELPER.PinError, "provenance changed"):
+            self._pin()
 
     def test_root_source_must_stay_inside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as outside_name:

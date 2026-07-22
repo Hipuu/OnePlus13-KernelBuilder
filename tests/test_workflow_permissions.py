@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIRECTORY = ROOT / ".github" / "workflows"
 LOCAL_BUILD_CALL = "uses: ./.github/workflows/build.yml"
+ALL_PERMISSION_SCOPES = {
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "security-events",
+    "statuses",
+}
+
+
+def _workflow_paths() -> list[Path]:
+    return sorted(
+        path
+        for path in WORKFLOW_DIRECTORY.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
 
 
 def _job_blocks(path: Path) -> list[tuple[str, list[str]]]:
@@ -37,7 +62,7 @@ def _job_blocks(path: Path) -> list[tuple[str, list[str]]]:
 class WorkflowPermissionContractTests(unittest.TestCase):
     def test_local_build_callers_grant_actions_read(self) -> None:
         callers: list[str] = []
-        for path in sorted(WORKFLOW_DIRECTORY.glob("*.yml")):
+        for path in _workflow_paths():
             for job_name, lines in _job_blocks(path):
                 if not any(line.strip() == LOCAL_BUILD_CALL for line in lines):
                     continue
@@ -75,6 +100,90 @@ class WorkflowPermissionContractTests(unittest.TestCase):
                 "validate.yml:oos16-full-build",
             ],
         )
+
+    def test_write_permissions_have_exact_workflow_and_job_owners(self) -> None:
+        writes: list[tuple[str, str, str]] = []
+        for path in _workflow_paths():
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                text,
+                r"^\s*permissions:\s*(?:read-all|write-all)\s*$",
+                f"{path.name}: broad permission shorthand is forbidden",
+            )
+            for permission in re.findall(
+                r"^\s+([a-z][a-z-]*):\s+write\s*$",
+                text,
+                re.MULTILINE,
+            ):
+                self.assertIn(
+                    permission,
+                    ALL_PERMISSION_SCOPES,
+                    f"{path.name}: unknown permission scope",
+                )
+                owner = "workflow"
+                for job_name, lines in _job_blocks(path):
+                    block = "\n".join(lines)
+                    if re.search(
+                        rf"^\s+{re.escape(permission)}:\s+write\s*$",
+                        block,
+                        re.MULTILINE,
+                    ):
+                        owner = job_name
+                        break
+                writes.append((path.name, owner, permission))
+        self.assertEqual(
+            writes,
+            [
+                ("cleanup.yml", "workflow", "actions"),
+                ("release.yml", "publish", "attestations"),
+                ("release.yml", "publish", "contents"),
+                ("release.yml", "publish", "id-token"),
+                ("source-monitor.yml", "workflow", "issues"),
+            ],
+        )
+
+    def test_release_publish_is_the_only_environment_gated_writer(self) -> None:
+        release = WORKFLOW_DIRECTORY / "release.yml"
+        jobs = dict(_job_blocks(release))
+        publish = "\n".join(jobs["publish"])
+        self.assertIn("    environment:", publish)
+        self.assertIn("      name: release", publish)
+        self.assertIn("      contents: write", publish)
+        for job_name, lines in jobs.items():
+            if job_name == "publish":
+                continue
+            block = "\n".join(lines)
+            self.assertNotRegex(block, r"^\s+\S+:\s+write\s*$")
+
+    def test_every_checkout_disables_persisted_credentials(self) -> None:
+        checkout_count = 0
+        for path in _workflow_paths():
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if not re.search(r"uses:\s+actions/checkout@[0-9a-f]{40}", line):
+                    continue
+                checkout_count += 1
+                following = "\n".join(lines[index + 1 : index + 8])
+                self.assertIn(
+                    "persist-credentials: false",
+                    following,
+                    f"{path.name}:{index + 1}",
+                )
+        self.assertGreater(checkout_count, 0)
+
+    def test_every_external_action_uses_a_full_commit(self) -> None:
+        for path in _workflow_paths():
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                match = re.match(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", line)
+                if match is None or match.group(1).startswith("./"):
+                    continue
+                self.assertRegex(
+                    match.group(1),
+                    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$",
+                    f"{path.name}:{line_number}",
+                )
 
 
 if __name__ == "__main__":

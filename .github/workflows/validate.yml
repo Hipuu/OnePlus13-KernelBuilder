@@ -37,10 +37,44 @@ jobs:
           for script in "${shell_files[@]}"; do
             bash -n "$script"
           done
-          if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck --external-sources --severity=warning "${shell_files[@]}"
-          fi
+          state=$(
+            python3 scripts/op13.py fetch-dependencies \
+              --dependency shellcheck_linux_x86_64
+          )
+          shellcheck_archive=$(jq -er \
+            '.dependencies.shellcheck_linux_x86_64.path | select(type == "string")' \
+            <<< "$state")
+          python3 scripts/run-pinned-shellcheck.py \
+            --archive "$shellcheck_archive" -- --version
+          python3 scripts/run-pinned-shellcheck.py \
+            --archive "$shellcheck_archive" -- \
+            --external-sources --severity=warning "${shell_files[@]}"
           python3 -m compileall -q scripts
+
+      - name: Validate workflows with pinned Actionlint and ShellCheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=$(
+            python3 scripts/op13.py fetch-dependencies \
+              --dependency actionlint_linux_amd64 \
+              --dependency shellcheck_linux_x86_64
+          )
+          actionlint_archive=$(jq -er \
+            '.dependencies.actionlint_linux_amd64.path | select(type == "string")' \
+            <<< "$state")
+          shellcheck_archive=$(jq -er \
+            '.dependencies.shellcheck_linux_x86_64.path | select(type == "string")' \
+            <<< "$state")
+          mapfile -d '' workflow_files < <(
+            find .github/workflows -maxdepth 1 -type f \
+              \( -name '*.yml' -o -name '*.yaml' \) -print0 | sort -z
+          )
+          ((${#workflow_files[@]} > 0))
+          python3 scripts/run-pinned-actionlint.py \
+            --archive "$actionlint_archive" \
+            --shellcheck-archive "$shellcheck_archive" \
+            "${workflow_files[@]}"
 
       - name: Run unit tests
         shell: bash
@@ -156,7 +190,17 @@ jobs:
           import sys
 
           failures = []
-          workflows = sorted(pathlib.Path(".github/workflows").glob("*.yml"))
+          workflow_root = pathlib.Path(".github/workflows")
+          workflows = sorted(
+              set(workflow_root.glob("*.yml")) | set(workflow_root.glob("*.yaml"))
+          )
+          allowed_writes = {
+              ("cleanup.yml", "actions"),
+              ("release.yml", "attestations"),
+              ("release.yml", "contents"),
+              ("release.yml", "id-token"),
+              ("source-monitor.yml", "issues"),
+          }
           use_pattern = re.compile(r"^\s*uses:\s*([^#\s]+)", re.MULTILINE)
           for path in workflows:
               text = path.read_text(encoding="utf-8")
@@ -169,10 +213,28 @@ jobs:
                   _, ref = use.rsplit("@", 1)
                   if not re.fullmatch(r"[0-9a-f]{40}", ref):
                       failures.append(f"{path}: action ref is not a full commit SHA: {use}")
-              if path.name != "release.yml" and re.search(r"^\s*contents:\s*write\s*$", text, re.MULTILINE):
-                  failures.append(f"{path}: contents: write is reserved for release.yml")
-              if path.name != "cleanup.yml" and re.search(r"^\s*actions:\s*write\s*$", text, re.MULTILINE):
-                  failures.append(f"{path}: actions: write is reserved for cleanup.yml")
+              if re.search(
+                  r"^\s*permissions:\s*(?:read-all|write-all)\s*$",
+                  text,
+                  re.MULTILINE,
+              ):
+                  failures.append(f"{path}: broad permission shorthand is forbidden")
+              inline_permissions = re.findall(
+                  r"^\s*permissions:\s*([^\s].*)$",
+                  text,
+                  re.MULTILINE,
+              )
+              if any(value.strip() != "{}" for value in inline_permissions):
+                  failures.append(f"{path}: inline permission mappings are forbidden")
+              for scope in re.findall(
+                  r"^\s+([a-z][a-z-]*):\s+write\s*$",
+                  text,
+                  re.MULTILINE,
+              ):
+                  if (path.name, scope) not in allowed_writes:
+                      failures.append(
+                          f"{path}: unapproved write permission: {scope}"
+                      )
 
           credential_patterns = [
               re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
@@ -412,6 +474,18 @@ jobs:
             --output out/source \
             --debug-dir out/debug
 
+      - name: Verify and record pinned build toolchain
+        shell: bash
+        env:
+          BASE: ${{ matrix.base }}
+        run: |
+          set -euo pipefail
+          python3 scripts/record-build-toolchain.py \
+            --source-dir out/source \
+            --resolved-manifest "out/source/.op13/${BASE}-manifest-resolved.xml" \
+            --output out/debug/build-toolchain-provenance.json \
+            --output out/source/.op13/build-toolchain-provenance.json
+
       - name: Record locked source footprint
         if: always()
         shell: bash
@@ -429,6 +503,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply full patch series on disposable checkout
+        id: apply_full_patches
         shell: bash
         env:
           BASE: ${{ matrix.base }}
@@ -442,6 +517,15 @@ jobs:
             --root "$ROOT_VARIANT" \
             --source-dir out/source \
             --log out/debug
+
+      - name: Collect patch rehearsal residue evidence
+        if: always() && steps.apply_full_patches.outcome != 'skipped'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/collect-patch-evidence.py \
+            --source-dir out/source \
+            --output-dir out/debug
 
       - name: Configure full mixed target on patched checkout
         shell: bash
@@ -484,9 +568,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: patch-rehearsal-${{ matrix.base }}-${{ github.run_id }}
+          name: patch-rehearsal-${{ matrix.base }}-${{ matrix.root }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: out/debug
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 7
 
   oos16-full-build:

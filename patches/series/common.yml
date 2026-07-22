@@ -19,6 +19,39 @@
       ]
     },
     {
+      "id": "kmi-symbol-list-vendor-module-closure",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-kmi-symbol-requirements.py",
+        "--common-dir",
+        "{source_dir}/kernel_platform/common",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/common/.op13-kmi-symbol-exports.json"
+      ]
+    },
+    {
+      "id": "kmi-symbol-list-wireless-led-closure",
+      "type": "exec",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-kmi-wireless-led-requirements.py",
+        "--common-dir",
+        "{source_dir}/kernel_platform/common",
+        "--base",
+        "{base}"
+      ],
+      "expected_outputs": [
+        "kernel_platform/common/.op13-kmi-wireless-led-exports.json"
+      ],
+      "feature": "nethunter.wifi_ath"
+    },
+    {
       "id": "kbuild-o3-choice",
       "type": "apply",
       "kernel_trees": ["common", "msm-kernel"],

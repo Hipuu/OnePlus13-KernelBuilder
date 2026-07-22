@@ -198,12 +198,15 @@ Any other value stops before source synchronization and requires a reviewed
 lock plus compatibility-fingerprint update.
 
 The `release.yml` workflow requires `tag`, then base, root, profile, target,
-optimization, LTO, clean, debug, and pre-release inputs. Release rebuilds use
-the checked-in dependency lock; the called build defaults cache on, while the
-release default `clean=true` skips restoration. Publishing occurs only
-through the `release` environment; configure its reviewer/protection rules in
-the repository settings before publishing. A modules-only release creates a
-matching kernel prerequisite in the same workflow run.
+optimization, LTO, debug, and pre-release inputs. Its optional
+`kernelsu_commit` and `susfs_commit` fields are the same exact-lock assertions
+as the manual build fields. Release rebuilds use the checked-in dependency
+lock and do not expose a `clean` dispatch input: both reusable build calls
+hardcode `clean: true`, so release builds skip cache restoration. Publishing
+occurs only through the `release` environment; configure its
+reviewer/protection rules in the repository settings before publishing. A
+modules-only release creates a matching kernel prerequisite in the same
+workflow run.
 
 Nightly runs start daily at 18:17 UTC: OOS 16 full/KernelSU-Next O3 Full LTO,
 OOS 15 global full/KernelSU-Next O2 Thin LTO, and an OOS 15 China full/KernelSU
@@ -246,12 +249,25 @@ bash scripts/sync-sources.sh \
   --base oos16 \
   --output out/source
 
+python3 scripts/record-build-toolchain.py \
+  --source-dir out/source \
+  --resolved-manifest out/source/.op13/oos16-manifest-resolved.xml \
+  --output out/debug/build-toolchain-provenance.json \
+  --output out/source/.op13/build-toolchain-provenance.json
+
 bash scripts/apply-series.sh \
   --base oos16 \
   --profile full \
   --root kernelsu-next \
   --source-dir out/source \
   --log out/debug
+
+python3 scripts/capture-kmi-build-evidence.py \
+  --source-dir out/source \
+  --context out/source/.op13/build-context.json \
+  --base oos16 \
+  --output out/source/.op13 \
+  --output out/debug
 
 bash scripts/configure.sh \
   --base oos16 \
@@ -292,6 +308,10 @@ bash scripts/package.sh \
   --output out/dist \
   --debug \
   --pre-release
+
+python3 scripts/verify-package-checksums.py \
+  --directory out/dist \
+  --context out/build/.op13/build-context.json
 ```
 
 Set optional branding before configuration/build:
@@ -375,9 +395,10 @@ All enabled modes retain the same source profile. Do not combine DTB, DTBO, DLKM
 
 ## Diagnostics
 
-Debug mode uploads the resolved manifest, build contexts, final `.config`,
-patch log/rejects, compiler logs, `vmlinux`, `System.map`, `Module.symvers`,
-modules, disk reports, warning scan, cache statement, and SHA-256 files. Failed
-builds upload available diagnostics even when `debug=false`.
+Debug mode uploads the resolved manifest, build contexts, final `.config`, the
+incremental `patch-operations.json`, bounded `.rej`/`.orig` contents and their
+manifest, compiler logs, `vmlinux`, `System.map`, `Module.symvers`, modules,
+disk reports, warning scan, cache statement, and SHA-256 files. Failed builds
+upload available diagnostics even when `debug=false`.
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) before rerunning a failed job.

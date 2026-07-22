@@ -1,4 +1,5 @@
 * text=auto
+.gitattributes text eol=lf
 *.sh text eol=lf
 *.py text eol=lf
 *.yml text eol=lf
@@ -7,6 +8,12 @@
 *.md text eol=lf
 *.config text eol=lf
 *.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+packaging/anykernel3/anykernel.sh text eol=lf
+packaging/anykernel3/SOURCE-CONVEYANCE.md text eol=lf
+packaging/anykernel3/licenses/* text eol=lf
+packaging/wireless-firmware/WHENCE text eol=lf
+packaging/wireless-firmware/licenses/* text eol=lf
+packaging/wireless-firmware/licenses/* whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 *.img binary
 *.zip binary
 *.ko binary

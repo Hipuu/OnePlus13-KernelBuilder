@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
@@ -51,6 +52,8 @@ EXEC_STATIC_PLACEHOLDERS = frozenset(
         "root_variant",
     }
 )
+FAILURE_REASON_LIMIT = 8_192
+FAILURE_TRACEBACK_LIMIT = 16_384
 
 
 def _patch_utility() -> str:
@@ -995,6 +998,49 @@ def _is_inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _write_patch_operations_log(path: Path, document: Mapping[str, Any]) -> None:
+    """Atomically persist patch progress so a failing operation remains diagnosable."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            stream.write(payload)
+            temporary_path = Path(stream.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _bounded_failure_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "\n... failure evidence truncated"
+
+
+def _exception_evidence(exc: Exception) -> dict[str, str]:
+    evidence = {
+        "reason": _bounded_failure_text(str(exc), FAILURE_REASON_LIMIT),
+        "error_type": type(exc).__name__,
+    }
+    if not isinstance(exc, BuildToolError):
+        evidence["traceback"] = _bounded_failure_text(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            FAILURE_TRACEBACK_LIMIT,
+        )
+    return evidence
+
+
 def apply_patch_series(
     *,
     root: Path,
@@ -1049,42 +1095,11 @@ def apply_patch_series(
     for dependency_id in dependency_ids:
         if dependency_id not in lock.dependencies:
             raise BuildToolError(f"patch operation references unlocked dependency {dependency_id}")
-    if dependency_ids and not smoke:
-        fetch_dependencies(lock, cache_root, selected=dependency_ids, dry_run=False, offline=False)
-    runner = CommandRunner(dry_run=False)
     records: list[dict[str, Any]] = []
-    for operation in selected_operations:
-        try:
-            records.append(
-                _execute_operation(
-                    operation,
-                    root=root,
-                    source_dir=source_dir,
-                    cache_root=cache_root,
-                    lock=lock,
-                    base=profile.id,
-                    root_variant=root_variant,
-                    runner=runner,
-                    check_only=check_only,
-                    smoke=smoke,
-                )
-            )
-        except BuildToolError as exc:
-            if operation["optional"]:
-                skipped = {
-                    "id": operation["id"],
-                    "type": operation["type"],
-                    "status": "optional-skipped",
-                    "reason": str(exc),
-                }
-                if "kernel_tree" in operation:
-                    skipped["kernel_tree"] = operation["kernel_tree"]
-                records.append(skipped)
-                continue
-            raise
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_document = {
-        "schema_version": 1,
+    log_path = log_dir / "patch-operations.json"
+    log_document: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "in-progress",
         "profile": profile.id,
         "feature_profile": feature.id,
         "root_variant": root_variant,
@@ -1092,19 +1107,105 @@ def apply_patch_series(
         "smoke": smoke,
         "operations": records,
     }
-    (log_dir / "patch-operations.json").write_text(
-        json.dumps(log_document, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
-    )
+    _write_patch_operations_log(log_path, log_document)
+    if dependency_ids and not smoke:
+        try:
+            fetch_dependencies(lock, cache_root, selected=dependency_ids, dry_run=False, offline=False)
+        except Exception as exc:
+            failure = {
+                "stage": "dependency-fetch",
+                "status": "failed",
+                **_exception_evidence(exc),
+                "dependencies": dependency_ids,
+            }
+            log_document.update({"status": "failed", "failure": failure})
+            _write_patch_operations_log(log_path, log_document)
+            if isinstance(exc, BuildToolError):
+                raise
+            raise BuildToolError(f"patch dependency fetch failed: {exc}") from exc
+    runner = CommandRunner(dry_run=False)
+    for operation in selected_operations:
+        current_operation = {
+            "id": operation["id"],
+            "type": operation["type"],
+            "status": "started",
+        }
+        if "kernel_tree" in operation:
+            current_operation["kernel_tree"] = operation["kernel_tree"]
+        log_document["current_operation"] = current_operation
+        _write_patch_operations_log(log_path, log_document)
+        try:
+            record = _execute_operation(
+                operation,
+                root=root,
+                source_dir=source_dir,
+                cache_root=cache_root,
+                lock=lock,
+                base=profile.id,
+                root_variant=root_variant,
+                runner=runner,
+                check_only=check_only,
+                smoke=smoke,
+            )
+        except Exception as exc:
+            failure = {
+                "id": operation["id"],
+                "type": operation["type"],
+                "status": "failed",
+                **_exception_evidence(exc),
+            }
+            if "kernel_tree" in operation:
+                failure["kernel_tree"] = operation["kernel_tree"]
+            if operation["optional"] and isinstance(exc, BuildToolError):
+                skipped = {**failure, "status": "optional-skipped"}
+                records.append(skipped)
+                log_document.pop("current_operation", None)
+                _write_patch_operations_log(log_path, log_document)
+                continue
+            records.append(failure)
+            log_document.update(
+                {
+                    "status": "failed",
+                    "failure": failure,
+                    "current_operation": failure,
+                }
+            )
+            _write_patch_operations_log(log_path, log_document)
+            if isinstance(exc, BuildToolError):
+                raise
+            raise BuildToolError(
+                f"operation {operation['id']}: patch operation failed: {exc}"
+            ) from exc
+        else:
+            records.append(record)
+            log_document.pop("current_operation", None)
+            _write_patch_operations_log(log_path, log_document)
+    log_document["status"] = "operations-completed"
+    _write_patch_operations_log(log_path, log_document)
     if not check_only:
-        updated = advance_context(
-            context,
-            "patches-applied",
-            {
-                "features": [feature_selection(feature, root_variant)],
-                "patches": records,
-            },
-        )
-        write_context(context_path, updated)
+        try:
+            updated = advance_context(
+                context,
+                "patches-applied",
+                {
+                    "features": [feature_selection(feature, root_variant)],
+                    "patches": records,
+                },
+            )
+            write_context(context_path, updated)
+        except Exception as exc:
+            failure = {
+                "stage": "context-update",
+                "status": "failed",
+                **_exception_evidence(exc),
+            }
+            log_document.update({"status": "failed", "failure": failure})
+            _write_patch_operations_log(log_path, log_document)
+            if isinstance(exc, BuildToolError):
+                raise
+            raise BuildToolError(f"patch context update failed: {exc}") from exc
+    log_document["status"] = "completed"
+    _write_patch_operations_log(log_path, log_document)
     return records
 
 

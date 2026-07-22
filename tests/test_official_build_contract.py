@@ -20,6 +20,9 @@ from lib.build import (
     _copy_declared_dist_module_payload,
     _external_module_commands,
     _build_epoch,
+    _build_timestamp_record,
+    _requested_build_timestamp,
+    _kleaf_repo_manifest_binding,
     _official_build_paths,
     _official_cache_path,
     _kconfig_toolchain_env,
@@ -45,6 +48,79 @@ class OfficialBuildContractTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _kleaf_context(self, manifest: Path) -> dict[str, object]:
+        return {
+            "profile": self.profile.id,
+            "manifest": {
+                "resolved_path": str(manifest.resolve()),
+                "sha256": sha256_file(manifest),
+                "url": self.profile.manifest_url,
+                "file": self.profile.manifest_file,
+                "revision": self.profile.manifest_revision,
+            },
+        }
+
+    def test_kleaf_repo_manifest_is_exact_and_portable(self) -> None:
+        resolved = self.source / ".op13" / "resolved.xml"
+        resolved.parent.mkdir(parents=True)
+        resolved.write_text("<manifest/>\n", encoding="utf-8")
+
+        value, record = _kleaf_repo_manifest_binding(
+            self.source,
+            self._kleaf_context(resolved),
+        )
+
+        self.assertEqual(value, f"{self.source.resolve()}:{resolved.resolve()}")
+        self.assertEqual(
+            record,
+            {
+                "schema_version": 1,
+                "environment_variable": "KLEAF_REPO_MANIFEST",
+                "status": "applied",
+                "path_scope": "synced-source-relative",
+                "base": "oos16",
+                "repository_root": ".",
+                "resolved_manifest": ".op13/resolved.xml",
+                "resolved_manifest_sha256": sha256_file(resolved),
+                "manifest_url": self.profile.manifest_url,
+                "manifest_file": self.profile.manifest_file,
+                "manifest_revision": self.profile.manifest_revision,
+            },
+        )
+
+    def test_kleaf_repo_manifest_rejects_missing_and_changed_files(self) -> None:
+        resolved = self.source / ".op13" / "resolved.xml"
+        resolved.parent.mkdir(parents=True)
+        resolved.write_text("<manifest/>\n", encoding="utf-8")
+        context = self._kleaf_context(resolved)
+        resolved.write_text("<manifest><changed/></manifest>\n", encoding="utf-8")
+        with self.assertRaisesRegex(BuildToolError, "changed after synchronization"):
+            _kleaf_repo_manifest_binding(self.source, context)
+
+        resolved.unlink()
+        with self.assertRaisesRegex(BuildToolError, "plain file"):
+            _kleaf_repo_manifest_binding(self.source, context)
+
+    def test_kleaf_repo_manifest_rejects_outside_and_symlinked_files(self) -> None:
+        self.source.mkdir(parents=True)
+        outside = self.root / "outside-resolved.xml"
+        outside.write_text("<manifest/>\n", encoding="utf-8")
+        with self.assertRaisesRegex(BuildToolError, "inside the synced source tree"):
+            _kleaf_repo_manifest_binding(self.source, self._kleaf_context(outside))
+
+        target = self.source / ".op13" / "manifest-target.xml"
+        target.parent.mkdir(parents=True)
+        target.write_text("<manifest/>\n", encoding="utf-8")
+        link = target.with_name("manifest-link.xml")
+        try:
+            link.symlink_to(target)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"file symlinks are unavailable: {exc}")
+        link_context = self._kleaf_context(link)
+        link_context["manifest"]["resolved_path"] = str(link)
+        with self.assertRaisesRegex(BuildToolError, "plain file"):
+            _kleaf_repo_manifest_binding(self.source, link_context)
 
     def test_exact_sun_perf_paths_have_no_recursive_fallback(self) -> None:
         official_output, kernel_kit = _official_build_paths(self.source, self.device)
@@ -249,6 +325,31 @@ class OfficialBuildContractTests(unittest.TestCase):
             with self.assertRaisesRegex(BuildToolError, "SOURCE_DATE_EPOCH.*epoch integer"):
                 _build_epoch(self.source, self.device.common_kernel, None)
 
+    def test_build_timestamp_record_preserves_the_exact_raw_identity(self) -> None:
+        raw = " 1783987200 "
+        with patch.dict(os.environ, {"BUILD_TIMESTAMP": raw}, clear=False):
+            self.assertEqual(_requested_build_timestamp(None), raw)
+        record = _build_timestamp_record(raw, 1783987200)
+        self.assertEqual(record["requested"], raw)
+        self.assertEqual(record["artifact_key"], record["requested_sha256"])
+        self.assertEqual(len(record["artifact_key"]), 64)
+        self.assertEqual(
+            _build_timestamp_record("", 1783987200),
+            {
+                "artifact_key": "default",
+                "mode": "default",
+                "requested": None,
+                "requested_sha256": None,
+                "source_date_epoch": 1783987200,
+            },
+        )
+
+    def test_raw_build_timestamp_rejects_multiline_and_whitespace_only_values(self) -> None:
+        for raw in (" ", "\t", "1\n2", "1\r2", "1\x002"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(BuildToolError):
+                    _requested_build_timestamp(raw)
+
     def test_fake_config_patch_uses_only_the_resolved_source_epoch(self) -> None:
         fake_config_patch = (
             ROOT / "patches" / "common" / "0006-fake-config-oneplus-6.6.patch"
@@ -375,7 +476,15 @@ class OfficialBuildContractTests(unittest.TestCase):
         context = advance_context(
             context,
             "patches-applied",
-            {"features": [{"profile": "test", "root_variant": "none"}]},
+            {
+                "features": [
+                    {
+                        "profile": "test",
+                        "root_variant": "none",
+                        "flags": {"nethunter.wifi_ath": False},
+                    }
+                ]
+            },
         )
         output = self.root / "out" / "build"
         output.mkdir(parents=True)
@@ -450,10 +559,21 @@ class OfficialBuildContractTests(unittest.TestCase):
             destination.write_text("CONFIG_TEST=y\n", encoding="utf-8")
             return destination
 
+        evidence = {
+            "schema_version": 1,
+            "resolved_manifest_sha256": context["manifest"]["sha256"],
+            "toolchain": {"fixture": True},
+            "kmi_symbol_exports": {"fixture": True},
+        }
         with (
+            patch.dict(os.environ, {"GITHUB_ACTIONS": ""}, clear=False),
             patch("lib.build._build_epoch", return_value=123),
             patch("lib.build._run_logged", side_effect=fake_build),
             patch("lib.build._extract_image_config", side_effect=fake_extract),
+            patch(
+                "lib.build.preserve_source_build_evidence",
+                return_value=evidence,
+            ),
         ):
             build_kernel(
                 source_dir=self.source,
@@ -473,6 +593,11 @@ class OfficialBuildContractTests(unittest.TestCase):
         self.assertEqual(captured_env["COPY_NEEDED"], "1")
         self.assertEqual(captured_env["LTO"], "thin")
         self.assertEqual(captured_env["SOURCE_DATE_EPOCH"], "123")
+        self.assertEqual(captured_env["EXTRA_KBUILD_ARGS"], "")
+        self.assertEqual(
+            captured_env["KLEAF_REPO_MANIFEST"],
+            f"{self.source.resolve()}:{resolved.resolve()}",
+        )
         self.assertEqual(
             captured_env["KBUILD_BUILD_TIMESTAMP"],
             "Thu Jan 01 00:02:03 UTC 1970",
@@ -485,6 +610,7 @@ class OfficialBuildContractTests(unittest.TestCase):
             "CONFIG_MODULES=y\n",
         )
         built_context = load_context(context_path)
+        self.assertEqual(built_context["build_evidence"], evidence)
         kernel_record = built_context["kernel"]
         self.assertEqual(
             kernel_record["module_staging_archive"]["kernel_release"],

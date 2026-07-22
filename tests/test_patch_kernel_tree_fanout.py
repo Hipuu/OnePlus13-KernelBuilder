@@ -263,6 +263,8 @@ class KernelTreeManifestContractTests(unittest.TestCase):
         )
         platform_operations = {
             "oneplus-build-restore-only-gki-headers",
+            "kmi-symbol-list-vendor-module-closure",
+            "kmi-symbol-list-wireless-led-closure",
         }
         for operation in common["operations"]:
             if operation["id"] in platform_operations:
@@ -286,6 +288,7 @@ class KernelTreeManifestContractTests(unittest.TestCase):
             "stage-kernelsu",
             "stage-kernelsu-next",
             "patch-kernelsu-susfs",
+            "fix-classic-kernelsu-susfs-direct-wrapper-calls",
             "patch-kernelsu-next-susfs",
             "pin-kernelsu-version",
             "pin-kernelsu-next-version",

@@ -21,6 +21,10 @@ def _load(name: str, relative: str) -> ModuleType:
 STAGE = _load("stage_root_source_contract", "scripts/stage-root-source.py")
 PIN = _load("pin_root_version_contract", "scripts/pin-root-version.py")
 INTEGRATE = _load("integrate_ksun_susfs_contract", "scripts/integrate-ksun-susfs.py")
+CLASSIC = _load(
+    "integrate_classic_kernelsu_susfs_contract",
+    "scripts/integrate-classic-kernelsu-susfs.py",
+)
 INSTALL = _load("install_root_driver_contract", "scripts/install-root-driver.py")
 
 
@@ -43,6 +47,8 @@ class RootCompatibilityContractTests(unittest.TestCase):
         self.assertEqual(PIN.PINS["kernelsu-next"]["commit"], expected["kernelsu-next"])
         self.assertEqual(INTEGRATE.EXPECTED_KSUN_COMMIT, expected["kernelsu-next"])
         self.assertEqual(INTEGRATE.EXPECTED_SUSFS_COMMIT, dependencies["susfs"]["commit"])
+        self.assertEqual(CLASSIC.EXPECTED_KSU_COMMIT, expected["kernelsu"])
+        self.assertEqual(CLASSIC.EXPECTED_SUSFS_COMMIT, dependencies["susfs"]["commit"])
         self.assertEqual(
             INTEGRATE.EXPECTED_WILD_COMMIT,
             dependencies["wild_kernel_patches"]["commit"],
@@ -65,6 +71,19 @@ class RootCompatibilityContractTests(unittest.TestCase):
         # enclosing Git checkout.  The exact post-patch hashes remain pinned
         # by pin-root-version.py.
         self.assertEqual(classic["fuzz"], 1)
+        compatibility = operations[
+            "fix-classic-kernelsu-susfs-direct-wrapper-calls"
+        ]
+        self.assertEqual(compatibility["dependencies"], ["kernelsu", "susfs"])
+        self.assertEqual(
+            compatibility["expected_outputs"],
+            ["kernel_platform/KernelSU/.op13-classic-susfs-compat.json"],
+        )
+        ids = [operation["id"] for operation in self.root_series["operations"]]
+        self.assertEqual(
+            ids.index("fix-classic-kernelsu-susfs-direct-wrapper-calls"),
+            ids.index("patch-kernelsu-susfs") + 1,
+        )
         self.assertEqual(
             INTEGRATE.FIX_PATCHES,
             (
@@ -89,7 +108,7 @@ class RootCompatibilityContractTests(unittest.TestCase):
             INSTALL.EXPECTED_TREES["kernelsu"],
             {
                 "file_count": 91,
-                "tree_sha256": "c32526dbc9392b46ee6f516abfcde1adf72cfc87ea2f8c7f32b1be2fa87a5c69",
+                "tree_sha256": "e11104305f79d90b9a84b3f0fdc64a0e35c407d4a709ba3b52be888e4f7cd669",
             },
         )
         self.assertEqual(

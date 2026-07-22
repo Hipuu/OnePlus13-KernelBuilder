@@ -59,6 +59,7 @@ PINS: dict[str, dict[str, Any]] = {
 }
 STAGE_STAMP = ".op13-root-stage.json"
 INTEGRATION_STAMP = ".op13-susfs-integrated.json"
+CLASSIC_COMPAT_STAMP = ".op13-classic-susfs-compat.json"
 VERSION_STAMP = ".op13-root-version.json"
 
 
@@ -128,7 +129,18 @@ def pin(workspace: Path, root_dir: Path, variant: str) -> dict[str, Any]:
     stage = _read_json(root_dir / STAGE_STAMP, "root stage stamp")
     if stage.get("variant") != variant or stage.get("source_commit") != spec["commit"]:
         raise PinError("root stage provenance does not match the version pin")
-    if variant == "kernelsu-next":
+    if variant == "kernelsu":
+        compatibility = _read_json(
+            root_dir / CLASSIC_COMPAT_STAMP,
+            "classic KernelSU SUSFS compatibility stamp",
+        )
+        if (
+            compatibility.get("integration")
+            != "classic-kernelsu-susfs-direct-wrapper-calls"
+            or compatibility.get("kernelsu_commit") != spec["commit"]
+        ):
+            raise PinError("classic KernelSU SUSFS compatibility provenance changed")
+    else:
         integration = _read_json(root_dir / INTEGRATION_STAMP, "KernelSU-Next integration stamp")
         if integration.get("integration") != "kernelsu-next-susfs-v2.2.0":
             raise PinError("KernelSU-Next SUSFS integration provenance changed")

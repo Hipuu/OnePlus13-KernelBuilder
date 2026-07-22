@@ -126,8 +126,45 @@ def _suffix_from_url(url: str) -> str:
     return "".join(suffixes[-2:]) if len(suffixes) >= 2 and suffixes[-2] == ".tar" else (suffixes[-1] if suffixes else "")
 
 
+def _locked_download_size(dependency: Dependency) -> int | None:
+    value = dependency.raw.get("size")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise BuildToolError(
+            f"locked download size is invalid for {dependency.id}: {value!r}"
+        )
+    return value
+
+
+def _response_content_length(response: Any, dependency: Dependency) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all("Content-Length") or []
+    else:
+        value = headers.get("Content-Length")
+        values = [] if value is None else [value]
+    if not values:
+        return None
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or re.fullmatch(r"0|[1-9][0-9]*", values[0].strip()) is None
+    ):
+        raise BuildToolError(f"invalid Content-Length for {dependency.id}")
+    return int(values[0].strip())
+
+
 def _download_verified(dependency: Dependency, destination: Path, *, offline: bool) -> Path:
+    expected_size = _locked_download_size(dependency)
     if destination.is_file():
+        if expected_size is not None and destination.stat().st_size != expected_size:
+            raise BuildToolError(
+                f"cached file size mismatch for {dependency.id}: {destination}"
+            )
         if sha256_file(destination) != dependency.sha256:
             raise BuildToolError(f"cached file digest mismatch for {dependency.id}: {destination}")
         return destination
@@ -144,7 +181,40 @@ def _download_verified(dependency: Dependency, destination: Path, *, offline: bo
             )
             try:
                 with urllib.request.urlopen(request, timeout=60) as response:
-                    shutil.copyfileobj(response, output, length=1024 * 1024)
+                    content_length = _response_content_length(response, dependency)
+                    if expected_size is not None and content_length not in {
+                        None,
+                        expected_size,
+                    }:
+                        raise BuildToolError(
+                            f"download Content-Length mismatch for {dependency.id}: "
+                            f"expected {expected_size}, got {content_length}"
+                        )
+                    received = 0
+                    while True:
+                        read_size = 1024 * 1024
+                        if expected_size is not None:
+                            read_size = min(read_size, expected_size - received + 1)
+                        block = response.read(read_size)
+                        if not block:
+                            break
+                        received += len(block)
+                        if expected_size is not None and received > expected_size:
+                            raise BuildToolError(
+                                f"download exceeds locked size for {dependency.id}: "
+                                f"expected {expected_size} bytes"
+                            )
+                        output.write(block)
+                    if content_length is not None and received != content_length:
+                        raise BuildToolError(
+                            f"download length differs from Content-Length for {dependency.id}: "
+                            f"expected {content_length}, got {received}"
+                        )
+                    if expected_size is not None and received != expected_size:
+                        raise BuildToolError(
+                            f"download size mismatch for {dependency.id}: "
+                            f"expected {expected_size}, got {received}"
+                        )
             except (urllib.error.URLError, TimeoutError) as exc:
                 raise BuildToolError(f"download failed for {dependency.id}: {exc}") from exc
             output.flush()

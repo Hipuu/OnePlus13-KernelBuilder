@@ -25,6 +25,16 @@ on:
           - kernelsu-next
           - kernelsu
           - none
+      kernelsu_commit:
+        description: Optional full SHA assertion for the selected KernelSU lock
+        required: false
+        default: ""
+        type: string
+      susfs_commit:
+        description: Optional full SHA assertion for the SUSFS lock
+        required: false
+        default: ""
+        type: string
       profile:
         description: Feature profile
         required: true
@@ -59,11 +69,6 @@ on:
         options:
           - thin
           - full
-      clean:
-        description: Request a clean rebuild
-        required: true
-        default: true
-        type: boolean
       debug:
         description: Preserve debug evidence and symbols
         required: true
@@ -87,18 +92,70 @@ jobs:
     name: Validate release metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
+    outputs:
+      branding: ${{ steps.release-metadata.outputs.branding }}
+      build_timestamp: ${{ steps.release-metadata.outputs.build_timestamp }}
     env:
       TAG: ${{ inputs.tag }}
+      ROOT_VARIANT: ${{ inputs.root }}
+      REQUESTED_KERNELSU_COMMIT: ${{ inputs.kernelsu_commit }}
+      REQUESTED_SUSFS_COMMIT: ${{ inputs.susfs_commit }}
+      KERNEL_BRANDING: ${{ vars.KERNEL_BRANDING || 'OnePlus13-KernelBuilder' }}
+      BUILD_TIMESTAMP: ${{ vars.BUILD_TIMESTAMP || '' }}
     steps:
       - name: Validate tag
+        id: release-metadata
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "releases must be dispatched from an exact main-branch revision" >&2
+            exit 2
+          fi
           if [[ ! "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
             echo "tag contains unsupported characters" >&2
             exit 2
           fi
+          if [[ "$KERNEL_BRANDING" == *$'\n'* ||
+                "$KERNEL_BRANDING" == *$'\r'* ||
+                "$BUILD_TIMESTAMP" == *$'\n'* ||
+                "$BUILD_TIMESTAMP" == *$'\r'* ]]; then
+            echo "release build metadata must contain only single-line values" >&2
+            exit 2
+          fi
+          if [[ ! "$KERNEL_BRANDING" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]; then
+            echo "release branding contains unsupported characters" >&2
+            exit 2
+          fi
+          python3 - "$BUILD_TIMESTAMP" <<'PY'
+          import sys
+          raw = sys.argv[1]
+          if len(raw.encode("utf-8", "strict")) > 1024:
+              raise SystemExit("release build timestamp exceeds the size limit")
+          PY
+          {
+            printf 'branding=%s\n' "$KERNEL_BRANDING"
+            printf 'build_timestamp=%s\n' "$BUILD_TIMESTAMP"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned release validation tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate root commit assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/op13.py resolve-root-lock \
+            --root "$ROOT_VARIANT" \
+            --kernelsu-commit "$REQUESTED_KERNELSU_COMMIT" \
+            --susfs-commit "$REQUESTED_SUSFS_COMMIT" \
+            > "$RUNNER_TEMP/root-selection.json"
 
   module-kernel-prerequisite:
     name: Build modules-compatible kernel prerequisite
@@ -111,6 +168,8 @@ jobs:
     with:
       base: ${{ inputs.base }}
       root: ${{ inputs.root }}
+      kernelsu_commit: ${{ inputs.kernelsu_commit }}
+      susfs_commit: ${{ inputs.susfs_commit }}
       profile: ${{ inputs.profile }}
       target: mixed
       optimization: ${{ inputs.optimization }}
@@ -118,7 +177,9 @@ jobs:
       clean: true
       debug: false
       pre_release: true
-      artifact_retention_days: 1
+      branding: ${{ needs.validate-release-inputs.outputs.branding }}
+      build_timestamp: ${{ needs.validate-release-inputs.outputs.build_timestamp }}
+      artifact_retention_days: 35
 
   rebuild:
     name: Rebuild from locked inputs
@@ -137,19 +198,25 @@ jobs:
     with:
       base: ${{ inputs.base }}
       root: ${{ inputs.root }}
+      kernelsu_commit: ${{ inputs.kernelsu_commit }}
+      susfs_commit: ${{ inputs.susfs_commit }}
       profile: ${{ inputs.profile }}
       target: ${{ inputs.target }}
       optimization: ${{ inputs.optimization }}
       lto: ${{ inputs.lto }}
-      clean: ${{ inputs.clean }}
+      clean: true
       debug: ${{ inputs.debug }}
       pre_release: ${{ inputs.pre_release }}
+      branding: ${{ needs.validate-release-inputs.outputs.branding }}
+      build_timestamp: ${{ needs.validate-release-inputs.outputs.build_timestamp }}
       kernel_artifact_run_id: ${{ inputs.target == 'modules' && format('{0}', github.run_id) || '' }}
-      artifact_retention_days: 1
+      artifact_retention_days: 35
 
   publish:
     name: Approve and publish ${{ inputs.tag }}
-    needs: rebuild
+    needs:
+      - validate-release-inputs
+      - rebuild
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment:
@@ -169,10 +236,10 @@ jobs:
       BUILD_TARGET: ${{ inputs.target }}
       OPTIMIZATION: ${{ inputs.optimization }}
       LTO_MODE: ${{ inputs.lto }}
-      CLEAN_BUILD: ${{ inputs.clean }}
+      CLEAN_BUILD: true
       DEBUG_BUILD: ${{ inputs.debug }}
-      KERNEL_BRANDING: ${{ vars.KERNEL_BRANDING || 'OnePlus13-KernelBuilder' }}
-      BUILD_TIMESTAMP: ${{ vars.BUILD_TIMESTAMP || '' }}
+      KERNEL_BRANDING: ${{ needs.validate-release-inputs.outputs.branding }}
+      BUILD_TIMESTAMP: ${{ needs.validate-release-inputs.outputs.build_timestamp }}
     steps:
       - name: Check out pinned release tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -180,11 +247,65 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Validate rebuilt package artifact identity
+        id: rebuilt-package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_ARTIFACT_NAME: ${{ needs.rebuild.outputs.package_artifact }}
+          PACKAGE_ARTIFACT_ID: ${{ needs.rebuild.outputs.package_artifact_id }}
+          PACKAGE_ARTIFACT_DIGEST: ${{ needs.rebuild.outputs.package_artifact_digest }}
+        run: |
+          set -euo pipefail
+          artifact_metadata=$(mktemp "$RUNNER_TEMP/op13-release-artifact.XXXXXX.json")
+          trap 'rm -f -- "$artifact_metadata"' EXIT
+          if [[ ! "$PACKAGE_ARTIFACT_NAME" =~ ^packages-[A-Za-z0-9._+-]{1,240}$ ]]; then
+            echo 'rebuilt package artifact name is not canonical' >&2
+            exit 2
+          fi
+          if [[ ! "$PACKAGE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'rebuilt package artifact ID is not canonical' >&2
+            exit 2
+          fi
+          if [[ ! "$PACKAGE_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'rebuilt package artifact digest is not canonical' >&2
+            exit 2
+          fi
+          gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PACKAGE_ARTIFACT_ID}" \
+            > "$artifact_metadata"
+          jq -e \
+            --arg artifact_id "$PACKAGE_ARTIFACT_ID" \
+            --arg name "$PACKAGE_ARTIFACT_NAME" \
+            --arg digest "sha256:${PACKAGE_ARTIFACT_DIGEST}" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg head_sha "$GITHUB_SHA" \
+            --arg repository_id "$GITHUB_REPOSITORY_ID" '
+              (.id | tostring) == $artifact_id and
+              .name == $name and
+              .expired == false and
+              .digest == $digest and
+              (.workflow_run.id | tostring) == $run_id and
+              .workflow_run.head_sha == $head_sha and
+              (.workflow_run.repository_id | tostring) == $repository_id and
+              (.workflow_run.head_repository_id | tostring) == $repository_id
+            ' "$artifact_metadata" > /dev/null
+          {
+            printf 'artifact_id=%s\n' "$PACKAGE_ARTIFACT_ID"
+            printf 'artifact_digest=%s\n' "$PACKAGE_ARTIFACT_DIGEST"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Download rebuilt packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ needs.rebuild.outputs.package_artifact }}
+          artifact-ids: ${{ steps.rebuilt-package.outputs.artifact_id }}
           path: release-assets
+          run-id: ${{ github.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
 
       - name: Verify build checksums
         shell: bash

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from email.message import Message
 import subprocess
 import sys
 import tempfile
@@ -11,13 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import op13
-from lib.config import Dependency, discover_configs
+from lib.config import Dependency, discover_configs, load_dependency_lock
 from lib.errors import BuildToolError, SourceChanged
 from lib.runtime import (
     REPO_INIT_STORAGE_FLAGS,
     REPO_SYNC_NETWORK_JOBS,
     REPO_SYNC_STORAGE_FLAGS,
     CommandRunner,
+    _download_verified,
     _fetch_git,
     _repo_sync_job_flags,
     _verify_git_checkout,
@@ -39,6 +42,33 @@ class SequenceRunner:
         return subprocess.CompletedProcess(argv, 0, f"{commit}\t{argv[-1]}\n", "")
 
 
+class DownloadResponse:
+    def __init__(self, payload: bytes, *, content_length: str | None) -> None:
+        self.payload = payload
+        self.position = 0
+        self.read_sizes: list[int] = []
+        self.bytes_returned = 0
+        self.headers = Message()
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        if size < 0:
+            size = len(self.payload) - self.position
+        end = min(len(self.payload), self.position + size)
+        block = self.payload[self.position : end]
+        self.position = end
+        self.bytes_returned += len(block)
+        return block
+
+
 class RuntimeAndCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -47,6 +77,161 @@ class RuntimeAndCliTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @staticmethod
+    def _download_dependency(payload: bytes, *, size: int | None) -> Dependency:
+        raw = {} if size is None else {"size": size}
+        return Dependency(
+            id="fixture-download",
+            kind="file",
+            url="https://example.invalid/fixture.bin",
+            commit=None,
+            ref=None,
+            sha256=hashlib.sha256(payload).hexdigest(),
+            required_for=("test",),
+            raw=raw,
+        )
+
+    def _assert_no_download_cache_files(self, destination: Path) -> None:
+        self.assertFalse(destination.exists())
+        if destination.parent.exists():
+            self.assertEqual(list(destination.parent.iterdir()), [])
+
+    def test_locked_download_validates_content_length_and_caches_atomically(self) -> None:
+        payload = b"locked download payload\n"
+        dependency = self._download_dependency(payload, size=len(payload))
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(payload, content_length=str(len(payload)))
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            result = _download_verified(dependency, destination, offline=False)
+
+        self.assertEqual(result, destination)
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(
+            list(destination.parent.glob(f".{dependency.id}.*")),
+            [],
+        )
+        urlopen.assert_called_once()
+
+    def test_locked_download_rejects_mismatched_content_length_before_reading(self) -> None:
+        payload = b"locked payload"
+        dependency = self._download_dependency(payload, size=len(payload))
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(payload, content_length=str(len(payload) + 1))
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ), self.assertRaisesRegex(BuildToolError, "Content-Length mismatch"):
+            _download_verified(dependency, destination, offline=False)
+
+        self.assertEqual(response.read_sizes, [])
+        self._assert_no_download_cache_files(destination)
+
+    def test_locked_download_stops_after_first_oversized_byte_without_header(self) -> None:
+        expected_payload = b"four"
+        dependency = self._download_dependency(
+            expected_payload,
+            size=len(expected_payload),
+        )
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(
+            expected_payload + b"excess bytes",
+            content_length=None,
+        )
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ), self.assertRaisesRegex(BuildToolError, "exceeds locked size"):
+            _download_verified(dependency, destination, offline=False)
+
+        self.assertEqual(response.bytes_returned, len(expected_payload) + 1)
+        self.assertEqual(response.read_sizes, [len(expected_payload) + 1])
+        self._assert_no_download_cache_files(destination)
+
+    def test_locked_download_rejects_short_body_and_removes_temporary_file(self) -> None:
+        expected_payload = b"complete locked payload"
+        dependency = self._download_dependency(
+            expected_payload,
+            size=len(expected_payload),
+        )
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(
+            expected_payload[:-1],
+            content_length=str(len(expected_payload)),
+        )
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ), self.assertRaisesRegex(BuildToolError, "differs from Content-Length"):
+            _download_verified(dependency, destination, offline=False)
+
+        self._assert_no_download_cache_files(destination)
+
+    def test_download_without_locked_size_still_validates_content_length(self) -> None:
+        payload = b"legacy download payload"
+        dependency = self._download_dependency(payload, size=None)
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(payload[:-1], content_length=str(len(payload)))
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ), self.assertRaisesRegex(BuildToolError, "differs from Content-Length"):
+            _download_verified(dependency, destination, offline=False)
+
+        self._assert_no_download_cache_files(destination)
+
+    def test_download_rejects_malformed_content_length_before_reading(self) -> None:
+        payload = b"locked payload"
+        dependency = self._download_dependency(payload, size=len(payload))
+        destination = self.root / "download-cache" / "fixture.bin"
+        response = DownloadResponse(payload, content_length="12, 12")
+
+        with mock.patch(
+            "lib.runtime.urllib.request.urlopen",
+            return_value=response,
+        ), self.assertRaisesRegex(BuildToolError, "invalid Content-Length"):
+            _download_verified(dependency, destination, offline=False)
+
+        self.assertEqual(response.read_sizes, [])
+        self._assert_no_download_cache_files(destination)
+
+    def test_repository_lock_bounds_every_download(self) -> None:
+        lock = load_dependency_lock(ROOT / "dependencies" / "lock.yml")
+        downloads = {
+            dependency_id: dependency.raw.get("size")
+            for dependency_id, dependency in lock.dependencies.items()
+            if dependency.kind != "git"
+        }
+        self.assertTrue(downloads)
+        self.assertTrue(
+            all(
+                isinstance(size, int) and not isinstance(size, bool) and size > 0
+                for size in downloads.values()
+            )
+        )
+        self.assertEqual(
+            {
+                dependency_id: downloads[dependency_id]
+                for dependency_id in (
+                    "repo_launcher",
+                    "magisk_release_apk",
+                    "nethunter_wireless_firmware",
+                )
+            },
+            {
+                "repo_launcher": 44_952,
+                "magisk_release_apk": 11_613_864,
+                "nethunter_wireless_firmware": 28_235_671,
+            },
+        )
 
     def test_source_monitor_compares_manifest_and_oneplus_projects(self) -> None:
         profile = self.profiles["oos16"]

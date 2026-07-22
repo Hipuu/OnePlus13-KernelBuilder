@@ -1,0 +1,80 @@
+Curated OnePlus 13 wireless firmware attribution
+================================================
+
+This file is repository-owned curation metadata. It is not the unmodified
+linux-firmware WHENCE file. The authoritative snapshot used for the mapping is:
+
+Repository: https://gitlab.com/kernel-firmware/linux-firmware.git
+Commit: 195e420f34c5c029d27ee57c57e3b3a8a164f8c4
+WHENCE URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/WHENCE
+WHENCE SHA256: 4f1b57632c69b52eda1476a3e4fc7398aa5f63c85d1b4afa6b7789d537c65f99
+
+The exact per-member paths, sizes, SHA256 digests and source records are in
+WIRELESS-FIRMWARE-PROVENANCE.json.
+
+Driver family: ATH9K HTC
+Files: system/etc/firmware/ath9k_htc/*
+Authoritative bytes: linux-firmware commit 195e420f34c5c029d27ee57c57e3b3a8a164f8c4
+Classification: free software; public firmware source is available
+Source: https://github.com/qca/open-ath9k-htc-firmware
+Licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.open-ath9k-htc-firmware
+Licence SHA256: 83870e84c54aa76be973a78387b342c80ef0908b8cb82edde6d54c511b18c16c
+Packaged licence: LICENSES/LICENCE.open-ath9k-htc-firmware (9409 exact bytes)
+Reproducible build status: not independently verified
+
+Driver family: ATH10K USB (QCA9377)
+Files: system/etc/firmware/ath10k/QCA9377/hw1.0/{board-2.bin,board.bin,firmware-5.bin,firmware-6.bin}
+Authoritative bytes: linux-firmware commit 195e420f34c5c029d27ee57c57e3b3a8a164f8c4
+Classification: proprietary redistributable firmware
+Licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENSE.QualcommAtheros_ath10k
+Licence SHA256: 337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f
+Packaged licence: LICENSES/LICENSE.QualcommAtheros_ath10k (2713 exact bytes)
+Firmware-5 notice URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/ath10k/QCA9377/hw1.0/notice_ath10k_firmware-5.txt
+Firmware-5 notice SHA256: 7fef27f33c95ed680c21809edacdd90736ed3c903e6c224eb72f947c35e9856c
+Packaged firmware-5 notice: LICENSES/notice_ath10k_firmware-5.txt (46143 exact bytes)
+Firmware-6 notice URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/ath10k/QCA9377/hw1.0/notice_ath10k_firmware-6.txt
+Firmware-6 notice SHA256: 8ce5c6ea0542bf4aac31fc3ae16a39792ad22d0eae4543063fac56fb3380f021
+Packaged firmware-6 notice: LICENSES/notice_ath10k_firmware-6.txt (53425 exact bytes)
+Reproducible build status: source unavailable; no reproducible source claimed
+
+Driver family: MT76
+Files: the MT76 members listed in WIRELESS-FIRMWARE-PROVENANCE.json
+Authoritative bytes: linux-firmware commit 195e420f34c5c029d27ee57c57e3b3a8a164f8c4
+Classification: proprietary redistributable firmware
+Licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.mediatek
+Licence SHA256: a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805
+Packaged licence: LICENSES/LICENCE.mediatek (561 exact bytes)
+Legacy licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.ralink_a_mediatek_company_firmware
+Legacy licence SHA256: 8568352b57f3574f9d5b2753cdb7c6e5eb2b79e82fbb9c9ba6566947467ef508
+Packaged legacy licence: LICENSES/LICENCE.ralink_a_mediatek_company_firmware (2100 exact bytes)
+Generated aliases: mediatek/mt7662.bin -> mt7662.bin; mediatek/mt7662_rom_patch.bin -> mt7662_rom_patch.bin
+Reproducible build status: source unavailable; no reproducible source claimed
+
+Driver family: Realtek USB Bluetooth
+Files: the HCI_USB Realtek members listed in WIRELESS-FIRMWARE-PROVENANCE.json
+Authoritative bytes: linux-firmware commit 195e420f34c5c029d27ee57c57e3b3a8a164f8c4
+Exception: rtl_bt/rtl8852au_fw.bin is byte-matched to linux-firmware commit 1cd1c871c9162a2c34380e6dd0c8ac9474d36522
+Classification: proprietary redistributable firmware
+Licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.rtlwifi_firmware.txt
+Licence SHA256: a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e
+Packaged licence: LICENSES/LICENCE.rtlwifi_firmware.txt (2115 exact bytes)
+Reproducible build status: source unavailable; no reproducible source claimed
+
+Driver family: RTW88
+Files: system/etc/firmware/rtw88/*
+Authoritative bytes repository: https://github.com/lwfinger/rtw88.git
+Authoritative bytes commit: a56bcd26e770257612a0803249cbd4095fc6feca
+Classification: proprietary redistributable firmware
+Licence URI: https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.rtlwifi_firmware.txt
+Licence SHA256: a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e
+Packaged licence: LICENSES/LICENCE.rtlwifi_firmware.txt (2115 exact bytes)
+Reproducible build status: source unavailable; no reproducible source claimed
+
+Known source-asset coverage gaps
+--------------------------------
+
+The authoritative coverage-gap records are in SOURCE-MEMBER-POLICY.json and
+are copied into WIRELESS-FIRMWARE-PROVENANCE.json. They include ATH11K,
+MT7603/MT7628, BCM203x/BFUSB, Broadcom HCD and Intel Bluetooth firmware absent
+from the pinned source asset. Their driver symbols must not be treated as
+hardware-tested merely because a module was produced.

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+from lib.config import (
+    ANYKERNEL_CARGO_CRATE_DEPENDENCY_IDS,
+    ANYKERNEL_SOURCE_DEPENDENCY_IDS,
+)
 
 
 COMMIT = "1" * 40
@@ -16,6 +22,23 @@ def write_json(path: Path, value: object) -> None:
 
 def make_repository(root: Path, *, external_modules: list[str] | None = None) -> Path:
     external_modules = ["rtw88"] if external_modules is None else external_modules
+    source_dependencies: dict[str, dict[str, object]] = {}
+    for dependency_id in ANYKERNEL_SOURCE_DEPENDENCY_IDS:
+        is_registry_crate = dependency_id in ANYKERNEL_CARGO_CRATE_DEPENDENCY_IDS
+        record: dict[str, object] = {
+            "kind": "file",
+            "url": f"https://example.com/{dependency_id}.tar.gz",
+            "size": 1,
+            "sha256": hashlib.sha256(dependency_id.encode("utf-8")).hexdigest(),
+            "license": "SEE-UPSTREAM",
+            "required_for": ["package-anykernel3-source"],
+        }
+        if not is_registry_crate:
+            record["repository"] = f"https://example.com/{dependency_id}.git"
+            record["commit"] = hashlib.sha1(
+                dependency_id.encode("utf-8")
+            ).hexdigest()
+        source_dependencies[dependency_id] = record
     write_json(
         root / "dependencies" / "lock.yml",
         {
@@ -39,6 +62,7 @@ def make_repository(root: Path, *, external_modules: list[str] | None = None) ->
                 "repo_launcher": {
                     "kind": "file",
                     "url": "https://example.com/repo-2.54",
+                    "size": 1,
                     "sha256": SHA256,
                     "repo_url": "https://example.com/git-repo.git",
                     "repo_commit": "3" * 40,
@@ -67,8 +91,22 @@ def make_repository(root: Path, *, external_modules: list[str] | None = None) ->
                     "kind": "git",
                     "url": "https://example.com/anykernel3.git",
                     "commit": "6" * 40,
+                    "license": "SEE-UPSTREAM-MULTIPLE",
                     "required_for": ["package-anykernel3"],
                 },
+                "magisk_release_apk": {
+                    "kind": "release_asset",
+                    "url": "https://example.com/releases/download/v1/Magisk-v1.apk",
+                    "repository": "https://example.com/Magisk.git",
+                    "ref": "refs/tags/v1",
+                    "commit": "9" * 40,
+                    "version": "v1",
+                    "size": 1,
+                    "sha256": SHA256,
+                    "license": "SEE-UPSTREAM-MULTIPLE",
+                    "required_for": ["package-anykernel3"],
+                },
+                **source_dependencies,
                 "rtw88": {
                     "kind": "git",
                     "url": "https://example.com/rtw88.git",
@@ -80,7 +118,11 @@ def make_repository(root: Path, *, external_modules: list[str] | None = None) ->
                     "url": "https://example.com/nethunter-wireless-firmware.zip",
                     "ref": "refs/tags/v1.0.0",
                     "commit": "8" * 40,
+                    "size": 1,
                     "sha256": SHA256,
+                    "repository": "https://example.com/nethunter-wireless-firmware.git",
+                    "version": "v1.0.0",
+                    "license": "SEE-CURATION-MANIFEST",
                     "required_for": ["nethunter", "release"],
                 },
             },

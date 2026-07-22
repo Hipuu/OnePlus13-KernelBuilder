@@ -63,6 +63,23 @@
       "root_variants": ["kernelsu"]
     },
     {
+      "id": "fix-classic-kernelsu-susfs-direct-wrapper-calls",
+      "type": "exec",
+      "dependencies": ["kernelsu", "susfs"],
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "{repo_root}/scripts/integrate-classic-kernelsu-susfs.py",
+        "--ksu-dir",
+        "{source_dir}/kernel_platform/KernelSU"
+      ],
+      "expected_outputs": [
+        "kernel_platform/KernelSU/.op13-classic-susfs-compat.json"
+      ],
+      "feature": "root.susfs",
+      "root_variants": ["kernelsu"]
+    },
+    {
       "id": "patch-kernelsu-next-susfs",
       "type": "exec",
       "dependencies": ["susfs", "wild_kernel_patches"],

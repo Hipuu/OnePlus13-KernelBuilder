@@ -26,7 +26,7 @@ EXECUTABLE_PATHS = {
 EXPECTED_TREES = {
     "kernelsu": {
         "file_count": 91,
-        "tree_sha256": "c32526dbc9392b46ee6f516abfcde1adf72cfc87ea2f8c7f32b1be2fa87a5c69",
+        "tree_sha256": "e11104305f79d90b9a84b3f0fdc64a0e35c407d4a709ba3b52be888e4f7cd669",
     },
     "kernelsu-next": {
         "file_count": 92,

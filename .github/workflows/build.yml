@@ -146,6 +146,12 @@ on:
       package_artifact:
         description: Name of the packaged build artifact
         value: ${{ jobs.build.outputs.package_artifact }}
+      package_artifact_id:
+        description: Immutable GitHub ID of the packaged build artifact
+        value: ${{ jobs.build.outputs.package_artifact_id }}
+      package_artifact_digest:
+        description: SHA-256 digest of the packaged build artifact archive
+        value: ${{ jobs.build.outputs.package_artifact_digest }}
       kernel_artifact:
         description: Name of the reusable kernel build artifact
         value: ${{ jobs.build.outputs.kernel_artifact }}
@@ -165,6 +171,8 @@ jobs:
     timeout-minutes: 360
     outputs:
       package_artifact: ${{ steps.artifact-names.outputs.package }}
+      package_artifact_id: ${{ steps.upload-packages.outputs.artifact-id }}
+      package_artifact_digest: ${{ steps.upload-packages.outputs.artifact-digest }}
       kernel_artifact: ${{ steps.artifact-names.outputs.kernel }}
     defaults:
       run:
@@ -454,6 +462,16 @@ jobs:
         id: artifact-names
         run: |
           set -euo pipefail
+          timestamp_record=$(
+            python3 scripts/kernel-artifact-bundle.py timestamp-key \
+              --build-timestamp "$BUILD_TIMESTAMP"
+          )
+          timestamp_key=$(jq -er '.artifact_key' <<< "$timestamp_record")
+          if [[ "$timestamp_key" != default &&
+                ! "$timestamp_key" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "timestamp artifact identity is not canonical" >&2
+            exit 2
+          fi
           kernel_target=$BUILD_TARGET
           if [[ "$kernel_target" == modules ]]; then
             # Modules use the same fragment scope as a mixed build.  A
@@ -461,8 +479,11 @@ jobs:
             # and therefore is not a compatible prerequisite.
             kernel_target=mixed
           fi
-          echo "kernel=kernel-build-${BASE}-${ROOT_VARIANT}-${PROFILE}-${kernel_target}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
-          echo "package=packages-${BASE}-${ROOT_VARIANT}-${PROFILE}-${BUILD_TARGET}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}" >> "$GITHUB_OUTPUT"
+          {
+            echo "timestamp_key=$timestamp_key"
+            echo "kernel=kernel-build-${BASE}-${ROOT_VARIANT}-${PROFILE}-${kernel_target}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}-timestamp-${timestamp_key}"
+            echo "package=packages-${BASE}-${ROOT_VARIANT}-${PROFILE}-${BUILD_TARGET}-${OPTIMIZATION}-${LTO_MODE}-${KERNEL_BRANDING}-timestamp-${timestamp_key}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve audited compile cache identity
         id: compile-cache-identity
@@ -536,66 +557,194 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          response=$(gh api --method GET \
+          artifact_pages=$(mktemp "$RUNNER_TEMP/op13-kernel-artifact-pages.XXXXXX.json")
+          artifact_index=$(mktemp "$RUNNER_TEMP/op13-kernel-artifacts.XXXXXX.json")
+          run_response=$(mktemp "$RUNNER_TEMP/op13-kernel-run.XXXXXX.json")
+          trap 'rm -f -- "$artifact_pages" "$artifact_index" "$run_response"' EXIT
+          gh api --method GET --paginate --slurp \
             -H 'Accept: application/vnd.github+json' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "/repos/${GITHUB_REPOSITORY}/actions/artifacts" \
             -f name="$ARTIFACT_NAME" \
-            -F per_page=100)
-          run_id=$(jq -r \
+            -F per_page=100 > "$artifact_pages"
+          jq -e \
+            'type == "array" and all(.[]; (.artifacts | type) == "array")' \
+            "$artifact_pages" > /dev/null
+          jq -c '[.[].artifacts[]]' "$artifact_pages" > "$artifact_index"
+          jq -e \
+            --arg name "$ARTIFACT_NAME" '
+              type == "array" and
+              all(
+                .[] | select(.name == $name and .expired == false);
+                (.id | type) == "number" and
+                (.created_at | type) == "string" and
+                (.workflow_run | type) == "object" and
+                (.workflow_run.id | type) == "number" and
+                (.workflow_run.head_sha | type) == "string" and
+                (.workflow_run.repository_id | type) == "number" and
+                (.workflow_run.head_repository_id | type) == "number"
+              )
+            ' "$artifact_index" > /dev/null
+          mapfile -t candidate_artifacts < <(jq -r \
+            --arg name "$ARTIFACT_NAME" \
             --arg sha "$CURRENT_SHA" \
             --arg requested "$REQUESTED_RUN_ID" '
-              [.artifacts[]
+              [.[]
                 | select(
+                    .name == $name and
                     .expired == false and
                     .workflow_run != null and
                     .workflow_run.head_sha == $sha and
+                    (.workflow_run.repository_id | tostring) == env.GITHUB_REPOSITORY_ID and
+                    (.workflow_run.head_repository_id | tostring) == env.GITHUB_REPOSITORY_ID and
                     ($requested == "" or (.workflow_run.id | tostring) == $requested)
                   )]
-              | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty
-            ' <<< "$response")
-          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              | sort_by([.created_at, .id]) | reverse
+              | .[] | [.id, .workflow_run.id] | @tsv
+            ' "$artifact_index")
+          if ((${#candidate_artifacts[@]} == 0)); then
             echo "no unexpired ${ARTIFACT_NAME} artifact was found for ${CURRENT_SHA}; run a matching mixed build first" >&2
             exit 2
           fi
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          declare -A candidate_runs_seen=()
+          selected_artifact_id=
+          selected_run_id=
+          selected_run_attempt=
+          for candidate_artifact in "${candidate_artifacts[@]}"; do
+            IFS=$'\t' read -r candidate_artifact_id candidate_run_id extra \
+              <<< "$candidate_artifact"
+            if [[ -n "$extra" ||
+                  ! "$candidate_artifact_id" =~ ^[1-9][0-9]*$ ||
+                  ! "$candidate_run_id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "artifact index returned a non-canonical artifact identity" >&2
+              exit 2
+            fi
+            if [[ -n "${candidate_runs_seen[$candidate_run_id]:-}" ]]; then
+              echo "more than one unexpired exact-name artifact exists for run ${candidate_run_id}" >&2
+              exit 2
+            fi
+            candidate_runs_seen[$candidate_run_id]=1
+            gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}" \
+              > "$run_response"
+            verify_args=(
+              --run-json "$run_response"
+              --repository "$GITHUB_REPOSITORY"
+              --repository-id "$GITHUB_REPOSITORY_ID"
+              --head-sha "$CURRENT_SHA"
+              --run-id "$candidate_run_id"
+              --current-run-id "$GITHUB_RUN_ID"
+            )
+            if [[ -n "$REQUESTED_RUN_ID" ]]; then
+              verify_args+=(--requested-run-id "$REQUESTED_RUN_ID")
+            fi
+            if trusted_run=$(
+              python3 scripts/kernel-artifact-bundle.py verify-run "${verify_args[@]}"
+            ); then
+              selected_artifact_id=$candidate_artifact_id
+              selected_run_id=$candidate_run_id
+              selected_run_attempt=$(jq -er '.run_attempt' <<< "$trusted_run")
+              break
+            fi
+          done
+          if [[ ! "$selected_artifact_id" =~ ^[1-9][0-9]*$ ||
+                ! "$selected_run_id" =~ ^[1-9][0-9]*$ ||
+                ! "$selected_run_attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo "no artifact came from an allowed successful workflow run" >&2
+            exit 2
+          fi
+          {
+            echo "artifact_id=$selected_artifact_id"
+            echo "run_id=$selected_run_id"
+            echo "run_attempt=$selected_run_attempt"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download matching kernel artifact
         if: inputs.target == 'modules'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ steps.artifact-names.outputs.kernel }}
+          artifact-ids: ${{ steps.kernel-artifact.outputs.artifact_id }}
           path: out/kernel-artifact-download
           run-id: ${{ steps.kernel-artifact.outputs.run_id }}
+          repository: ${{ github.repository }}
           github-token: ${{ github.token }}
+          digest-mismatch: error
 
       - name: Restore reusable kernel output
         if: inputs.target == 'modules'
+        env:
+          ARTIFACT_NAME: ${{ steps.artifact-names.outputs.kernel }}
+          SOURCE_RUN_ID: ${{ steps.kernel-artifact.outputs.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.kernel-artifact.outputs.run_attempt }}
         run: |
           set -euo pipefail
-          test -s "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst"
-          test -s "$KERNEL_ARTIFACT_DOWNLOAD_DIR/SHA256SUMS"
-          (
-            cd "$KERNEL_ARTIFACT_DOWNLOAD_DIR"
-            sha256sum --check SHA256SUMS
+          bundle_args=(
+            --directory "$KERNEL_ARTIFACT_DOWNLOAD_DIR"
+            --repository "$GITHUB_REPOSITORY"
+            --head-sha "$GITHUB_SHA"
+            --run-id "$SOURCE_RUN_ID"
+            --run-attempt "$SOURCE_RUN_ATTEMPT"
+            --artifact-name "$ARTIFACT_NAME"
+            --base "$BASE"
+            --root "$ROOT_VARIANT"
+            --profile "$PROFILE"
+            --optimization "$OPTIMIZATION"
+            --lto "$LTO_MODE"
+            --branding "$KERNEL_BRANDING"
+            --build-timestamp "$BUILD_TIMESTAMP"
+            --allow-earlier-run-attempt
           )
-          tar --zstd -tf "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
-            > "$DEBUG_DIR/kernel-artifact-files.txt"
-          if grep -Eq '(^/|(^|/)\.\.(/|$))' "$DEBUG_DIR/kernel-artifact-files.txt"; then
-            echo 'kernel artifact contains a path outside the build directory' >&2
+          python3 scripts/kernel-artifact-bundle.py verify "${bundle_args[@]}" \
+            > "$DEBUG_DIR/kernel-artifact-bundle-pre-restore.json"
+          workspace_root=$(realpath -e -- "$GITHUB_WORKSPACE")
+          build_root=$(realpath -e -- "$BUILD_DIR")
+          if [[ -L "$BUILD_DIR" || "$build_root" != "$workspace_root/out/build" ]]; then
+            echo "precreated build directory resolved outside the exact workspace path" >&2
             exit 2
           fi
-          tar --zstd --extract \
-            --file="$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
-            --directory="$BUILD_DIR" \
-            --no-same-owner
+          mapfile -d '' build_entries < <(
+            find "$build_root" -mindepth 1 -maxdepth 1 -print0
+          )
+          if ((${#build_entries[@]} != 1)) ||
+             [[ "${build_entries[0]}" != "$build_root/modules" ]]; then
+            echo "precreated build directory must contain only its modules directory" >&2
+            exit 2
+          fi
+          module_root=$(realpath -e -- "$MODULE_DIR")
+          if [[ -L "$MODULE_DIR" || "$module_root" != "$workspace_root/out/build/modules" ||
+                -n "$(find "$module_root" -mindepth 1 -print -quit)" ]]; then
+            echo "precreated modules directory is not the exact empty workspace path" >&2
+            exit 2
+          fi
+          rmdir -- "$module_root"
+          rmdir -- "$build_root"
+          python3 scripts/kernel-artifact-archive.py restore \
+            --archive "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
+            --manifest "$KERNEL_ARTIFACT_DOWNLOAD_DIR/KERNEL-ARTIFACT-MANIFEST.json" \
+            --destination "$BUILD_DIR" > /dev/null
           test -s "$BUILD_DIR/.config"
           test -s "$BUILD_DIR/Module.symvers"
           test -s "$BUILD_DIR/System.map"
           test -s "$BUILD_DIR/.op13/build-context.json"
-          rm -f -- \
+          python3 scripts/kernel-artifact-bundle.py verify "${bundle_args[@]}" \
+            --restored-dir "$BUILD_DIR" \
+            > "$DEBUG_DIR/kernel-artifact-bundle-restored.json"
+          cp -- "$KERNEL_ARTIFACT_DOWNLOAD_DIR/KERNEL-ARTIFACT-PROVENANCE.json" \
+            "$DEBUG_DIR/kernel-artifact-provenance.json"
+          rm -- \
             "$KERNEL_ARTIFACT_DOWNLOAD_DIR/kernel-build.tar.zst" \
+            "$KERNEL_ARTIFACT_DOWNLOAD_DIR/KERNEL-ARTIFACT-MANIFEST.json" \
+            "$KERNEL_ARTIFACT_DOWNLOAD_DIR/KERNEL-ARTIFACT-PROVENANCE.json" \
             "$KERNEL_ARTIFACT_DOWNLOAD_DIR/SHA256SUMS"
+          download_root=$(realpath -e -- "$KERNEL_ARTIFACT_DOWNLOAD_DIR")
+          if [[ -L "$KERNEL_ARTIFACT_DOWNLOAD_DIR" ||
+                "$download_root" != "$workspace_root/out/kernel-artifact-download" ]]; then
+            echo "artifact download directory resolved outside the exact workspace path" >&2
+            exit 2
+          fi
+          rmdir -- "$download_root"
 
       - name: Synchronize locked sources
         run: |
@@ -604,6 +753,15 @@ jobs:
             --base "$BASE" \
             --output "$SOURCE_DIR" \
             --debug-dir "$DEBUG_DIR"
+
+      - name: Verify and record pinned build toolchain
+        run: |
+          set -euo pipefail
+          python3 scripts/record-build-toolchain.py \
+            --source-dir "$SOURCE_DIR" \
+            --resolved-manifest "$SOURCE_DIR/.op13/${BASE}-manifest-resolved.xml" \
+            --output "$DEBUG_DIR/build-toolchain-provenance.json" \
+            --output "$SOURCE_DIR/.op13/build-toolchain-provenance.json"
 
       - name: Validate compile cache filesystem path
         if: inputs.cache && !inputs.clean && inputs.target != 'modules'
@@ -692,6 +850,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply selected patch series
+        id: apply_patches
         run: |
           set -euo pipefail
           bash scripts/apply-series.sh \
@@ -700,6 +859,24 @@ jobs:
             --root "$ROOT_VARIANT" \
             --source-dir "$SOURCE_DIR" \
             --log "$DEBUG_DIR"
+
+      - name: Collect patch residue evidence
+        if: always() && steps.apply_patches.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          python3 scripts/collect-patch-evidence.py \
+            --source-dir "$SOURCE_DIR" \
+            --output-dir "$DEBUG_DIR"
+
+      - name: Capture validated KMI patch evidence
+        run: |
+          set -euo pipefail
+          python3 scripts/capture-kmi-build-evidence.py \
+            --source-dir "$SOURCE_DIR" \
+            --context "$SOURCE_DIR/.op13/build-context.json" \
+            --base "$BASE" \
+            --output "$SOURCE_DIR/.op13" \
+            --output "$DEBUG_DIR"
 
       - name: Configure kernel and modules
         run: |
@@ -716,12 +893,16 @@ jobs:
 
       - name: Build kernel
         if: inputs.target != 'modules'
+        env:
+          EXTRA_KBUILD_ARGS: ${{ inputs.base == 'oos16' && '--jobs=2 --local_ram_resources=8192' || '' }}
         run: |
           set -euo pipefail
           args=(--source-dir "$SOURCE_DIR" --output "$BUILD_DIR")
           [[ "$CLEAN_BUILD" == true ]] && args+=(--clean)
           [[ "$DEBUG_BUILD" == true ]] && args+=(--debug)
-          bash scripts/build-kernel.sh "${args[@]}"
+          bash scripts/run-observed-kernel-build.sh \
+            --debug-dir "$DEBUG_DIR" \
+            -- bash scripts/build-kernel.sh "${args[@]}"
 
       - name: Measure audited Bazel cache for save
         id: compile-cache-size
@@ -837,28 +1018,12 @@ jobs:
           [[ "$PRE_RELEASE" == true ]] && args+=(--pre-release)
           bash scripts/package.sh "${args[@]}"
 
-      - name: Generate package checksums
+      - name: Verify packaged checksums and context
         run: |
           set -euo pipefail
-          test -n "$(find "$DIST_DIR" -type f -print -quit)"
-          (
-            cd "$DIST_DIR"
-            checksum_file=SHA256SUMS
-            checksum_temporary=${checksum_file}.tmp
-            trap 'rm -f "$checksum_temporary"' EXIT
-            mapfile -d '' package_files < <(
-              find . -type f ! -name "$checksum_file" ! -name "$checksum_temporary" -print0 \
-                | LC_ALL=C sort -z
-            )
-            ((${#package_files[@]} > 0))
-            : > "$checksum_temporary"
-            for package_file in "${package_files[@]}"; do
-              sha256sum "$package_file" >> "$checksum_temporary"
-            done
-            mv "$checksum_temporary" "$checksum_file"
-            trap - EXIT
-            sha256sum --check "$checksum_file"
-          )
+          python3 scripts/verify-package-checksums.py \
+            --directory "$DIST_DIR" \
+            --context "$BUILD_DIR/.op13/build-context.json"
 
       - name: Collect diagnostics
         if: always()
@@ -867,8 +1032,6 @@ jobs:
           mkdir -p "$DEBUG_DIR"
           df -h > "$DEBUG_DIR/disk-after.txt"
           du -sh out/* > "$DEBUG_DIR/output-sizes.txt" 2>&1 || true
-          find out -type f \( -name '*.rej' -o -name '*.orig' \) -print \
-            > "$DEBUG_DIR/patch-rejects.txt" 2>/dev/null || true
           find out -type f \( -name '*.log' -o -name '*.txt' \) -print0 \
             | xargs -0 -r grep -H -E -i 'warning:|error:' \
             > "$DEBUG_DIR/warnings.txt" 2>/dev/null || true
@@ -898,34 +1061,48 @@ jobs:
           df -h / "$GITHUB_WORKSPACE" > "$DEBUG_DIR/disk-after-source-release.txt"
 
       - name: Archive reusable kernel output
-        if: success() && inputs.target != 'modules'
+        if: success() && inputs.target == 'mixed'
+        env:
+          ARTIFACT_NAME: ${{ steps.artifact-names.outputs.kernel }}
         run: |
           set -euo pipefail
           test ! -e "$KERNEL_ARTIFACT_DIR"
           mkdir -p "$KERNEL_ARTIFACT_DIR"
-          ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd \
-            --create \
-            --file="$KERNEL_ARTIFACT_DIR/kernel-build.tar.zst" \
-            --directory="$BUILD_DIR" \
-            --exclude='./modules' \
-            .
-          (
-            cd "$KERNEL_ARTIFACT_DIR"
-            sha256sum kernel-build.tar.zst > SHA256SUMS
-            sha256sum --check SHA256SUMS
-          )
+          python3 scripts/kernel-artifact-archive.py create \
+            --source-dir "$BUILD_DIR" \
+            --archive "$KERNEL_ARTIFACT_DIR/kernel-build.tar.zst" \
+            --manifest "$KERNEL_ARTIFACT_DIR/KERNEL-ARTIFACT-MANIFEST.json" \
+            > /dev/null
+          python3 scripts/kernel-artifact-bundle.py seal \
+            --directory "$KERNEL_ARTIFACT_DIR" \
+            --build-context "$BUILD_DIR/.op13/build-context.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --head-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifact-name "$ARTIFACT_NAME" \
+            --base "$BASE" \
+            --root "$ROOT_VARIANT" \
+            --profile "$PROFILE" \
+            --optimization "$OPTIMIZATION" \
+            --lto "$LTO_MODE" \
+            --branding "$KERNEL_BRANDING" \
+            --build-timestamp "$BUILD_TIMESTAMP" \
+            > "$DEBUG_DIR/kernel-artifact-bundle-seal.json"
 
       - name: Upload reusable kernel output
-        if: success() && inputs.target != 'modules'
+        if: success() && inputs.target == 'mixed'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.artifact-names.outputs.kernel }}
           path: out/kernel-artifact
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Upload packages
+        id: upload-packages
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -933,17 +1110,20 @@ jobs:
           path: out/dist
           if-no-files-found: error
           include-hidden-files: true
+          overwrite: true
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Upload debug evidence
         if: always() && (inputs.debug || failure())
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: debug-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}-${{ inputs.target }}-${{ inputs.optimization }}-${{ inputs.lto }}-${{ github.run_id }}
+          name: debug-${{ inputs.base }}-${{ inputs.root }}-${{ inputs.profile }}-${{ inputs.target }}-${{ inputs.optimization }}-${{ inputs.lto }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
             out/debug
             out/source/.op13
             out/build/.op13
+            !out/build/.op13/config-work/**
+            !out/build/.op13/config-work-msm-kernel/**
             out/build/.config
             out/build/vmlinux
             out/build/System.map

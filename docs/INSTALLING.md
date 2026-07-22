@@ -13,9 +13,9 @@ evidence that a different firmware build is compatible.
 3. Keep the exact stock firmware and stock boot-related images needed for
    rollback. Verify that a host can see the device in both ADB and bootloader
    mode before changing the kernel.
-4. Download the complete package set, including the AnyKernel3 ZIP,
-   `BUILD-MANIFEST.json`, and `SHA256SUMS`, from the same workflow run or
-   release.
+4. Download the complete package set, including the AnyKernel3 ZIP, its
+   `-corresponding-source.zip`, `BUILD-MANIFEST.json`, and `SHA256SUMS`, from
+   the same workflow run or release.
 5. Read the manifest and confirm `device`, `base`, `kmi`, root variant, feature
    profile, builder repository/revision, and resolved-manifest digest.
 
@@ -51,10 +51,14 @@ commit, optimization, LTO, configuration, kernel release, and `Module.symvers`
 lineage match the installed kernel. A standalone modules-only run may consume a
 prior mixed artifact when that exact lineage matches.
 
-For NetHunter/full builds, apply the separately checksummed wireless firmware
-bundle only after the kernel boots normally. Reboot, check `dmesg`, then load
-one driver family at a time. Do not copy modules from a previous kernel release
-to make a failed load appear successful.
+For NetHunter/full builds, verify the separately checksummed wireless firmware
+bundle only after the kernel boots normally. It is a deterministic data bundle,
+not the upstream flashable Magisk module: inspect
+`WIRELESS-FIRMWARE-PROVENANCE.json`, then use a reviewed installation mechanism
+that preserves its `system/etc/firmware` relative paths and has a tested
+rollback. Reboot, check `dmesg`, then load one driver family at a time. Do not
+copy modules from a previous kernel release to make a failed load appear
+successful.
 
 ## First boot checks
 

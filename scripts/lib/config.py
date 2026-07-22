@@ -36,6 +36,71 @@ ROOT_DEPENDENCY_IDS = {
     "kernelsu": "kernelsu",
     "kernelsu-next": "kernelsu_next",
 }
+ANYKERNEL_PROGRAM_SOURCE_DEPENDENCY_IDS = (
+    "magisk_source",
+    "magisk_busybox_source",
+    "magisk_submodule_crt0",
+    "magisk_submodule_cxx",
+    "magisk_submodule_libcxx",
+    "magisk_submodule_lsplt",
+    "magisk_submodule_lz4",
+    "magisk_submodule_selinux",
+    "magisk_submodule_system_properties",
+)
+ANYKERNEL_CARGO_GIT_DEPENDENCY_ID = "magisk_cargo_git_quick_protobuf"
+_ANYKERNEL_CARGO_CRATE_LOCK = """
+adler2==2.0.1 anstyle==1.0.13 anyhow==1.0.102 autocfg==1.5.0 base16ct==1.0.0 base64ct==1.8.3
+bit-set==0.8.0 bit-vec==0.8.0 bitflags==2.11.0 block-buffer==0.10.4 block-buffer==0.11.0
+bumpalo==3.20.2 bytemuck==1.25.0 bytemuck_derive==1.10.2 byteorder==1.5.0 bzip2==0.6.1
+cc==1.2.56 cfg-if==1.0.4 cfg_aliases==0.2.1 clap==4.5.60 clap_builder==4.5.60 clap_lex==1.0.0
+cmov==0.5.2 codespan-reporting==0.13.1 const-oid==0.10.2 const_format==0.2.35
+const_format_proc_macros==0.2.34 cpubits==0.1.0 cpufeatures==0.2.17 crc32fast==1.5.0
+crypto-bigint==0.7.0-rc.27 crypto-common==0.1.7 crypto-common==0.2.0 crypto-primes==0.7.0-pre.9
+ctutils==0.4.0 der==0.8.0 der_derive==0.8.0 digest==0.10.7 digest==0.11.0 ecdsa==0.17.0-rc.16
+elliptic-curve==0.14.0-rc.28 equivalent==1.0.2 fdt==0.1.5 fiat-crypto==0.3.0
+find-msvc-tools==0.1.9 flagset==0.4.7 flate2==1.1.9 foldhash==0.1.5 foldhash==0.2.0
+generic-array==0.14.7 getrandom==0.4.1 hashbrown==0.15.5 hashbrown==0.16.1 heck==0.5.0
+hmac==0.13.0-rc.5 hybrid-array==0.4.7 id-arena==2.3.0 indexmap==2.13.0 itoa==1.0.17
+leb128fmt==0.1.0 libbz2-rs-sys==0.2.2 libc==0.2.182 libm==0.2.16 log==0.4.29 lz4==1.28.1
+lzma-rust2==0.16.2 memchr==2.8.0 minimal-lexical==0.2.1 miniz_oxide==0.8.9 nix==0.30.1
+nom==7.1.3 num-derive==0.4.2 num-traits==0.2.19 once_cell==1.21.3 p256==0.14.0-rc.7
+p384==0.14.0-rc.7 p521==0.14.0-rc.7 pem-rfc7468==1.0.0 pkcs1==0.8.0-rc.4 pkcs8==0.11.0-rc.11
+prettyplease==0.2.37 primefield==0.14.0-rc.7 primeorder==0.14.0-rc.7 proc-macro2==1.0.106
+quote==1.0.44 r-efi==5.3.0 rand_core==0.10.0 rfc6979==0.5.0-rc.5 rsa==0.10.0-rc.15
+rustcrypto-ff==0.14.0-rc.0 rustcrypto-group==0.14.0-rc.0 scratch==1.0.9 sec1==0.8.0-rc.13
+semver==1.0.27 serde==1.0.228 serde_core==1.0.228 serde_derive==1.0.228 serde_json==1.0.149
+serdect==0.4.2 sha1==0.11.0-rc.5 sha2==0.10.9 sha2==0.11.0-rc.5 shlex==1.3.0
+signature==3.0.0-rc.10 simd-adler32==0.3.8 size==0.5.0 spki==0.8.0-rc.4 strsim==0.11.1
+subtle==2.6.1 syn==2.0.117 termcolor==1.4.1 thiserror==2.0.18 thiserror-impl==2.0.18
+tls_codec==0.4.2 tls_codec_derive==0.4.2 typenum==1.19.0 unicode-ident==1.0.24
+unicode-width==0.2.2 unicode-xid==0.2.6 version_check==0.9.5 wasip2==1.0.2+wasi-0.2.9
+wasip3==0.4.0+wasi-0.3.0-rc-2026-01-06 wasm-encoder==0.244.0 wasm-metadata==0.244.0
+wasmparser==0.244.0 winapi-util==0.1.11 windows-link==0.2.1 windows-sys==0.61.2
+wit-bindgen==0.51.0 wit-bindgen-core==0.51.0 wit-bindgen-rust==0.51.0
+wit-bindgen-rust-macro==0.51.0 wit-component==0.244.0 wit-parser==0.244.0 x509-cert==0.3.0-rc.4
+zeroize==1.8.2 zeroize_derive==1.4.3 zlib-rs==0.6.2 zmij==1.0.21 zopfli==0.8.3
+""".split()
+
+
+def cargo_crate_source_dependency_id(name: str, version: str) -> str:
+    """Return the portable lock identifier for one exact Cargo registry archive."""
+
+    normalize = lambda value: re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return f"magisk_cargo_crate_{normalize(name)}_{normalize(version)}"
+
+
+ANYKERNEL_CARGO_CRATE_IDENTITIES = tuple(
+    tuple(identity.rsplit("==", 1)) for identity in _ANYKERNEL_CARGO_CRATE_LOCK
+)
+ANYKERNEL_CARGO_CRATE_DEPENDENCY_IDS = tuple(
+    cargo_crate_source_dependency_id(name, version)
+    for name, version in ANYKERNEL_CARGO_CRATE_IDENTITIES
+)
+ANYKERNEL_SOURCE_DEPENDENCY_IDS = (
+    *ANYKERNEL_PROGRAM_SOURCE_DEPENDENCY_IDS,
+    ANYKERNEL_CARGO_GIT_DEPENDENCY_ID,
+    *ANYKERNEL_CARGO_CRATE_DEPENDENCY_IDS,
+)
 
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -75,6 +140,27 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def strict_json_loads(text: str) -> Any:
+    """Parse canonical metadata without duplicate keys or non-JSON constants."""
+
+    def object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> Any:
+        raise ValueError(f"non-JSON numeric constant: {value}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=object_from_pairs,
+        parse_constant=reject_constant,
+    )
+
+
 def load_json_yaml(path: Path) -> Any:
     """Load a repository YAML file without an optional YAML dependency."""
 
@@ -92,11 +178,13 @@ def load_json_yaml(path: Path) -> Any:
         if pattern.search(text):
             raise BuildToolError(f"{path}: embedded credential detected")
     try:
-        value = json.loads(text)
+        value = strict_json_loads(text)
     except json.JSONDecodeError as exc:
         raise BuildToolError(
             f"{path}:{exc.lineno}:{exc.colno}: expected JSON-compatible YAML ({exc.msg})"
         ) from exc
+    except ValueError as exc:
+        raise BuildToolError(f"{path}: invalid JSON-compatible YAML ({exc})") from exc
     return value
 
 
@@ -483,6 +571,15 @@ def load_dependency_lock(path: Path) -> DependencyLock:
         else:
             if sha is None or not SHA256_RE.fullmatch(sha):
                 raise BuildToolError(f"{path}: {kind} dependency {dep_id} needs sha256")
+            size = item.get("size")
+            if (
+                not isinstance(size, int)
+                or isinstance(size, bool)
+                or size < 1
+            ):
+                raise BuildToolError(
+                    f"{path}: {kind} dependency {dep_id} needs a positive integer size"
+                )
             if commit is not None and not is_full_commit(commit):
                 raise BuildToolError(f"{path}: dependency {dep_id} commit must be a full SHA")
         if ref in MUTABLE_REFS or (isinstance(ref, str) and ref.startswith("refs/heads/")):
@@ -498,7 +595,15 @@ def load_dependency_lock(path: Path) -> DependencyLock:
         if not required_for:
             raise BuildToolError(f"{path}: dependency {dep_id} must declare required_for")
         dependencies[dep_id] = Dependency(dep_id, kind, url, commit, ref, sha, required_for, item)
-    required_ids = {"repo_launcher", "oneplus_manifest", "kernelsu", "kernelsu_next", "anykernel3"}
+    required_ids = {
+        "repo_launcher",
+        "oneplus_manifest",
+        "kernelsu",
+        "kernelsu_next",
+        "anykernel3",
+        "magisk_release_apk",
+        *ANYKERNEL_SOURCE_DEPENDENCY_IDS,
+    }
     missing = sorted(required_ids - dependencies.keys())
     if missing:
         raise BuildToolError(f"{path}: missing required dependencies: {', '.join(missing)}")

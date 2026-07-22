@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "policy": "Only arm64 executables required by the Image-only OnePlus 13 AnyKernel3 path are retained. Every ELF is extracted from the pinned official release asset and must match its exact origin, byte identity, ELF class, endianness, architecture, license, and source-location record.",
+  "anykernel3": {
+    "dependency": "anykernel3",
+    "repository": "https://github.com/osm0sis/AnyKernel3.git",
+    "commit": "1c9a500dd4aa8081952523126e97eb155aed941b",
+    "license_classification": "SEE-UPSTREAM-MULTIPLE",
+    "license_member": "LICENSE",
+    "template_members": [
+      {
+        "path": "LICENSE",
+        "git_mode": "100644",
+        "git_blob": "20a447ebe28baf309eeed88eac8cd86a4c3eeeec",
+        "size": 11630,
+        "sha256": "df6f65da47d459fdf2a2ef0eadb34f37d838befc91352b64a84f35507bea95cd"
+      },
+      {
+        "path": "META-INF/com/google/android/update-binary",
+        "git_mode": "100755",
+        "git_blob": "8c7006e7e3f6ef10f8f4117b291d6df204ef285e",
+        "size": 19724,
+        "sha256": "cf3ebe7183d5e3f25e9215cde7ef9dd956e836232a70f2a671891ab4889c7e7d"
+      },
+      {
+        "path": "META-INF/com/google/android/updater-script",
+        "git_mode": "100644",
+        "git_blob": "8f5b52376c03dfa0b3f61446a830ecca9e8a03cc",
+        "size": 115,
+        "sha256": "ec154e2509d82dd1e409355faa600ce3f146b372047f449322a7b40d108f5deb"
+      },
+      {
+        "path": "tools/ak3-core.sh",
+        "git_mode": "100755",
+        "git_blob": "43baccb2b6b1febf4815bc9f74f81da7d72db61d",
+        "size": 34976,
+        "sha256": "5c3f2ec85f18311552da79dfc2631509c59c763b099682c30ea538f2ee7a9aab"
+      }
+    ]
+  },
+  "release_asset": {
+    "dependency": "magisk_release_apk",
+    "uri": "https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk",
+    "sha256": "e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5",
+    "repository": "https://github.com/topjohnwu/Magisk.git",
+    "ref": "refs/tags/v30.7",
+    "source_commit": "e8a58776f1d7bdf852072ad0baa6eceb9a1e4aac",
+    "version": "v30.7",
+    "license_classification": "SEE-UPSTREAM-MULTIPLE",
+    "archive_format": "apk-zip",
+    "abi": "arm64-v8a"
+  },
+  "license_files": [
+    {
+      "path": "LICENSES/GPL-2.0-only",
+      "size": 18348,
+      "sha256": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548",
+      "spdx": "GPL-2.0-only",
+      "source": {
+        "repository": "https://github.com/topjohnwu/ndk-busybox.git",
+        "commit": "1c0ca97aafb9698ab7770ce1f67af1a84b469cdb",
+        "path": "LICENSE"
+      }
+    },
+    {
+      "path": "LICENSES/GPL-3.0-or-later",
+      "size": 35141,
+      "sha256": "589ed823e9a84c56feb95ac58e7cf384626b9cbf4fda2a907bc36e103de1bad2",
+      "spdx": "GPL-3.0-or-later",
+      "source": {
+        "repository": "https://github.com/topjohnwu/Magisk.git",
+        "commit": "e8a58776f1d7bdf852072ad0baa6eceb9a1e4aac",
+        "path": "LICENSE"
+      }
+    }
+  ],
+  "source_conveyance": {
+    "path": "SOURCE-CONVEYANCE.md",
+    "size": 2387,
+    "sha256": "5c62170791b9a2007314660610ebd66b47789ba9ae7404ef4267c2972b92ecc0"
+  },
+  "executables": [
+    {
+      "path": "tools/busybox",
+      "size": 1710600,
+      "sha256": "4d60ab3f5a59ebb2ca863f2f514e6924401b581e9b64f602665c008177626651",
+      "version": "1.36.1.1",
+      "license": "GPL-2.0-only",
+      "license_path": "LICENSES/GPL-2.0-only",
+      "elf": {
+        "class": "ELFCLASS64",
+        "data": "ELFDATA2LSB",
+        "machine": "EM_AARCH64",
+        "type": "ET_EXEC"
+      },
+      "source": {
+        "repository": "https://github.com/topjohnwu/ndk-busybox.git",
+        "commit": "1c0ca97aafb9698ab7770ce1f67af1a84b469cdb",
+        "relationship": "official-version-source-exact-byte-rebuild-not-verified"
+      },
+      "binary_origin": {
+        "dependency": "magisk_release_apk",
+        "archive_member": "lib/arm64-v8a/libbusybox.so",
+        "asset_sha256": "e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5",
+        "upstream_build_input": {
+          "uri": "https://github.com/topjohnwu/magisk-files/releases/download/files/busybox-1.36.1.1.zip",
+          "sha256": "b4d0551feabaf314e53c79316c980e8f66432e9fb91a69dbbf10a93564b40951",
+          "archive_member": "arm64-v8a/libbusybox.so"
+        }
+      },
+      "reproducible_build": {
+        "status": "official-release-match-byte-rebuild-not-verified",
+        "note": "The APK member exactly matches Magisk's pinned BusyBox build input; the source revision and license are identified, but an independent byte-for-byte rebuild has not been demonstrated."
+      }
+    },
+    {
+      "path": "tools/magiskboot",
+      "size": 788840,
+      "sha256": "d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77",
+      "version": "30.7",
+      "license": "GPL-3.0-or-later",
+      "license_path": "LICENSES/GPL-3.0-or-later",
+      "elf": {
+        "class": "ELFCLASS64",
+        "data": "ELFDATA2LSB",
+        "machine": "EM_AARCH64",
+        "type": "ET_EXEC"
+      },
+      "source": {
+        "repository": "https://github.com/topjohnwu/Magisk.git",
+        "commit": "e8a58776f1d7bdf852072ad0baa6eceb9a1e4aac",
+        "relationship": "official-release-source-exact-byte-rebuild-not-verified"
+      },
+      "binary_origin": {
+        "dependency": "magisk_release_apk",
+        "archive_member": "lib/arm64-v8a/libmagiskboot.so",
+        "asset_sha256": "e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5"
+      },
+      "reproducible_build": {
+        "status": "official-release-match-byte-rebuild-not-verified",
+        "note": "The official v30.7 APK member is tied to the locked release source commit; an independent byte-for-byte rebuild has not been demonstrated."
+      }
+    }
+  ]
+}

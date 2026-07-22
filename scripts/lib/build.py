@@ -20,6 +20,10 @@ from .config import (
     sha256_bytes,
     sha256_file,
 )
+from .build_evidence import (
+    preserve_source_build_evidence,
+    wireless_led_exports_required,
+)
 from .context import (
     advance_context,
     assert_symvers_lineage,
@@ -53,6 +57,79 @@ SYMBOL_LINE_RE = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
 SYMBOL_UNSET_RE = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
 CLANG_VERSION_RE = re.compile(r"^CLANG_VERSION=([A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
 MAX_BUILD_EPOCH = int(datetime(2107, 12, 31, 23, 59, 58, tzinfo=timezone.utc).timestamp())
+OOS16_HOSTED_EXTRA_KBUILD_ARGS = "--jobs=2 --local_ram_resources=8192"
+
+
+def _effective_kernel_resource_policy(profile_id: str) -> dict[str, Any]:
+    bounded = profile_id == "oos16" and os.environ.get("GITHUB_ACTIONS") == "true"
+    value = OOS16_HOSTED_EXTRA_KBUILD_ARGS if bounded else ""
+    return {
+        "schema_version": 1,
+        "profile": profile_id,
+        "policy": "oos16-hosted-bounded" if bounded else "tool-default",
+        "extra_kbuild_args": value or None,
+        "bazel_jobs": 2 if bounded else None,
+        "local_ram_resources_mib": 8192 if bounded else None,
+        "workflow_input": False,
+    }
+
+
+def _kleaf_repo_manifest_binding(
+    source_dir: Path,
+    context: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    if source_dir.is_symlink():
+        raise BuildToolError("synced source root must not be a symlink")
+    try:
+        source_root = source_dir.resolve(strict=True)
+    except OSError as exc:
+        raise BuildToolError(f"synced source root is missing: {source_dir}") from exc
+    if not source_root.is_dir():
+        raise BuildToolError(f"synced source root is not a directory: {source_root}")
+    manifest = context.get("manifest")
+    if not isinstance(manifest, dict):
+        raise BuildToolError("build context manifest is absent")
+    manifest_path = Path(str(manifest.get("resolved_path", "")))
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise BuildToolError("resolved manifest must be a plain file for Kleaf stamping")
+    try:
+        manifest_canonical = manifest_path.resolve(strict=True)
+        manifest_relative = manifest_canonical.relative_to(source_root).as_posix()
+    except (OSError, ValueError) as exc:
+        raise BuildToolError(
+            "resolved manifest for Kleaf stamping must remain inside the synced source tree"
+        ) from exc
+    manifest_sha256 = sha256_file(manifest_canonical)
+    if manifest_sha256 != manifest.get("sha256"):
+        raise BuildToolError("resolved manifest for Kleaf stamping changed after synchronization")
+    base = context.get("profile")
+    manifest_url = manifest.get("url")
+    manifest_file = manifest.get("file")
+    manifest_revision = manifest.get("revision")
+    if not isinstance(base, str) or not base:
+        raise BuildToolError("resolved manifest for Kleaf stamping lacks profile identity")
+    if not isinstance(manifest_url, str) or not manifest_url.startswith("https://"):
+        raise BuildToolError("resolved manifest for Kleaf stamping lacks HTTPS URL identity")
+    if not isinstance(manifest_file, str) or not manifest_file:
+        raise BuildToolError("resolved manifest for Kleaf stamping lacks filename identity")
+    if not isinstance(manifest_revision, str) or re.fullmatch(
+        r"[0-9a-f]{40}", manifest_revision
+    ) is None:
+        raise BuildToolError("resolved manifest for Kleaf stamping lacks commit identity")
+    record = {
+        "schema_version": 1,
+        "environment_variable": "KLEAF_REPO_MANIFEST",
+        "status": "applied",
+        "path_scope": "synced-source-relative",
+        "base": base,
+        "repository_root": ".",
+        "resolved_manifest": manifest_relative,
+        "resolved_manifest_sha256": manifest_sha256,
+        "manifest_url": manifest_url,
+        "manifest_file": manifest_file,
+        "manifest_revision": manifest_revision,
+    }
+    return f"{source_root}:{manifest_canonical}", record
 
 
 def assert_build_target_contract(build_target: str) -> None:
@@ -137,6 +214,48 @@ def expected_symbols(
         expected["CONFIG_LTO_CLANG_FULL"] = "y"
     else:
         raise BuildToolError("LTO mode must be thin or full")
+    return expected
+
+
+def expected_symbols_for_target(
+    root: Path,
+    feature: FeatureProfile,
+    *,
+    root_variant: str,
+    optimization: str,
+    lto: str,
+    build_target: str,
+) -> dict[str, str]:
+    """Return the final common-kernel assertions for one supported build target."""
+
+    assert_build_target_contract(build_target)
+    expected = expected_symbols(
+        feature,
+        root_variant=root_variant,
+        optimization=optimization,
+        lto=lto,
+    )
+    if build_target != "kernel":
+        return expected
+
+    module_symbols: set[str] = set()
+    selected_common_symbols: set[str] = set()
+    for fragment in feature.kconfig_fragments:
+        path = resolve_inside(
+            root,
+            fragment.path,
+            f"feature {feature.id} {fragment.scope} fragment",
+            must_exist=fragment.required,
+        )
+        if not path.exists():
+            continue
+        symbols = set(parse_fragment(path))
+        if fragment.scope == "modules":
+            module_symbols.update(symbols)
+        elif "common" in fragment.kernel_trees:
+            selected_common_symbols.update(symbols)
+    for symbol in module_symbols - selected_common_symbols:
+        expected.pop(symbol, None)
     return expected
 
 
@@ -494,27 +613,14 @@ def configure_kernel(
         for fragment in tree_fragments:
             merged.update(parse_fragment(fragment))
         merged_by_tree[kernel_tree] = merged
-    explicit_expectations = expected_symbols(
+    explicit_expectations = expected_symbols_for_target(
+        root,
         feature,
         root_variant=root_variant,
         optimization=optimization,
         lto=lto,
+        build_target=build_target,
     )
-    if build_target == "kernel":
-        omitted_module_symbols: set[str] = set()
-        for fragment in feature.kconfig_fragments:
-            if fragment.scope != "modules":
-                continue
-            path = resolve_inside(
-                root,
-                fragment.path,
-                f"feature {feature.id} module fragment",
-                must_exist=fragment.required,
-            )
-            if path.exists():
-                omitted_module_symbols.update(parse_fragment(path))
-        for symbol in omitted_module_symbols - set(merged_by_tree["common"]):
-            explicit_expectations.pop(symbol, None)
     # A fragment is a requested feature surface, not a best-effort hint.  Assert
     # every merged value after olddefconfig so unknown symbols and unmet Kconfig
     # dependencies fail closed instead of disappearing from the final config.
@@ -774,6 +880,40 @@ def _validate_build_epoch(epoch: int) -> int:
             "build timestamp must be between 1970-01-01 and 2107-12-31T23:59:58Z"
         )
     return epoch
+
+
+def _requested_build_timestamp(requested: str | None) -> str:
+    raw = requested or os.environ.get("BUILD_TIMESTAMP") or ""
+    try:
+        encoded = raw.encode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise BuildToolError("BUILD_TIMESTAMP must be valid UTF-8") from exc
+    if len(encoded) > 1024:
+        raise BuildToolError("BUILD_TIMESTAMP exceeds the size limit")
+    if "\x00" in raw or "\n" in raw or "\r" in raw:
+        raise BuildToolError("BUILD_TIMESTAMP must be a single-line value")
+    if raw and not raw.strip():
+        raise BuildToolError("BUILD_TIMESTAMP must not contain only whitespace")
+    return raw
+
+
+def _build_timestamp_record(raw: str, epoch: int) -> dict[str, Any]:
+    if not raw:
+        return {
+            "artifact_key": "default",
+            "mode": "default",
+            "requested": None,
+            "requested_sha256": None,
+            "source_date_epoch": epoch,
+        }
+    digest = sha256_bytes(raw.encode("utf-8", "strict"))
+    return {
+        "artifact_key": digest,
+        "mode": "explicit",
+        "requested": raw,
+        "requested_sha256": digest,
+        "source_date_epoch": epoch,
+    }
 
 
 def _build_epoch(source_dir: Path, common_kernel: str, requested: str | None) -> int:
@@ -1038,11 +1178,24 @@ def build_kernel(
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir = output_dir / ".op13"
     metadata_dir.mkdir(parents=True, exist_ok=True)
+    raw_build_timestamp = _requested_build_timestamp(build_timestamp)
     if dry_run:
         command = [str(source_dir / device.official_script), *device.official_args]
         print("+ " + CommandRunner._display(command))
         return {"dry_run": True, "command": command}
+    resource_policy = _effective_kernel_resource_policy(profile.id)
+    kleaf_repo_manifest_value: str | None = None
+    kleaf_repo_manifest_record: dict[str, Any] | None = None
+    wireless_led_kmi_required = False
     if not smoke:
+        (
+            kleaf_repo_manifest_value,
+            kleaf_repo_manifest_record,
+        ) = _kleaf_repo_manifest_binding(source_dir, context)
+        wireless_led_kmi_required = wireless_led_exports_required(
+            context.get("features"),
+            feature_profile=str(configuration.get("feature_profile")),
+        )
         # Always recreate the public dist and kernel kit so an incremental
         # local build cannot retain an obsolete .ko. `clean=false` preserves
         # the official host/Bazel caches outside those generated surfaces.
@@ -1063,7 +1216,7 @@ def build_kernel(
         (output_dir / "vmlinux").write_bytes(b"OP13-SMOKE-VMLINUX\n")
         (metadata_dir / "kernel-build.log").write_text("smoke build\n", encoding="utf-8", newline="\n")
     else:
-        epoch = _build_epoch(source_dir, device.common_kernel, build_timestamp)
+        epoch = _build_epoch(source_dir, device.common_kernel, raw_build_timestamp)
         timestamp = datetime.fromtimestamp(epoch, timezone.utc).strftime("%a %b %d %H:%M:%S UTC %Y")
         script = source_dir / device.official_script
         if not script.is_file():
@@ -1078,6 +1231,10 @@ def build_kernel(
             "KBUILD_BUILD_USER": "Hipuu",
             "KBUILD_BUILD_HOST": "github-actions",
             "LOCALVERSION": f"-{selected_branding}",
+            # Override (including with an empty string) so an inherited local
+            # value can never inject additional upstream shell/Bazel flags.
+            "EXTRA_KBUILD_ARGS": resource_policy["extra_kbuild_args"] or "",
+            "KLEAF_REPO_MANIFEST": str(kleaf_repo_manifest_value),
         }
         if debug:
             env["V"] = "1"
@@ -1184,11 +1341,24 @@ def build_kernel(
         context["configuration"] = configuration
     image = output_dir / "Image"
     symvers = output_dir / "Module.symvers"
+    resolved_source = Path(str(context["manifest"]["resolved_path"]))
+    build_evidence: dict[str, Any] | None = None
+    if not smoke:
+        build_evidence = preserve_source_build_evidence(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            base=profile.id,
+            resolved_manifest=resolved_source,
+            kleaf_repo_manifest=kleaf_repo_manifest_record,
+            wireless_led_exports_required=wireless_led_kmi_required,
+        )
     kernel_record: dict[str, Any] = {
         "build_target": build_target,
         "branding": selected_branding,
         "source_date_epoch": epoch,
+        "build_timestamp": _build_timestamp_record(raw_build_timestamp, epoch),
         "debug": bool(debug),
+        "resource_policy": resource_policy,
         "image": record_for_file(image, role="kernel-image"),
         "module_symvers": record_for_file(symvers, role="module-symvers"),
         "build_log": record_for_file(metadata_dir / "kernel-build.log", role="kernel-build-log"),
@@ -1213,7 +1383,6 @@ def build_kernel(
         candidate = output_dir / name
         if candidate.is_file():
             kernel_record[name.lower().replace(".", "_")] = record_for_file(candidate, role=role)
-    resolved_source = Path(str(context["manifest"]["resolved_path"]))
     embedded_manifest = metadata_dir / "resolved-manifest.xml"
     shutil.copy2(resolved_source, embedded_manifest)
     portable_context = dict(context)
@@ -1221,7 +1390,11 @@ def build_kernel(
     portable_context["manifest"] = dict(context["manifest"])
     portable_context["manifest"]["resolved_path"] = str(embedded_manifest.resolve())
     portable_context["manifest"]["sha256"] = sha256_file(embedded_manifest)
-    updated = advance_context(portable_context, "kernel-built", {"kernel": kernel_record})
+    updated = advance_context(
+        portable_context,
+        "kernel-built",
+        {"kernel": kernel_record, "build_evidence": build_evidence},
+    )
     write_context(context_path, updated)
     write_context(metadata_dir / "build-context.json", updated)
     return kernel_record
@@ -1971,6 +2144,7 @@ def build_external_modules(
     }
     combined_context = dict(source_context)
     combined_context["kernel"] = kernel_context["kernel"]
+    combined_context["build_evidence"] = kernel_context.get("build_evidence")
     updated = advance_context(combined_context, "modules-built", {"modules": modules_record})
     write_context(source_context_path, updated)
     write_context(kernel_context_path, updated)

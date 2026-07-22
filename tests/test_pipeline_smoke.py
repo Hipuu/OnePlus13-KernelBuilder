@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -180,6 +181,7 @@ class SmokePipelineTests(unittest.TestCase):
         self.assertFalse(any(path.name.endswith(("boot.img", "vendor_boot.img")) for path in dist.iterdir()))
         self.assertTrue((dist / "BUILD-MANIFEST.json").is_file())
         manifest = json.loads((dist / "BUILD-MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertNotIn(str(self.root.resolve()), json.dumps(manifest))
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["builder"]["repository"], "Hipuu/OnePlus13-KernelBuilder")
         self.assertEqual(manifest["base"], "oos16")
@@ -209,14 +211,43 @@ class SmokePipelineTests(unittest.TestCase):
         )
         self.assertEqual(firmware["resource"]["sha256"], "a" * 64)
         self.assertTrue((dist / "SHA256SUMS").is_file())
+        checksum_verification = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "verify-package-checksums.py"),
+                "--directory",
+                str(dist),
+                "--context",
+                str(build_context_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            checksum_verification.returncode,
+            0,
+            checksum_verification.stderr,
+        )
 
         staging = self.build / "modules" / "staging"
         zip_calls = 0
 
-        def inject_after_verification(source, destination, *, epoch):
+        def inject_after_verification(
+            source,
+            destination,
+            *,
+            epoch,
+            member_modes=None,
+        ):
             nonlocal zip_calls
             zip_calls += 1
-            deterministic_zip(source, destination, epoch=epoch)
+            deterministic_zip(
+                source,
+                destination,
+                epoch=epoch,
+                member_modes=member_modes,
+            )
             if zip_calls == 1:
                 (staging / "POST-VERIFY.txt").write_text(
                     "injected after entry verification\n",

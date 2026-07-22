@@ -1,0 +1,715 @@
+{
+  "classifications": {
+    "attribution": {
+      "provenance_status": "audited-upstream-text-at-pinned-source-commit",
+      "reproducible_source": true
+    },
+    "firmware": {
+      "license": "PROPRIETARY-REDISTRIBUTABLE-FIRMWARE",
+      "provenance_status": "opaque-runtime-firmware-exact-upstream-release-bytes-no-reproducible-source-claimed",
+      "reproducible_source": false
+    }
+  },
+  "family_counts": {
+    "ath10k": 4,
+    "ath9k-htc": 2,
+    "attribution": 2,
+    "mt76": 24,
+    "rtw88": 10,
+    "usb-bluetooth-realtek": 23
+  },
+  "family_provenance": {
+    "ath10k": {
+      "license": "PROPRIETARY-REDISTRIBUTABLE-FIRMWARE",
+      "license_evidence": [
+        {
+          "packaged_path": "LICENSES/LICENSE.QualcommAtheros_ath10k",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENSE.QualcommAtheros_ath10k",
+          "sha256": "337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f",
+          "size": 2713,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENSE.QualcommAtheros_ath10k"
+        },
+        {
+          "packaged_path": "LICENSES/notice_ath10k_firmware-5.txt",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/notice_ath10k_firmware-5.txt",
+          "sha256": "7fef27f33c95ed680c21809edacdd90736ed3c903e6c224eb72f947c35e9856c",
+          "size": 46143,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/ath10k/QCA9377/hw1.0/notice_ath10k_firmware-5.txt"
+        },
+        {
+          "packaged_path": "LICENSES/notice_ath10k_firmware-6.txt",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/notice_ath10k_firmware-6.txt",
+          "sha256": "8ce5c6ea0542bf4aac31fc3ae16a39792ad22d0eae4543063fac56fb3380f021",
+          "size": 53425,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/ath10k/QCA9377/hw1.0/notice_ath10k_firmware-6.txt"
+        }
+      ],
+      "provenance_status": "opaque-runtime-firmware-exact-authoritative-bytes-no-reproducible-source-claimed",
+      "reproducible_source": false,
+      "source": {
+        "commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+        "repository": "https://gitlab.com/kernel-firmware/linux-firmware.git"
+      }
+    },
+    "ath9k-htc": {
+      "license": "FREE-SOFTWARE-SOURCE-AVAILABLE",
+      "license_evidence": [
+        {
+          "packaged_path": "LICENSES/LICENCE.open-ath9k-htc-firmware",
+          "repository_encoding": "base64",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENCE.open-ath9k-htc-firmware.base64",
+          "sha256": "83870e84c54aa76be973a78387b342c80ef0908b8cb82edde6d54c511b18c16c",
+          "size": 9409,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.open-ath9k-htc-firmware"
+        }
+      ],
+      "provenance_status": "exact-authoritative-bytes-source-available-no-independent-reproducible-build-claimed",
+      "reproducible_source": false,
+      "source": {
+        "commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+        "repository": "https://gitlab.com/kernel-firmware/linux-firmware.git"
+      }
+    },
+    "mt76": {
+      "license": "PROPRIETARY-REDISTRIBUTABLE-FIRMWARE",
+      "license_evidence": [
+        {
+          "packaged_path": "LICENSES/LICENCE.mediatek",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENCE.mediatek",
+          "sha256": "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805",
+          "size": 561,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.mediatek"
+        },
+        {
+          "packaged_path": "LICENSES/LICENCE.ralink_a_mediatek_company_firmware",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENCE.ralink_a_mediatek_company_firmware",
+          "sha256": "8568352b57f3574f9d5b2753cdb7c6e5eb2b79e82fbb9c9ba6566947467ef508",
+          "size": 2100,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.ralink_a_mediatek_company_firmware"
+        }
+      ],
+      "provenance_status": "opaque-runtime-firmware-exact-authoritative-bytes-no-reproducible-source-claimed",
+      "reproducible_source": false,
+      "source": {
+        "commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+        "repository": "https://gitlab.com/kernel-firmware/linux-firmware.git"
+      }
+    },
+    "rtw88": {
+      "license": "PROPRIETARY-REDISTRIBUTABLE-FIRMWARE",
+      "license_evidence": [
+        {
+          "packaged_path": "LICENSES/LICENCE.rtlwifi_firmware.txt",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENCE.rtlwifi_firmware.txt",
+          "sha256": "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e",
+          "size": 2115,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.rtlwifi_firmware.txt"
+        }
+      ],
+      "provenance_status": "opaque-runtime-firmware-exact-authoritative-bytes-no-reproducible-source-claimed",
+      "reproducible_source": false,
+      "source": {
+        "commit": "a56bcd26e770257612a0803249cbd4095fc6feca",
+        "repository": "https://github.com/lwfinger/rtw88.git"
+      }
+    },
+    "usb-bluetooth-realtek": {
+      "license": "PROPRIETARY-REDISTRIBUTABLE-FIRMWARE",
+      "license_evidence": [
+        {
+          "packaged_path": "LICENSES/LICENCE.rtlwifi_firmware.txt",
+          "repository_encoding": "identity",
+          "repository_path": "packaging/wireless-firmware/licenses/LICENCE.rtlwifi_firmware.txt",
+          "sha256": "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e",
+          "size": 2115,
+          "source_commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+          "uri": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/195e420f34c5c029d27ee57c57e3b3a8a164f8c4/LICENCE.rtlwifi_firmware.txt"
+        }
+      ],
+      "provenance_status": "opaque-runtime-firmware-exact-authoritative-bytes-no-reproducible-source-claimed",
+      "reproducible_source": false,
+      "source": {
+        "commit": "195e420f34c5c029d27ee57c57e3b3a8a164f8c4",
+        "repository": "https://gitlab.com/kernel-firmware/linux-firmware.git"
+      },
+      "source_overrides": {
+        "system/etc/firmware/rtl_bt/rtl8852au_fw.bin": {
+          "commit": "1cd1c871c9162a2c34380e6dd0c8ac9474d36522",
+          "repository": "https://gitlab.com/kernel-firmware/linux-firmware.git"
+        }
+      }
+    }
+  },
+  "generated_aliases": [
+    {
+      "path": "system/etc/firmware/mt7662.bin",
+      "reason": "Linux 6.6 MT76x2 requests the firmware from the root firmware directory",
+      "sha256": "f7e52492f58088cae50e51a54cca68e4abc5b74f7d0b6b731dbb4c04465a94b6",
+      "size": 81908,
+      "source_path": "system/etc/firmware/mediatek/mt7662.bin"
+    },
+    {
+      "path": "system/etc/firmware/mt7662_rom_patch.bin",
+      "reason": "Linux 6.6 MT76x2 requests the ROM patch from the root firmware directory",
+      "sha256": "6f0e871268f6e4d99196d90d89bcc09fe493d010366260a2cfcaa5dd66095f8c",
+      "size": 26350,
+      "source_path": "system/etc/firmware/mediatek/mt7662_rom_patch.bin"
+    }
+  ],
+  "known_excluded_elf_members": [
+    {
+      "path": "system/etc/firmware/mediatek/mt8183/scp.img",
+      "reason": "non-wireless MediaTek SCP firmware excluded from curated deliverable",
+      "sha256": "401e9c027b0e105efa9eb9b31683924a8d5f5ab3b1654f0915b174effe2df33d",
+      "size": 1030776
+    },
+    {
+      "path": "system/etc/firmware/mediatek/mt8186/scp.img",
+      "reason": "non-wireless MediaTek SCP firmware excluded from curated deliverable",
+      "sha256": "fc543c1b0a1bd8341b85c129adecc7ce70df5719d322f5c973b419ebce1a4b9f",
+      "size": 419488
+    },
+    {
+      "path": "system/etc/firmware/mediatek/mt8192/scp.img",
+      "reason": "non-wireless MediaTek SCP firmware excluded from curated deliverable",
+      "sha256": "dca6999e3af8e266dba114aebd681168fda2b1239bbd7b154702ca2a06bdd298",
+      "size": 309164
+    },
+    {
+      "path": "system/etc/firmware/mediatek/mt8195/scp.img",
+      "reason": "non-wireless MediaTek SCP firmware excluded from curated deliverable",
+      "sha256": "995bcf8157931dd62d32b5f7cb8e83fb8f787c908bb92bc665db0587dfbb7e3d",
+      "size": 635532
+    },
+    {
+      "path": "system/xbin/hid-keyboard",
+      "reason": "unrelated executable excluded from firmware deliverable",
+      "sha256": "330af1a83a68d922df6244353644c10dccb169df40dbae003488abe2ccb0c10c",
+      "size": 18256
+    }
+  ],
+  "known_gaps": [
+    {
+      "classification": "missing-runtime-firmware",
+      "id": "ath11k",
+      "reason": "The pinned source asset contains no ATH11K firmware."
+    },
+    {
+      "classification": "missing-runtime-firmware",
+      "id": "mt7603-mt7628",
+      "reason": "The pinned source asset contains no MT7603 or MT7628 firmware."
+    },
+    {
+      "classification": "missing-runtime-firmware",
+      "id": "bcm203x-bfusb",
+      "reason": "The configured BCM203x and BFUSB request paths have no matching payload in the pinned source asset."
+    },
+    {
+      "classification": "missing-runtime-firmware",
+      "id": "broadcom-hcd",
+      "reason": "The pinned source asset contains no Broadcom USB Bluetooth HCD firmware."
+    },
+    {
+      "classification": "missing-runtime-firmware",
+      "id": "intel-bluetooth",
+      "reason": "The pinned source asset contains no Intel Bluetooth firmware."
+    },
+    {
+      "classification": "source-metadata-gap",
+      "id": "upstream-license-map",
+      "reason": "The upstream package has no WHENCE file or reliable per-blob license assignment; this curation supplies independently pinned evidence."
+    },
+    {
+      "classification": "reproducibility-gap",
+      "id": "firmware-reproducibility",
+      "reason": "Proprietary firmware payloads are exact pinned binary bytes; reproducible source is not claimed."
+    }
+  ],
+  "members": [
+    {
+      "family": "attribution",
+      "kind": "attribution",
+      "license": "MIT-license-text-upstream-package",
+      "output_path": "UPSTREAM-PACKAGE-LICENSE.md",
+      "path": "LICENSE.md",
+      "sha256": "1d8084ef9ea897ec462ce6c0e538f97967894699aac65c933804062714d3330a",
+      "size": 1068
+    },
+    {
+      "family": "attribution",
+      "kind": "attribution",
+      "license": "SEE-UPSTREAM",
+      "output_path": "UPSTREAM-README.md",
+      "path": "README.md",
+      "sha256": "f3a633a98754967e316be7dc6cf10e6fbfba705ed61ed9dc40310ce36fd01ae2",
+      "size": 1790
+    },
+    {
+      "family": "ath10k",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath10k/QCA9377/hw1.0/board-2.bin",
+      "sha256": "0fdcc7838f478da81704de88f7b33e28862110c6d5decf7818543f8e37e6cd98",
+      "size": 304308
+    },
+    {
+      "family": "ath10k",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath10k/QCA9377/hw1.0/board.bin",
+      "sha256": "127d35d82edb46278f30c448cbca664d755ff0d5fed57b649959cdbc4208c768",
+      "size": 8124
+    },
+    {
+      "family": "ath10k",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath10k/QCA9377/hw1.0/firmware-5.bin",
+      "sha256": "95ed94c24795c31dbdf8c97ab7278dd3a107673ea7330dfe4d01b1c65965f7a8",
+      "size": 783336
+    },
+    {
+      "family": "ath10k",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath10k/QCA9377/hw1.0/firmware-6.bin",
+      "sha256": "8f8b002fccfe81d42238f27dd1f56d189604f180bd4772c7c8e75ae1fef16f01",
+      "size": 751436
+    },
+    {
+      "family": "ath9k-htc",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath9k_htc/htc_7010-1.4.0.fw",
+      "sha256": "737850aaf66ca13f82e0f5ca5e758f606f840c2f23c291350ab916bbf88e6f75",
+      "size": 72812
+    },
+    {
+      "family": "ath9k-htc",
+      "kind": "firmware",
+      "path": "system/etc/firmware/ath9k_htc/htc_9271-1.4.0.fw",
+      "sha256": "78f7d592a95b419a02fde7440f30c606fc31a871cf0ce150ced40d4857173eb0",
+      "size": 51008
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
+      "sha256": "da7cd105357afbd41359b3626f677f0e57e04f76b9da70fa157a93a373733027",
+      "size": 137632
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin",
+      "sha256": "47b76646996c63b3f277fc57c6682ddc19912ab1bcdfc06d00aeb8d4b6c79f5c",
+      "size": 92192
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+      "sha256": "5e44fee345345060b14e16f55e230e56f29ad38fd047790d73398463ca3ad86f",
+      "size": 1018372
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/WIFI_RAM_CODE_MT7961_1.bin",
+      "sha256": "6e4beacede7007f8845e6ea9d72a7da7b6fd7120a836dbb0f94a5fb821694b14",
+      "size": 794676
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7610u.bin",
+      "sha256": "5a4268e9021bb587426ba624b425f1e660bfc82cd63b36ad3ce6fb9ce6751760",
+      "size": 80288
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7615_cr4.bin",
+      "sha256": "0a025aa567c2b8c1cf83293a03f43c2a92957f4bac4b31570a7cf81721e9a3a2",
+      "size": 122644
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7615_n9.bin",
+      "sha256": "ae730b7b5414e24f320908ef6e1d8978b129b00eaf898bdf6b331b2477336dd9",
+      "size": 457992
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7615_rom_patch.bin",
+      "sha256": "0084920ea9b96e0474c036401af7fc6bdeee5c4c3577b8ecd3daecc3965c1e7d",
+      "size": 11102
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7662.bin",
+      "sha256": "f7e52492f58088cae50e51a54cca68e4abc5b74f7d0b6b731dbb4c04465a94b6",
+      "size": 81908
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7662_rom_patch.bin",
+      "sha256": "6f0e871268f6e4d99196d90d89bcc09fe493d010366260a2cfcaa5dd66095f8c",
+      "size": 26350
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7663_n9_rebb.bin",
+      "sha256": "5e1a65036ccf9f53a6f69d9d8f75a07f546f9a7cec83ca89f24907925c54f079",
+      "size": 335072
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7663_n9_v3.bin",
+      "sha256": "d8b8488f37f65e41ded9a911950afb000d236b36e5aa94ad9650ad0c3a86fd45",
+      "size": 441688
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7663pr2h.bin",
+      "sha256": "534f2152f9b0f48dfcec9c1727b0bab9a3727a655d76d5ec818cc39a55602336",
+      "size": 278558
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7663pr2h_rebb.bin",
+      "sha256": "e812442fd631ecbea7d2898c3168cb5780377378a0eed74c14fe8d8057fe547c",
+      "size": 209230
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7915_eeprom.bin",
+      "sha256": "87af3cbb8890e0fcb955c1504311a7dc8d864c9ccf865fc2d827e45036f44901",
+      "size": 3584
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7915_eeprom_dbdc.bin",
+      "sha256": "ac72fd7ba181613fe5696d7bd99dbdf87e15f3e654cc9becf25dcfd9146b7a66",
+      "size": 3584
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7915_rom_patch.bin",
+      "sha256": "89fae20235b31400abc5558200d66951a119801ff4a5d6e19d3550cadc7a75d8",
+      "size": 144544
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7915_wa.bin",
+      "sha256": "c28a3279fcdbd22f3ae34fa5c2adef3617015d1142b46ba8fa388beda7d968a0",
+      "size": 116160
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7915_wm.bin",
+      "sha256": "93ada741ec11b8a8c12dde51dd1c54e05ef860a9d0c79cebea0a8c3089aa550c",
+      "size": 1260960
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7916_eeprom.bin",
+      "sha256": "3ed7ca6b67ca3ef2e915c71fc7c0fc5e745cb87e441b7c5305b6bdf47fc155d6",
+      "size": 4096
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7916_rom_patch.bin",
+      "sha256": "7643caa31f405a571b8173a78a88f72250b8b26ae41f2db8c7ff902a37047a85",
+      "size": 8672
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7916_wa.bin",
+      "sha256": "fcfd4115e06db6dccfc19c4fed17790b73576a8c8e5e501324898fed3a054782",
+      "size": 507856
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mediatek/mt7916_wm.bin",
+      "sha256": "583dea8fdf341eb92b6fdd362aed04bcb33656f349455e460091b669606bf26f",
+      "size": 1710304
+    },
+    {
+      "family": "mt76",
+      "kind": "firmware",
+      "path": "system/etc/firmware/mt7601u.bin",
+      "sha256": "4511b1d840e22aea2bf5fdca419c91c0d94cbfb291b9ac4f8be6d9100d1a7046",
+      "size": 45412
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8723a_fw.bin",
+      "sha256": "756951ee36e417c0714b00547a6175d5d5decbe1e4cf7585f211019150c7cd10",
+      "size": 24548
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8723b_fw.bin",
+      "sha256": "c9c8a9f6ebd90b7449a7e4d38ee39952dc7cc47d6c1d054e42cfbb5e4d818853",
+      "size": 45048
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8723d_config.bin",
+      "sha256": "292717b0610ce920f66b734c299d349ea59a4c4400044078d8fc65625f17e382",
+      "size": 10
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8723d_fw.bin",
+      "sha256": "6b70723b2db9b658cd9535fe36f1494b4494699e1ad07920c9356f8bd90d9263",
+      "size": 52080
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8761a_fw.bin",
+      "sha256": "581e5e81f5b51a29f475f8a276be95ad3210b3e3065987541c508e7f7a83a462",
+      "size": 74488
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8761bu_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8761bu_fw.bin",
+      "sha256": "1d7a9597349ad89344fa16c1913d3e39e9a12e966e417ca16871bc79bbe59edb",
+      "size": 44484
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8821a_fw.bin",
+      "sha256": "3ed5077f8f02ff2b06be257691dc72061efac976cd2dc174057833624c820b9d",
+      "size": 37420
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8821c_config.bin",
+      "sha256": "292717b0610ce920f66b734c299d349ea59a4c4400044078d8fc65625f17e382",
+      "size": 10
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8821c_fw.bin",
+      "sha256": "dfe7ef772d078ec09490c02190a32fcd40b3eaf3b040049d8930eb80e6d5743c",
+      "size": 54636
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8822b_config.bin",
+      "sha256": "ea082136d5285655372e3805cd50d961bd7d42085c6fc1058a115a7e844df9c1",
+      "size": 14
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8822b_fw.bin",
+      "sha256": "eecef2c3b2ff03c3a41292a93a25eca6f4ec38eb4a7491a3651b530be89a04fc",
+      "size": 51176
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8822cu_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8822cu_fw.bin",
+      "sha256": "746608974632d81f9a136cf9dabd0f949133082040116a94f0b2851eb0865fdc",
+      "size": 59864
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8851bu_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8851bu_fw.bin",
+      "sha256": "7fcf88c00b2548a5ff157102a35722db5e4be655dab1ce8d9bddb6df85f88f24",
+      "size": 49760
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852au_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852au_fw.bin",
+      "sha256": "49a10fa7fd3fb0f45d68c66bf02abba610fc05010fdc42d89c811b9b70fca4ae",
+      "size": 63724
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852bu_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852bu_fw.bin",
+      "sha256": "f1e0427317f147a78606ede85f3f8977ed0ab85c41c6b525560e5bd5a51e5818",
+      "size": 74324
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852cu_config.bin",
+      "sha256": "6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f",
+      "size": 6
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852cu_fw.bin",
+      "sha256": "9b8b27741a914c1cecc1ab9837194236890522101a57ba1898eb55f8d538dae0",
+      "size": 113336
+    },
+    {
+      "family": "usb-bluetooth-realtek",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtl_bt/rtl8852cu_fw_v2.bin",
+      "sha256": "d1314df53b8f4282f9db57a727ba77c180bc6fd05bf2c306e960326a4ef48660",
+      "size": 112953
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8703b_fw.bin",
+      "sha256": "5e32bd891c74a0719c871726b74490cf5e1a05cdcefb8fe2414f80fffdeb9f9d",
+      "size": 20290
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8703b_wow_fw.bin",
+      "sha256": "7156b0d2b4580e63d11a3a78258c35ff28e840c7c6428953920ae6a1cd5d05ac",
+      "size": 23074
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8723d_fw.bin",
+      "sha256": "9c64e079815a333a3f7b731be7cc0be65206ebc883891659dc8ff5ed36a5e2f5",
+      "size": 28884
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8812a_fw.bin",
+      "sha256": "abdcca4e8bf76ebfba23d433de310ffefebd0ff9d01990639d4cd9602b32b71a",
+      "size": 27030
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8814a_fw.bin",
+      "sha256": "aa6bf9d62b2d2d8a37254fd6d917ba2839888cdedc21850d4481874cb1d3d7cb",
+      "size": 68320
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8821a_fw.bin",
+      "sha256": "4693ece655044d96f81bd3f3e8db14dc352b493219c4fd0a75788a6fbd9eac3c",
+      "size": 31898
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8821c_fw.bin",
+      "sha256": "2ef409bc418549fcf294061dd0cae1fc22fd9da79b60524950b25de18732f3f0",
+      "size": 139472
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8822b_fw.bin",
+      "sha256": "a72da690597bfa99d8eb6fc2ab090d18d8ad92ac2befd35db1c9e3662d8d8418",
+      "size": 161240
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8822c_fw.bin",
+      "sha256": "3deecb31210986d98cdbfb000391e08d602a6eee4ffc883969faa2b907ab03ba",
+      "size": 202600
+    },
+    {
+      "family": "rtw88",
+      "kind": "firmware",
+      "path": "system/etc/firmware/rtw88/rtw8822c_wow_fw.bin",
+      "sha256": "6717fc6ff426a74571ac4f04cd9698fb2f356012c05c58aa64cf21ceb6b958a2",
+      "size": 145224
+    }
+  ],
+  "retained_member_count": 65,
+  "schema_version": 1,
+  "source": {
+    "asset_sha256": "872dc926dce84d22cb2496d2d5a49a62d3974a6064ef6b341c9469df3debecb3",
+    "asset_uri": "https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware/releases/download/v2.0.6-r1/Nethunter-Wireless-Firmware-v2.0.6-r1.zip",
+    "dependency": "nethunter_wireless_firmware",
+    "license_classification": "SEE-CURATION-MANIFEST",
+    "release_commit": "069a455ddeed4967f4d0ec59299cde0bd116d6a7",
+    "release_ref": "refs/tags/v2.0.6-r1",
+    "release_version": "v2.0.6-r1",
+    "repository": "https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware.git"
+  },
+  "source_member_count": 274
+}

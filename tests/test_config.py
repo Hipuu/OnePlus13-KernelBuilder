@@ -102,6 +102,31 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildToolError, "needs sha256"):
             load_dependency_lock(path)
 
+    def test_download_requires_positive_integer_size(self) -> None:
+        path = self.root / "dependencies" / "lock.yml"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for invalid in (None, 0, -1, True, "1"):
+            with self.subTest(invalid=invalid):
+                data = json.loads(json.dumps(original))
+                if invalid is None:
+                    data["dependencies"]["repo_launcher"].pop("size")
+                else:
+                    data["dependencies"]["repo_launcher"]["size"] = invalid
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(BuildToolError, "positive integer size"):
+                    load_dependency_lock(path)
+
+    def test_corresponding_source_dependencies_are_required(self) -> None:
+        path = self.root / "dependencies" / "lock.yml"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["dependencies"].pop("magisk_submodule_lz4")
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(
+            BuildToolError,
+            "missing required dependencies: magisk_submodule_lz4",
+        ):
+            load_dependency_lock(path)
+
     def test_platform_cross_mix_is_rejected(self) -> None:
         path = self.root / "configs" / "profiles" / "oos16.yml"
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -121,6 +146,17 @@ class ConfigurationTests(unittest.TestCase):
         path.write_text("schema_version: 1\n", encoding="utf-8")
         with self.assertRaisesRegex(BuildToolError, "JSON-compatible YAML"):
             load_json_yaml(path)
+
+    def test_duplicate_json_keys_and_nonfinite_numbers_are_rejected(self) -> None:
+        path = self.root / "ambiguous.yml"
+        for payload, message in (
+            ('{"url":"first","url":"second"}', "duplicate JSON object key"),
+            ('{"size":NaN}', "non-JSON numeric constant"),
+        ):
+            with self.subTest(payload=payload):
+                path.write_text(payload, encoding="utf-8")
+                with self.assertRaisesRegex(BuildToolError, message):
+                    load_json_yaml(path)
 
     def _load_root_lock(self):
         path = self.root / "dependencies" / "lock.yml"

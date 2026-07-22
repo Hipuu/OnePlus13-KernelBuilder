@@ -134,6 +134,7 @@ def new_context(
             "patches": [],
             "configuration": None,
             "kernel": None,
+            "build_evidence": None,
             "modules": None,
             "packages": [],
             "history": [{"stage": "sources-synced", "at": utc_now()}],
