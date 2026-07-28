@@ -114,8 +114,8 @@ jobs:
         uses: ./workflow-repo/.github/actions/kernel-source-sync
         with:
           manifest_url: 'https://github.com/OnePlusOSS/kernel_manifest.git'
-          manifest_branch: 'oneplus/android15'
-          manifest_file: 'oneplus_13_6.6.89_w.xml'
+          manifest_branch: 'oneplus/sm8750'
+          manifest_file: 'oneplus_13_b.xml'
           work_dir: ${{ github.workspace }}/kernel_workspace
 
       - name: Build kernel
