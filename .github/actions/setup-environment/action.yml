@@ -1,0 +1,107 @@
+name: 'Setup Build Environment'
+description: 'Install dependencies, setup ccache, and prepare build tools'
+
+inputs:
+  ccache_maxsize:
+    description: 'Maximum ccache size'
+    required: false
+    default: '12G'
+  ccache_compression:
+    description: 'Enable ccache compression'
+    required: false
+    default: 'true'
+  ccache_compression_level:
+    description: 'Ccache compression level'
+    required: false
+    default: '3'
+
+outputs:
+  repo_tool_path:
+    description: 'Path to repo tool'
+    value: ${{ steps.install-repo.outputs.repo_path }}
+  ccache_path:
+    description: 'Path to custom ccache'
+    value: ${{ steps.install-ccache.outputs.ccache_path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          bc bison build-essential ccache curl flex \
+          g++-multilib gcc-multilib git gnupg gperf \
+          imagemagick lib32ncurses5-dev lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
+          libssl-dev libxml2 libxml2-utils lzop pngcrush \
+          rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+          python3 python3-pip wget unzip jq cpio \
+          libelf-dev libtinfo5 device-tree-compiler
+
+        echo "✅ System dependencies installed"
+
+    - name: Install repo tool
+      id: install-repo
+      shell: bash
+      run: |
+        REPO_DIR="${HOME}/.local/bin"
+        mkdir -p "${REPO_DIR}"
+
+        curl --fail --location --proto '=https' -o "${REPO_DIR}/repo" \
+          https://storage.googleapis.com/git-repo-downloads/repo
+
+        chmod a+x "${REPO_DIR}/repo"
+        echo "${REPO_DIR}" >> $GITHUB_PATH
+
+        echo "repo_path=${REPO_DIR}/repo" >> $GITHUB_OUTPUT
+        echo "✅ Repo tool installed: ${REPO_DIR}/repo"
+
+    - name: Install custom ccache
+      id: install-ccache
+      shell: bash
+      run: |
+        CCACHE_DIR="${HOME}/.local/bin"
+        mkdir -p "${CCACHE_DIR}"
+
+        # Download custom ccache from WildKernels (ECS-enabled)
+        wget -q https://raw.githubusercontent.com/WildKernels/kernel_patches/refs/heads/main/ccache/ccache-x86-64 \
+          -O "${CCACHE_DIR}/ccache-custom"
+
+        chmod +x "${CCACHE_DIR}/ccache-custom"
+
+        # Override system ccache
+        sudo mv "${CCACHE_DIR}/ccache-custom" /usr/bin/ccache
+
+        echo "ccache_path=/usr/bin/ccache" >> $GITHUB_OUTPUT
+        echo "✅ Custom ccache installed"
+
+    - name: Setup ccache configuration
+      shell: bash
+      run: |
+        ccache --set-config=max_size=${{ inputs.ccache_maxsize }}
+        ccache --set-config=compression=${{ inputs.ccache_compression }}
+        ccache --set-config=compression_level=${{ inputs.ccache_compression_level }}
+        ccache --set-config=cache_dir="${HOME}/.ccache"
+        ccache --zero-stats
+
+        echo "✅ Ccache configured:"
+        ccache --show-config | grep -E "(max_size|compression|cache_dir)"
+
+    - name: Setup Git configuration
+      shell: bash
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git config --global color.ui false
+
+        echo "✅ Git configured"
+
+    - name: Python dependencies
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        pip3 install pycryptodome
+
+        echo "✅ Python dependencies installed"

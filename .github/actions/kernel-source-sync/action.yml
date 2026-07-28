@@ -1,0 +1,112 @@
+name: 'Sync Kernel Source'
+description: 'Initialize and sync kernel source using repo tool'
+
+inputs:
+  manifest_url:
+    description: 'Git URL of the manifest repository'
+    required: true
+  manifest_branch:
+    description: 'Manifest branch name'
+    required: true
+  manifest_file:
+    description: 'Manifest XML file name'
+    required: true
+  work_dir:
+    description: 'Working directory for kernel source'
+    required: true
+
+outputs:
+  work_dir:
+    description: 'Kernel workspace directory'
+    value: ${{ steps.init-workspace.outputs.workspace }}
+  kernel_platform:
+    description: 'Kernel platform directory'
+    value: ${{ steps.init-workspace.outputs.kernel_platform }}
+  common_dir:
+    description: 'Common kernel directory'
+    value: ${{ steps.init-workspace.outputs.common_dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Initialize workspace
+      id: init-workspace
+      shell: bash
+      run: |
+        WORKSPACE="${{ inputs.work_dir }}"
+        mkdir -p "${WORKSPACE}"
+        cd "${WORKSPACE}"
+
+        echo "workspace=${WORKSPACE}" >> $GITHUB_OUTPUT
+        echo "kernel_platform=${WORKSPACE}/kernel_platform" >> $GITHUB_OUTPUT
+        echo "common_dir=${WORKSPACE}/common" >> $GITHUB_OUTPUT
+
+        echo "✅ Workspace initialized: ${WORKSPACE}"
+
+    - name: Initialize repo
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        repo init \
+          -u ${{ inputs.manifest_url }} \
+          -b ${{ inputs.manifest_branch }} \
+          -m ${{ inputs.manifest_file }} \
+          --repo-rev=stable \
+          --depth=1 \
+          --no-clone-bundle \
+          --no-tags
+
+        echo "✅ Repo initialized"
+        echo "   Manifest: ${{ inputs.manifest_file }}"
+        echo "   Branch: ${{ inputs.manifest_branch }}"
+
+    - name: Sync source
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔄 Starting source sync..."
+
+        repo sync -c \
+          --no-clone-bundle \
+          --no-tags \
+          --optimized-fetch \
+          --prune \
+          --force-sync \
+          -j$(nproc --all) \
+          --fail-fast
+
+        echo "✅ Source sync completed"
+
+    - name: Verify source structure
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "📂 Verifying source structure..."
+
+        # Check key directories
+        for dir in kernel_platform common; do
+          if [ -d "${dir}" ]; then
+            echo "  ✅ ${dir}/"
+          else
+            echo "  ❌ ${dir}/ - MISSING"
+            exit 1
+          fi
+        done
+
+        # Check for defconfig
+        DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+        if [ -f "${DEFCONFIG}" ]; then
+          echo "  ✅ ${DEFCONFIG}"
+        else
+          echo "  ❌ ${DEFCONFIG} - MISSING"
+          exit 1
+        fi
+
+        # Show kernel version
+        if [ -f "common/Makefile" ]; then
+          VERSION=$(grep "^VERSION = " common/Makefile | cut -d' ' -f3)
+          PATCHLEVEL=$(grep "^PATCHLEVEL = " common/Makefile | cut -d' ' -f3)
+          echo "  📌 Kernel version: ${VERSION}.${PATCHLEVEL}"
+        fi
+
+        echo "✅ Source structure verified"

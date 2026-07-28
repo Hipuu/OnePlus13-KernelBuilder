@@ -1,0 +1,613 @@
+name: 'Build Kernel'
+description: 'Build OnePlus 13 kernel with KernelSU and SUSFS'
+
+inputs:
+  ksu_variant:
+    description: 'KernelSU variant (ksun or ksu)'
+    required: true
+  ksu_branch:
+    description: 'KernelSU branch/commit'
+    required: false
+    default: ''
+  use_susfs:
+    description: 'Enable SUSFS'
+    required: true
+  susfs_branch:
+    description: 'SUSFS branch/commit'
+    required: false
+    default: ''
+  optimize_level:
+    description: 'Optimization level (O2/O3)'
+    required: true
+  lto:
+    description: 'LTO mode (thin/full)'
+    required: true
+  use_opt_patches:
+    description: 'Apply optimization patches'
+    required: true
+  kernel_uname:
+    description: 'Custom kernel name'
+    required: false
+    default: 'OP13-WILD'
+  build_timestamp:
+    description: 'Custom build timestamp'
+    required: false
+    default: ''
+  clang_version:
+    description: 'Clang version'
+    required: false
+    default: 'default'
+  clean_build:
+    description: 'Clean build flag'
+    required: false
+    default: 'false'
+  work_dir:
+    description: 'Kernel workspace directory'
+    required: true
+  device_model:
+    description: 'Device model'
+    required: true
+  soc:
+    description: 'SoC name'
+    required: true
+  android_version:
+    description: 'Android version'
+    required: true
+  kernel_version:
+    description: 'Kernel version'
+    required: true
+  os_version:
+    description: 'OS version'
+    required: true
+
+outputs:
+  anykernel_zip:
+    description: 'Path to AnyKernel3 ZIP'
+    value: ${{ steps.package.outputs.anykernel_zip }}
+  kernel_image:
+    description: 'Path to kernel Image'
+    value: ${{ steps.build.outputs.kernel_image }}
+  system_map:
+    description: 'Path to System.map'
+    value: ${{ steps.build.outputs.system_map }}
+  vmlinux:
+    description: 'Path to vmlinux'
+    value: ${{ steps.build.outputs.vmlinux }}
+  ksu_version:
+    description: 'KernelSU version'
+    value: ${{ steps.setup-ksu.outputs.ksu_version }}
+  susfs_version:
+    description: 'SUSFS version'
+    value: ${{ steps.setup-susfs.outputs.susfs_version }}
+  clang_version:
+    description: 'Clang version used'
+    value: ${{ steps.setup-toolchain.outputs.clang_version }}
+  kernel_version_string:
+    description: 'Full kernel version string'
+    value: ${{ steps.build.outputs.kernel_version_string }}
+  zip_name:
+    description: 'ZIP filename'
+    value: ${{ steps.package.outputs.zip_name }}
+  image_sha256:
+    description: 'Image SHA256'
+    value: ${{ steps.checksums.outputs.image_sha256 }}
+  zip_sha256:
+    description: 'ZIP SHA256'
+    value: ${{ steps.checksums.outputs.zip_sha256 }}
+  build_timestamp:
+    description: 'Build timestamp'
+    value: ${{ steps.setup-env.outputs.build_timestamp }}
+  release_tag:
+    description: 'Release tag'
+    value: ${{ steps.package.outputs.release_tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup build environment variables
+      id: setup-env
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        # Paths
+        export KERNEL_PLATFORM="${{ inputs.work_dir }}/kernel_platform"
+        export COMMON="${{ inputs.work_dir }}/common"
+        export OUT="${{ inputs.work_dir }}/out"
+
+        # Build timestamp
+        if [ -n "${{ inputs.build_timestamp }}" ]; then
+          BUILD_TS="${{ inputs.build_timestamp }}"
+        else
+          BUILD_TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        fi
+
+        # Kernel version info
+        KERNEL_FULL_VER="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+
+        # Export to GITHUB_ENV
+        echo "KERNEL_PLATFORM=${KERNEL_PLATFORM}" >> $GITHUB_ENV
+        echo "COMMON=${COMMON}" >> $GITHUB_ENV
+        echo "OUT=${OUT}" >> $GITHUB_ENV
+        echo "BUILD_TIMESTAMP=${BUILD_TS}" >> $GITHUB_ENV
+        echo "KERNEL_FULL_VER=${KERNEL_FULL_VER}" >> $GITHUB_ENV
+
+        # Outputs
+        echo "build_timestamp=${BUILD_TS}" >> $GITHUB_OUTPUT
+
+        echo "✅ Environment variables set"
+
+    - name: Clone kernel patches repository
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        git clone --depth=1 https://github.com/WildKernels/kernel_patches.git
+        echo "✅ Kernel patches cloned"
+
+    - name: Setup KernelSU
+      id: setup-ksu
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}/common
+      run: |
+        echo "🔧 Setting up KernelSU variant: ${{ inputs.ksu_variant }}"
+
+        KSU_TYPE_UPPER=$(echo "${{ inputs.ksu_variant }}" | tr '[:lower:]' '[:upper:]')
+
+        # Determine repo based on variant
+        if [ "${{ inputs.ksu_variant }}" == "ksun" ]; then
+          KSU_REPO_OWNER="KernelSU-Next"
+          KSU_REPO_NAME="KernelSU-Next"
+          KSU_SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
+          KSU_BRANCH="${{ inputs.ksu_branch }}"
+          [ -z "$KSU_BRANCH" ] && KSU_BRANCH="dev"
+        else
+          KSU_REPO_OWNER="tiann"
+          KSU_REPO_NAME="KernelSU"
+          KSU_SETUP_URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+          KSU_BRANCH="${{ inputs.ksu_branch }}"
+          [ -z "$KSU_BRANCH" ] && KSU_BRANCH="main"
+        fi
+
+        # Run setup script
+        echo "  Installing from: ${KSU_SETUP_URL}"
+        curl --fail --location --proto '=https' -LSs "${KSU_SETUP_URL}" | bash -s "${KSU_BRANCH}"
+
+        # Calculate KSU version
+        cd KernelSU || exit 1
+        COMMITS_COUNT=$(git rev-list --count HEAD)
+
+        if [ $COMMITS_COUNT -lt 2684 ]; then
+          BASE_VERSION=10200
+        else
+          BASE_VERSION=3000
+        fi
+
+        KSU_VERSION=$((COMMITS_COUNT + BASE_VERSION))
+
+        echo "  KSU Version: ${KSU_VERSION}"
+        echo "  Commits: ${COMMITS_COUNT}"
+
+        # Update version in Makefile
+        sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" Makefile
+
+        # Check if manual hooks needed
+        NEED_HOOKS=false
+        if [ $KSU_VERSION -lt 12884 ]; then
+          NEED_HOOKS=true
+          echo "  ⚠️  Manual hooks required for KSU version < 12884"
+        fi
+
+        cd ..
+
+        # Export variables
+        echo "KSU_VERSION=${KSU_VERSION}" >> $GITHUB_ENV
+        echo "KSU_TYPE=${KSU_TYPE_UPPER}" >> $GITHUB_ENV
+        echo "NEED_HOOKS=${NEED_HOOKS}" >> $GITHUB_ENV
+        echo "KSU_USE_KPROBES=n" >> $GITHUB_ENV
+
+        # Outputs
+        echo "ksu_version=${KSU_VERSION}" >> $GITHUB_OUTPUT
+        echo "need_hooks=${NEED_HOOKS}" >> $GITHUB_OUTPUT
+
+        echo "✅ KernelSU ${KSU_TYPE_UPPER} v${KSU_VERSION} installed"
+
+    - name: Setup SUSFS
+      id: setup-susfs
+      if: inputs.use_susfs == 'true'
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔧 Setting up SUSFS..."
+
+        # Clone SUSFS repo
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git
+        cd susfs4ksu
+
+        # Determine branch
+        if [ -n "${{ inputs.susfs_branch }}" ]; then
+          SUSFS_BRANCH="${{ inputs.susfs_branch }}"
+        else
+          SUSFS_BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+        fi
+
+        echo "  Checking out branch: ${SUSFS_BRANCH}"
+        git checkout "${SUSFS_BRANCH}"
+
+        # Extract SUSFS version from header
+        SUSFS_VERSION=$(grep '#define SUSFS_VERSION' kernel_patches/include/linux/susfs.h | awk '{print $3}' | tr -d '"')
+
+        echo "  SUSFS Version: ${SUSFS_VERSION}"
+
+        cd ..
+
+        # Export variables
+        echo "SUSFS_VERSION=${SUSFS_VERSION}" >> $GITHUB_ENV
+        echo "SUSFS_BRANCH=${SUSFS_BRANCH}" >> $GITHUB_ENV
+
+        # Outputs
+        echo "susfs_version=${SUSFS_VERSION}" >> $GITHUB_OUTPUT
+        echo "susfs_branch=${SUSFS_BRANCH}" >> $GITHUB_OUTPUT
+
+        echo "✅ SUSFS ${SUSFS_VERSION} ready (${SUSFS_BRANCH})"
+
+    - name: Apply SUSFS patches
+      if: inputs.use_susfs == 'true'
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔧 Applying SUSFS patches..."
+
+        SUSFS_KERNEL_BRANCH="${SUSFS_BRANCH#gki-}"
+
+        # Copy SUSFS files to common
+        echo "  Copying SUSFS files..."
+        cp -r susfs4ksu/kernel_patches/fs/* common/fs/
+        cp susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+
+        # Apply version-specific KSU patches
+        cd common/KernelSU
+
+        echo "  Applying KSU compatibility patches for SUSFS ${SUSFS_VERSION}..."
+
+        case "${SUSFS_VERSION}" in
+          v1.5.8)
+            patch -p1 < ../../kernel_patches/susfs/v1.5.8/10_enable_susfs_for_ksu.patch
+            patch -p1 < ../../kernel_patches/susfs/v1.5.8/fix_apk_sign.c.patch
+            patch -p1 < ../../kernel_patches/susfs/v1.5.8/fix_core_hook.c.patch
+            patch -p1 < ../../kernel_patches/susfs/v1.5.8/fix_selinux.c.patch
+            patch -p1 < ../../kernel_patches/susfs/v1.5.8/fix_ksud.c.patch
+            ;;
+          v1.5.9|v1.5.10|v1.5.11|v1.5.12)
+            patch -p1 < ../../kernel_patches/susfs/v1.5.9+/10_enable_susfs_for_ksu.patch
+            patch -p1 < ../../kernel_patches/susfs/v1.5.9+/fix_kernelcompat.c.patch
+            ;;
+          v2.0.0)
+            patch -p1 < ../../kernel_patches/susfs/v2.0.0/10_enable_susfs_for_ksu.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.0.0/overwrite_hook_mode.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.0.0/ksu_toolkit.patch
+            ;;
+          v2.1.0)
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/10_enable_susfs_for_ksu.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/overwrite_hook_mode.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/ksu_toolkit.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/multi_manager.patch
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/multi_sepolicy_fix.patch
+            ;;
+          *)
+            echo "⚠️  Unknown SUSFS version: ${SUSFS_VERSION}"
+            echo "  Attempting generic v2.1.0 patches..."
+            patch -p1 < ../../kernel_patches/susfs/v2.1.0/10_enable_susfs_for_ksu.patch || true
+            ;;
+        esac
+
+        cd ../..
+
+        # Apply main SUSFS patch to common
+        echo "  Applying main SUSFS patch..."
+        cd common
+        patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_KERNEL_BRANCH}.patch
+        cd ..
+
+        echo "✅ SUSFS patches applied"
+
+    - name: Apply manual hooks
+      if: env.NEED_HOOKS == 'true'
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}/common
+      run: |
+        echo "🔧 Applying manual hooks..."
+        patch -p1 < ../kernel_patches/next/scope_min_manualhooks_v1.4.patch
+        echo "✅ Manual hooks applied"
+
+    - name: Apply optimization patches
+      if: inputs.use_opt_patches == 'true'
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}/common
+      run: |
+        echo "🔧 Applying optimization patches..."
+
+        PATCH_DIR="../kernel_patches/common"
+
+        # Memory optimizations
+        patch -p1 < ${PATCH_DIR}/optimized_mem_operations.patch
+        patch -p1 < ${PATCH_DIR}/file_struct_8bytes_align.patch
+        patch -p1 < ${PATCH_DIR}/reduce_cache_pressure.patch
+        patch -p1 < ${PATCH_DIR}/mem_opt_prefetch.patch
+        patch -p1 < ${PATCH_DIR}/optimise_memcmp.patch
+        patch -p1 < ${PATCH_DIR}/clear_page_16bytes_align.patch
+
+        # VFS optimizations
+        patch -p1 < ${PATCH_DIR}/minimise_wakeup_time.patch
+        patch -p1 < ${PATCH_DIR}/int_sqrt.patch
+
+        # Network optimizations
+        patch -p1 < ${PATCH_DIR}/force_tcp_nodelay.patch
+
+        echo "✅ Optimization patches applied"
+
+    - name: Apply device-specific patches (HMBIRD for SM8750)
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}/common
+      run: |
+        echo "🔧 Applying SM8750 (sun) HMBIRD patches..."
+
+        HMBIRD_PATCH="../kernel_patches/hmbird/sm8750_fengchi_scheduler.patch"
+
+        if [ -f "$HMBIRD_PATCH" ]; then
+          patch -p1 < "$HMBIRD_PATCH"
+          echo "✅ HMBIRD scheduler patches applied"
+        else
+          echo "⚠️  HMBIRD patch not found, skipping"
+        fi
+
+    - name: Setup toolchain
+      id: setup-toolchain
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔧 Setting up toolchain..."
+
+        # Find clang in prebuilts
+        CLANG_PATH=$(find ${KERNEL_PLATFORM}/prebuilts/clang/host/linux-x86 -maxdepth 1 -name "clang-r*" -type d | head -1)
+
+        if [ -z "$CLANG_PATH" ]; then
+          echo "❌ Clang not found in prebuilts"
+          exit 1
+        fi
+
+        CLANG_BIN="${CLANG_PATH}/bin"
+        CLANG_VER=$(${CLANG_BIN}/clang --version | head -1 | awk '{print $4}')
+
+        echo "  Clang path: ${CLANG_BIN}"
+        echo "  Clang version: ${CLANG_VER}"
+
+        # Setup cross-compile tools
+        GCC_PATH="${KERNEL_PLATFORM}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
+
+        # Export to environment
+        echo "PATH=${CLANG_BIN}:${GCC_PATH}:${PATH}" >> $GITHUB_ENV
+        echo "CLANG_PATH=${CLANG_BIN}" >> $GITHUB_ENV
+        echo "CLANG_VERSION=${CLANG_VER}" >> $GITHUB_ENV
+
+        # Outputs
+        echo "clang_version=${CLANG_VER}" >> $GITHUB_OUTPUT
+
+        echo "✅ Toolchain ready (Clang ${CLANG_VER})"
+
+    - name: Configure kernel
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔧 Configuring kernel..."
+
+        mkdir -p ${OUT}
+
+        # Build flags
+        export LLVM=1
+        export LLVM_IAS=1
+        export ARCH=arm64
+        export CROSS_COMPILE="aarch64-linux-gnu-"
+        export HOSTCC="ccache clang"
+        export HOSTCXX="ccache clang++"
+        export CC="ccache clang"
+
+        # LD wrapper for Thin LTO
+        if [ "${{ inputs.lto }}" == "thin" ]; then
+          LDCACHE_DIR="${OUT}/.thinlto-cache"
+          mkdir -p "${LDCACHE_DIR}"
+
+          cat > ${OUT}/ld-wrapper << 'EOFLD'
+#!/bin/bash
+ld.lld "$@" --thinlto-cache-dir=${LDCACHE_DIR} --thinlto-jobs=$(nproc)
+EOFLD
+          chmod +x ${OUT}/ld-wrapper
+          export LD="${OUT}/ld-wrapper"
+          echo "  Using Thin LTO with cache"
+        else
+          export LD="ld.lld"
+          echo "  Using Full LTO"
+        fi
+
+        # DTC path
+        export DTC="${KERNEL_PLATFORM}/prebuilts/kernel-build-tools/linux-x86/bin/dtc"
+
+        # Build metadata
+        export KBUILD_BUILD_USER="OnePlus"
+        export KBUILD_BUILD_HOST="ubuntu-build"
+        export KBUILD_BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
+
+        # Custom localversion
+        CUSTOM_LOCALVERSION="-${{ inputs.android_version }}-${{ inputs.kernel_uname }}"
+
+        # Generate defconfig
+        cd common
+        make O="${OUT}" gki_defconfig
+
+        # Modify config
+        cd ${OUT}
+
+        # LTO settings
+        if [ "${{ inputs.lto }}" == "thin" ]; then
+          ./scripts/config -e CONFIG_LTO_CLANG_THIN
+          ./scripts/config -d CONFIG_LTO_CLANG_FULL
+        else
+          ./scripts/config -e CONFIG_LTO_CLANG_FULL
+          ./scripts/config -d CONFIG_LTO_CLANG_THIN
+        fi
+
+        # Optimization level
+        ./scripts/config -e CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+
+        # Enable features from OP13 config
+        ./scripts/config -e CONFIG_TCP_CONG_BBR
+        ./scripts/config -e CONFIG_DEFAULT_BBR
+        ./scripts/config -e CONFIG_IP_SET
+        ./scripts/config -e CONFIG_NETFILTER_XT_SET
+        ./scripts/config -e CONFIG_UNICODE
+
+        # Set localversion
+        ./scripts/config --set-str CONFIG_LOCALVERSION "${CUSTOM_LOCALVERSION}"
+
+        # Regenerate config
+        make olddefconfig
+
+        echo "✅ Kernel configured"
+
+    - name: Build kernel
+      id: build
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔨 Building kernel..."
+
+        BUILD_START=$(date +%s)
+
+        # Build flags
+        export LLVM=1
+        export LLVM_IAS=1
+        export ARCH=arm64
+        export CROSS_COMPILE="aarch64-linux-gnu-"
+        export HOSTCC="ccache clang"
+        export HOSTCXX="ccache clang++"
+        export CC="ccache clang"
+
+        if [ "${{ inputs.lto }}" == "thin" ]; then
+          export LD="${OUT}/ld-wrapper"
+        else
+          export LD="ld.lld"
+        fi
+
+        export DTC="${KERNEL_PLATFORM}/prebuilts/kernel-build-tools/linux-x86/bin/dtc"
+        export KBUILD_BUILD_USER="OnePlus"
+        export KBUILD_BUILD_HOST="ubuntu-build"
+        export KBUILD_BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
+
+        # Build
+        cd common
+
+        make -j$(nproc) \
+          O="${OUT}" \
+          ARCH=arm64 \
+          Image modules
+
+        BUILD_END=$(date +%s)
+        BUILD_DURATION=$((BUILD_END - BUILD_START))
+
+        echo "  Build completed in ${BUILD_DURATION} seconds"
+
+        # Verify outputs
+        if [ ! -f "${OUT}/arch/arm64/boot/Image" ]; then
+          echo "❌ Kernel Image not found!"
+          exit 1
+        fi
+
+        # Get kernel version string
+        KERNEL_VER_STR=$(cat ${OUT}/include/config/kernel.release)
+
+        # Outputs
+        echo "kernel_image=${OUT}/arch/arm64/boot/Image" >> $GITHUB_OUTPUT
+        echo "system_map=${OUT}/System.map" >> $GITHUB_OUTPUT
+        echo "vmlinux=${OUT}/vmlinux" >> $GITHUB_OUTPUT
+        echo "kernel_version_string=${KERNEL_VER_STR}" >> $GITHUB_OUTPUT
+        echo "build_duration=${BUILD_DURATION}" >> $GITHUB_OUTPUT
+
+        # Show ccache stats
+        echo "📊 Ccache statistics:"
+        ccache --show-stats
+
+        # Evict old ccache entries
+        if [ "${{ inputs.clean_build }}" != "true" ]; then
+          ccache --evict-older-than ${BUILD_DURATION}s
+        fi
+
+        echo "✅ Kernel built successfully: ${KERNEL_VER_STR}"
+
+    - name: Clone AnyKernel3
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "📦 Cloning AnyKernel3..."
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+        echo "✅ AnyKernel3 cloned"
+
+    - name: Package AnyKernel3 ZIP
+      id: package
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "📦 Packaging AnyKernel3 ZIP..."
+
+        cd AnyKernel3
+
+        # Copy kernel Image
+        cp ${OUT}/arch/arm64/boot/Image ./
+
+        # Determine KSU version suffix
+        KSU_VER_SHORT="${KSU_VERSION:0:4}"
+
+        # Build ZIP name
+        if [ "${{ inputs.use_susfs }}" == "true" ]; then
+          ZIP_NAME="AK3_${{ inputs.device_model }}_${{ inputs.os_version }}_${KERNEL_FULL_VER}_${KSU_TYPE}_${KSU_VER_SHORT}_SUSFS_${SUSFS_VERSION}.zip"
+        else
+          ZIP_NAME="AK3_${{ inputs.device_model }}_${{ inputs.os_version }}_${KERNEL_FULL_VER}_${KSU_TYPE}_${KSU_VER_SHORT}.zip"
+        fi
+
+        # Create ZIP
+        zip -r9 "${ZIP_NAME}" * -x .git README.md .gitignore
+
+        # Move to workspace root
+        mv "${ZIP_NAME}" ../
+
+        cd ..
+
+        # Generate release tag
+        if [ "${{ inputs.use_susfs }}" == "true" ]; then
+          RELEASE_TAG="${SUSFS_VERSION}-$(date +%Y%m%d)"
+        else
+          RELEASE_TAG="v${KSU_VERSION}-$(date +%Y%m%d)"
+        fi
+
+        # Outputs
+        echo "anykernel_zip=${{ inputs.work_dir }}/${ZIP_NAME}" >> $GITHUB_OUTPUT
+        echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
+        echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+
+        echo "✅ AnyKernel3 ZIP created: ${ZIP_NAME}"
+
+    - name: Generate checksums
+      id: checksums
+      shell: bash
+      working-directory: ${{ inputs.work_dir }}
+      run: |
+        echo "🔒 Generating SHA256 checksums..."
+
+        IMAGE_SHA=$(sha256sum ${OUT}/arch/arm64/boot/Image | awk '{print $1}')
+        ZIP_SHA=$(sha256sum $(ls AK3_*.zip) | awk '{print $1}')
+
+        echo "  Image: ${IMAGE_SHA}"
+        echo "  ZIP: ${ZIP_SHA}"
+
+        # Outputs
+        echo "image_sha256=${IMAGE_SHA}" >> $GITHUB_OUTPUT
+        echo "zip_sha256=${ZIP_SHA}" >> $GITHUB_OUTPUT
+
+        echo "✅ Checksums generated"

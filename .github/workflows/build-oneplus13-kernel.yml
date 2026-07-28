@@ -1,0 +1,236 @@
+name: Build OnePlus 13 Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_variant:
+        description: 'KernelSU variant'
+        type: choice
+        options:
+          - 'ksun'
+          - 'ksu'
+        default: 'ksun'
+      ksu_branch:
+        description: 'KernelSU branch/tag/commit (leave empty for latest dev/main)'
+        type: string
+        default: ''
+      use_susfs:
+        description: 'Enable SUSFS integration'
+        type: boolean
+        default: true
+      susfs_branch:
+        description: 'SUSFS branch/commit (leave empty for auto: gki-android15-6.6)'
+        type: string
+        default: ''
+      optimize_level:
+        description: 'Optimization level'
+        type: choice
+        options:
+          - 'O2'
+          - 'O3'
+        default: 'O3'
+      lto:
+        description: 'Link Time Optimization'
+        type: choice
+        options:
+          - 'thin'
+          - 'full'
+        default: 'thin'
+      use_opt_patches:
+        description: 'Apply optimization patches (VFS, memory, scheduler)'
+        type: boolean
+        default: true
+      kernel_uname:
+        description: 'Custom kernel name suffix (leave empty for default: OP13-WILD)'
+        type: string
+        default: 'OP13-WILD'
+      build_timestamp:
+        description: 'Custom build timestamp (leave empty for current)'
+        type: string
+        default: ''
+      clang_version:
+        description: 'Clang version'
+        type: choice
+        options:
+          - 'default'
+          - 'aosp-clang-r547379'
+          - 'zycromerz-19.0.0git'
+        default: 'default'
+      clean_build:
+        description: 'Clean build (no ccache)'
+        type: boolean
+        default: false
+      make_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: false
+      debug:
+        description: 'Upload debug artifacts (System.map, vmlinux)'
+        type: boolean
+        default: false
+
+env:
+  CCACHE_MAXSIZE: 12G
+  CCACHE_COMPRESSION: true
+  CCACHE_COMPRESSION_LEVEL: 3
+  DEVICE_MODEL: OP13
+  SOC: sun
+  ANDROID_VERSION: android15
+  KERNEL_VERSION: 6.6
+  OS_VERSION: A16
+
+jobs:
+  build:
+    name: Build OnePlus 13 Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+
+      - name: Setup environment
+        id: setup-env
+        uses: ./workflow-repo/.github/actions/setup-environment
+        with:
+          ccache_maxsize: ${{ env.CCACHE_MAXSIZE }}
+          ccache_compression: ${{ env.CCACHE_COMPRESSION }}
+          ccache_compression_level: ${{ env.CCACHE_COMPRESSION_LEVEL }}
+
+      - name: Sync kernel source
+        id: sync-source
+        uses: ./workflow-repo/.github/actions/kernel-source-sync
+        with:
+          manifest_url: 'https://github.com/OnePlusOSS/kernel_manifest.git'
+          manifest_branch: 'oneplus/android15'
+          manifest_file: 'oneplus_13_6.6.89_w.xml'
+          work_dir: ${{ github.workspace }}/kernel_workspace
+
+      - name: Build kernel
+        id: build-kernel
+        uses: ./workflow-repo/.github/actions/build-kernel
+        with:
+          ksu_variant: ${{ inputs.ksu_variant }}
+          ksu_branch: ${{ inputs.ksu_branch }}
+          use_susfs: ${{ inputs.use_susfs }}
+          susfs_branch: ${{ inputs.susfs_branch }}
+          optimize_level: ${{ inputs.optimize_level }}
+          lto: ${{ inputs.lto }}
+          use_opt_patches: ${{ inputs.use_opt_patches }}
+          kernel_uname: ${{ inputs.kernel_uname }}
+          build_timestamp: ${{ inputs.build_timestamp }}
+          clang_version: ${{ inputs.clang_version }}
+          clean_build: ${{ inputs.clean_build }}
+          work_dir: ${{ steps.sync-source.outputs.work_dir }}
+          device_model: ${{ env.DEVICE_MODEL }}
+          soc: ${{ env.SOC }}
+          android_version: ${{ env.ANDROID_VERSION }}
+          kernel_version: ${{ env.KERNEL_VERSION }}
+          os_version: ${{ env.OS_VERSION }}
+
+      - name: Upload AnyKernel3 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3_${{ env.DEVICE_MODEL }}_${{ steps.build-kernel.outputs.zip_name }}
+          path: ${{ steps.build-kernel.outputs.anykernel_zip }}
+          retention-days: 30
+
+      - name: Upload kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image_${{ env.DEVICE_MODEL }}_${{ steps.build-kernel.outputs.kernel_version_string }}
+          path: ${{ steps.build-kernel.outputs.kernel_image }}
+          retention-days: 30
+
+      - name: Upload debug artifacts
+        if: ${{ inputs.debug }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Debug_${{ env.DEVICE_MODEL }}_${{ steps.build-kernel.outputs.kernel_version_string }}
+          path: |
+            ${{ steps.build-kernel.outputs.system_map }}
+            ${{ steps.build-kernel.outputs.vmlinux }}
+          retention-days: 7
+
+      - name: Generate release notes
+        if: ${{ inputs.make_release }}
+        id: release-notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          # OnePlus 13 Kernel Build
+
+          ## Device Information
+          - **Model**: ${{ env.DEVICE_MODEL }}
+          - **SoC**: ${{ env.SOC }} (Snapdragon 8 Elite / SM8750)
+          - **Android Version**: ${{ env.ANDROID_VERSION }}
+          - **Kernel Version**: ${{ env.KERNEL_VERSION }}
+          - **OS Version**: ${{ env.OS_VERSION }}
+
+          ## Build Configuration
+          - **KernelSU Variant**: ${{ inputs.ksu_variant }}
+          - **KernelSU Branch**: ${{ inputs.ksu_branch || 'latest' }}
+          - **SUSFS Enabled**: ${{ inputs.use_susfs }}
+          - **SUSFS Branch**: ${{ steps.build-kernel.outputs.susfs_version }}
+          - **Optimization Level**: ${{ inputs.optimize_level }}
+          - **LTO**: ${{ inputs.lto }}
+          - **Optimization Patches**: ${{ inputs.use_opt_patches }}
+          - **Kernel Name**: ${{ inputs.kernel_uname }}
+          - **Clang Version**: ${{ steps.build-kernel.outputs.clang_version }}
+
+          ## Features
+          - ✅ KernelSU ${{ steps.build-kernel.outputs.ksu_version }}
+          - ✅ SUSFS ${{ steps.build-kernel.outputs.susfs_version }}
+          - ✅ HMBIRD (Fengchi) scheduler patches for SM8750
+          - ✅ BBR/BBRv3 TCP congestion control
+          - ✅ IP_SET support
+          - ✅ TTL manipulation
+          - ✅ NTSync
+          - ✅ Memory optimization patches
+          - ✅ VFS optimizations
+          - ✅ Module overlay mechanism
+
+          ## Checksums (SHA256)
+          ```
+          ${{ steps.build-kernel.outputs.image_sha256 }}  Image
+          ${{ steps.build-kernel.outputs.zip_sha256 }}  AnyKernel3.zip
+          ```
+
+          ## Installation
+          1. Download the AnyKernel3 ZIP
+          2. Flash via custom recovery (TWRP/OrangeFox)
+          3. Reboot
+          4. Install KernelSU manager app
+
+          ## Build Timestamp
+          ${{ steps.build-kernel.outputs.build_timestamp }}
+          EOF
+
+          cat release_notes.md
+          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: ${{ inputs.make_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.build-kernel.outputs.release_tag }}
+          name: ${{ env.DEVICE_MODEL }} - ${{ steps.build-kernel.outputs.kernel_version_string }}
+          body_path: ${{ steps.release-notes.outputs.notes_file }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.build-kernel.outputs.anykernel_zip }}
+            ${{ steps.build-kernel.outputs.kernel_image }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

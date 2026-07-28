@@ -1,0 +1,45 @@
+# Build outputs
+out/
+*.zip
+*.img
+Image
+System.map
+vmlinux
+*.ko
+
+# Kernel source
+kernel_workspace/
+kernel_platform/
+common/
+susfs4ksu/
+kernel_patches/
+AnyKernel3/
+
+# Ccache
+.ccache/
+*.ccache/
+
+# Repo tool
+.repo/
+
+# Temporary files
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Git credentials
+.git-credentials
+.netrc
+
+# Secrets
+*.pem
+*.key
+secrets/
+.env
