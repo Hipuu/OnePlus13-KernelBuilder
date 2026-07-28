@@ -39,7 +39,7 @@ runs:
 
         echo "workspace=${WORKSPACE}" >> $GITHUB_OUTPUT
         echo "kernel_platform=${WORKSPACE}/kernel_platform" >> $GITHUB_OUTPUT
-        echo "common_dir=${WORKSPACE}/common" >> $GITHUB_OUTPUT
+        echo "common_dir=${WORKSPACE}/kernel_platform/common" >> $GITHUB_OUTPUT
 
         echo "✅ Workspace initialized: ${WORKSPACE}"
 
@@ -83,8 +83,8 @@ runs:
       run: |
         echo "📂 Verifying source structure..."
 
-        # Check key directories
-        for dir in kernel_platform common; do
+        # Check key directories (OnePlus uses kernel_platform/ structure)
+        for dir in kernel_platform kernel_platform/common kernel_platform/msm-kernel; do
           if [ -d "${dir}" ]; then
             echo "  ✅ ${dir}/"
           else
@@ -94,7 +94,7 @@ runs:
         done
 
         # Check for defconfig
-        DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+        DEFCONFIG="kernel_platform/common/arch/arm64/configs/gki_defconfig"
         if [ -f "${DEFCONFIG}" ]; then
           echo "  ✅ ${DEFCONFIG}"
         else
@@ -103,9 +103,9 @@ runs:
         fi
 
         # Show kernel version
-        if [ -f "common/Makefile" ]; then
-          VERSION=$(grep "^VERSION = " common/Makefile | cut -d' ' -f3)
-          PATCHLEVEL=$(grep "^PATCHLEVEL = " common/Makefile | cut -d' ' -f3)
+        if [ -f "kernel_platform/common/Makefile" ]; then
+          VERSION=$(grep "^VERSION = " kernel_platform/common/Makefile | cut -d' ' -f3)
+          PATCHLEVEL=$(grep "^PATCHLEVEL = " kernel_platform/common/Makefile | cut -d' ' -f3)
           echo "  📌 Kernel version: ${VERSION}.${PATCHLEVEL}"
         fi
 

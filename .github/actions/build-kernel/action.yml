@@ -111,7 +111,7 @@ runs:
       run: |
         # Paths
         export KERNEL_PLATFORM="${{ inputs.work_dir }}/kernel_platform"
-        export COMMON="${{ inputs.work_dir }}/common"
+        export COMMON="${{ inputs.work_dir }}/kernel_platform/common"
         export OUT="${{ inputs.work_dir }}/out"
 
         # Build timestamp
