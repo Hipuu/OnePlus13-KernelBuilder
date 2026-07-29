@@ -16,7 +16,7 @@ on:
           - KSU
         default: KSUN
       ksu_branch:
-        description: KernelSU branch, tag, or commit (empty uses the selected variant's upstream default)
+        description: KernelSU branch, tag, or commit (empty uses dev for KSUN, main for KSU)
         required: false
         type: string
         default: ''
@@ -163,13 +163,61 @@ jobs:
           echo "config_json=$config_json" >> "$GITHUB_OUTPUT"
           jq . <<< "$config_json"
 
+      - name: Resolve KernelSU ref
+        id: ksu
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KSU_VARIANT: ${{ inputs.ksu_variant }}
+          KSU_BRANCH: ${{ inputs.ksu_branch }}
+        run: |
+          set -euo pipefail
+          # KernelSU-Next's setup.sh with no argument checks out the latest *tag*,
+          # which lags the SUSFS patch set and leaves an unfixable kernel/Kconfig
+          # reject. Upstream always passes an explicit ref, so do the same here.
+          if [ "$KSU_VARIANT" = KSUN ]; then
+            owner=KernelSU-Next; name=KernelSU-Next; default_ref=dev
+          else
+            owner=tiann; name=KernelSU; default_ref=main
+          fi
+          ref="${KSU_BRANCH:-}"
+          [ -n "$ref" ] || ref="$default_ref"
+
+          query='query($owner: String!, $name: String!, $headRef: String!, $tagRef: String!, $objRef: String!) {
+            repository(owner: $owner, name: $name) {
+              hb: ref(qualifiedName: $headRef) { t: target { ... on Commit { o: oid } } }
+              ht: ref(qualifiedName: $tagRef) { t: target { ... on Commit { o: oid } } }
+              ho: object(expression: $objRef) { ... on Commit { o: oid } }
+            }
+          }'
+
+          resolved=unknown
+          for attempt in 1 2 3; do
+            if result=$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" \
+                  -f headRef="refs/heads/$ref" -f tagRef="refs/tags/$ref" -f objRef="$ref" 2>/dev/null) \
+               && [ -n "$result" ]; then
+              resolved=$(jq -r '.data.repository | (.hb.t.o // .ht.t.o // .ho.o // "unknown")' <<< "$result")
+              break
+            fi
+            echo "::warning::GitHub API call failed (attempt $attempt/3); retrying in 5s"
+            sleep 5
+          done
+
+          if [ "$resolved" = unknown ] || [ -z "$resolved" ]; then
+            echo "::error::Could not resolve $KSU_VARIANT ref '$ref' in $owner/$name"
+            exit 1
+          fi
+
+          echo "Resolved $KSU_VARIANT ref '$ref' -> $resolved"
+          echo "ref=$resolved" >> "$GITHUB_OUTPUT"
+
       - name: Build OnePlus 13 kernel
         id: build
         uses: ./.github/actions/build-kernel
         with:
           op_config_json: ${{ steps.config.outputs.config_json }}
           ksu_type: ${{ inputs.ksu_variant }}
-          ksu_branch_or_hash: ${{ inputs.ksu_branch }}
+          ksu_branch_or_hash: ${{ steps.ksu.outputs.ref }}
           susfs_commit_hash_or_branch: ${{ inputs.susfs_branch }}
           build_timestamp: ${{ inputs.build_timestamp }}
           optimize_level: ${{ inputs.optimize_level }}

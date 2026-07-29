@@ -9,6 +9,7 @@ The OnePlus 13 (SM8750 / "sun") kernel is built with WildKernels' manifest fork,
 - The composite `build-kernel` action's internal sub-action references are pointed at this repository's copies.
 - The source-sync step downloads the pinned Clang, kernel build-tools and AnyKernel3 archives from WildKernels' public `toolchain-cache` release, so no per-repository toolchain mirror is required.
 - A thin `Build OnePlus 13 Kernel` workflow exposes only OnePlus 13 options.
+- The workflow resolves the KernelSU ref to a concrete commit SHA before building. KernelSU-Next's `setup.sh` checks out the *latest tag* when given no argument, and that tag lags the SUSFS patch set: `10_enable_susfs_for_ksu.patch` expects a `kernel/Kconfig` that only exists on `dev`, so a tag build leaves a `kernel/Kconfig.rej` with no corresponding fix patch and the build aborts. Upstream always passes an explicit ref, so this workflow does too.
 
 ## Features
 
@@ -47,7 +48,7 @@ The OnePlus 13 (SM8750 / "sun") kernel is built with WildKernels' manifest fork,
 | Input | Description | Default |
 |-------|-------------|---------|
 | `ksu_variant` | `KSUN` or `KSU` | `KSUN` |
-| `ksu_branch` | KernelSU branch/tag/commit (empty = variant default) | empty |
+| `ksu_branch` | KernelSU branch/tag/commit (empty = `dev` for KSUN, `main` for KSU) | empty |
 | `use_susfs` | Enable SUSFS | `true` |
 | `susfs_branch` | SUSFS branch/commit (empty = `gki-android15-6.6`) | empty |
 | `optimize_level` | `O2` or `O3` | `O2` |
