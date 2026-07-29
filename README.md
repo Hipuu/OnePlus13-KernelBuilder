@@ -1,266 +1,97 @@
 # OnePlus 13 Kernel Builder
 
-Automated GitHub Actions workflow to build custom kernels for OnePlus 13 with KernelSU and SUSFS support.
+A GitHub Actions workflow that builds a custom **OnePlus 13** kernel with KernelSU / KernelSU-Next and SUSFS. It reuses the proven, actively maintained build pipeline from [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS), pinned to a specific commit and specialized to the OnePlus 13 only.
+
+## Why it is built this way
+
+The OnePlus 13 (SM8750 / "sun") kernel is built with WildKernels' manifest fork, pinned source/toolchain revisions, and its maintained patch pipeline. Rather than re-implement ~2400 lines of patch ordering and risk drift, this repository vendors the upstream build logic from commit `bfe12144`, pins `WildKernels/kernel_patches` to commit `24865a0`, and changes only what is required to run it standalone for one device:
+
+- The composite `build-kernel` action's internal sub-action references are pointed at this repository's copies.
+- The source-sync step downloads the pinned Clang, kernel build-tools and AnyKernel3 archives from WildKernels' public `toolchain-cache` release, so no per-repository toolchain mirror is required.
+- A thin `Build OnePlus 13 Kernel` workflow exposes only OnePlus 13 options.
 
 ## Features
 
-This kernel builder combines features from both [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS) and [nullptr-t-oss/EmberHeart_OnePlus11](https://github.com/nullptr-t-oss/EmberHeart_OnePlus11), specifically optimized for **OnePlus 13 only**.
+- **KernelSU variants**: KernelSU-Next (`KSUN`) and original KernelSU (`KSU`)
+- **SUSFS**: version auto-detected from the SUSFS branch (currently `v2.2.0` on `gki-android15-6.6`), with the upstream KSU-side patch/rej-fix logic
+- **HMBIRD (Fengchi) scheduler** patches for the OnePlus 13 (SM8750)
+- **Optimization patches**: memory, VFS, scheduler and network tweaks
+- **Networking**: BBR, BBRv3, TTL target, IP_SET
+- **Other**: NTSync, Unicode fix, Droidspaces, module intercept/overlay, vendor-module debloat
+- **Compiler options**: pinned ZyC Clang 19 or manifest Clang, `O2`/`O3`, and `thin`/`full`/`none` LTO
+- **Release modes**: artifact-only, prerelease, or stable release
+- **ccache** acceleration with a release-backed cache
 
-### Supported Features
+## Not included
 
-- ✅ **KernelSU variants**: KernelSU-Next (ksun) and original KernelSU (ksu)
-- ✅ **SUSFS integration**: Full SUSFS support with automatic version detection (v1.5.8 - v2.1.0)
-- ✅ **HMBIRD scheduler patches**: SM8750 (Snapdragon 8 Elite) Fengchi scheduler optimizations
-- ✅ **Optimization levels**: O2/O3 compiler optimizations
-- ✅ **Link Time Optimization**: Thin or Full LTO
-- ✅ **Memory optimizations**: Prefetch, memcmp, cache pressure, aligned operations
-- ✅ **VFS optimizations**: Wakeup time, file operations
-- ✅ **Network features**: BBR/BBRv3 TCP congestion control, IP_SET, TTL manipulation
-- ✅ **Advanced features**: NTSync, Unicode support, module overlay mechanism
-- ✅ **Custom ccache**: 12GB cache with compression for faster rebuilds
-- ✅ **Manual hooks**: Automatic fallback for older KernelSU versions
-- ✅ **AnyKernel3 packaging**: Ready-to-flash ZIP files
+- **No boot.img / vendor_boot / DLKM image builder.** The build produces a raw `Image` and an AnyKernel3 flashable ZIP only.
+- **No other devices.** This repository targets the OnePlus 13 exclusively.
 
-### What's NOT Included
+## Device
 
-- ❌ **boot.img builder**: Excluded as requested - only AnyKernel3 ZIPs are generated
-- ❌ **Other devices**: This workflow is hardcoded for OnePlus 13 only
-
-## Device Information
-
-- **Model**: OnePlus 13
-- **SoC**: Qualcomm Snapdragon 8 Elite (SM8750 / sun)
-- **Android Version**: Android 15
-- **Kernel Version**: 6.6.89
-- **OS Version**: OxygenOS 16 (A16)
-- **Manifest**: `oneplus_13_6.6.89_w.xml`
-- **Branch**: `oneplus/android15`
+| Field | Value |
+|-------|-------|
+| Model | OnePlus 13 (`OP13-6.6.89`) |
+| SoC | Snapdragon 8 Elite (SM8750 / `sun`) |
+| Android | android15 |
+| Kernel | 6.6 |
+| OS | OxygenOS 16 (`A16`) |
+| Manifest branch | `wild/sm8750` (WildKernels fork) |
+| Manifest file | `oneplus_13_6.6.89_w.xml` (vendored under `manifests/a16/`) |
 
 ## Usage
 
-### Quick Start
-
-1. Fork this repository
-2. Go to **Actions** tab → **Build OnePlus 13 Kernel**
-3. Click **Run workflow**
-4. Configure options:
-   - Select KernelSU variant (ksun/ksu)
-   - Enable/disable SUSFS
-   - Choose optimization level
-   - Set custom kernel name (optional)
-5. Click **Run workflow** button
-6. Wait for build to complete (~30-60 minutes)
-7. Download AnyKernel3 ZIP from **Artifacts**
-
-### Workflow Inputs
+1. Open the **Actions** tab and select **Build OnePlus 13 Kernel**.
+2. Click **Run workflow** and choose options:
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `ksu_variant` | KernelSU variant (ksun or ksu) | `ksun` |
-| `ksu_branch` | KernelSU branch/tag/commit | (latest dev/main) |
-| `use_susfs` | Enable SUSFS integration | `true` |
-| `susfs_branch` | SUSFS branch/commit | (auto: gki-android15-6.6) |
-| `optimize_level` | Compiler optimization (O2/O3) | `O3` |
-| `lto` | Link Time Optimization (thin/full) | `thin` |
+| `ksu_variant` | `KSUN` or `KSU` | `KSUN` |
+| `ksu_branch` | KernelSU branch/tag/commit (empty = variant default) | empty |
+| `use_susfs` | Enable SUSFS | `true` |
+| `susfs_branch` | SUSFS branch/commit (empty = `gki-android15-6.6`) | empty |
+| `optimize_level` | `O2` or `O3` | `O2` |
+| `lto` | `thin`, `full`, or `none` | `thin` |
+| `compiler` | Pinned ZyC Clang 19 or manifest Clang | `zycromerz-19` |
 | `use_opt_patches` | Apply optimization patches | `true` |
-| `kernel_uname` | Custom kernel name suffix | `OP13-WILD` |
-| `build_timestamp` | Custom build timestamp | (current time) |
-| `clang_version` | Clang version | `default` |
-| `clean_build` | Clean build (no ccache) | `false` |
-| `make_release` | Create GitHub release | `false` |
-| `debug` | Upload debug artifacts | `false` |
+| `kernel_uname` | uname suffix | `OP-WILD` |
+| `build_timestamp` | Custom uname timestamp (empty = current UTC) | empty |
+| `clean_build` | Build without ccache restore | `false` |
+| `release_type` | `none`, `prerelease`, or `release` | `none` |
+| `debug` | Build modules and upload debug artifacts | `false` |
 
-### Installation
+3. Download the AnyKernel3 ZIP (and raw `Image`) from the run's **Artifacts**, or from the release when `release_type` is `prerelease` or `release`.
 
-1. Download the AnyKernel3 ZIP from workflow artifacts or releases
-2. Boot into custom recovery (TWRP, OrangeFox, etc.)
-3. Flash the ZIP file
-4. Reboot system
-5. Install KernelSU Manager app from:
+### Installation on device
+
+1. Flash the AnyKernel3 ZIP in a custom recovery, or via the KernelSU/APatch/other flasher.
+2. Reboot and install the matching manager app:
    - KernelSU-Next: https://github.com/KernelSU-Next/KernelSU-Next/releases
-   - Original KSU: https://github.com/tiann/KernelSU/releases
+   - KernelSU: https://github.com/tiann/KernelSU/releases
 
-## Build Details
-
-### Source
-
-Kernel source is fetched using Google's `repo` tool from OnePlusOSS:
-- **Manifest repository**: https://github.com/OnePlusOSS/kernel_manifest.git
-- **Branch**: `oneplus/android15`
-- **Manifest file**: `oneplus_13_6.6.89_w.xml`
-
-### Toolchain
-
-- **Compiler**: Clang (auto-detected from kernel prebuilts)
-- **Architecture**: ARM64
-- **Cross-compile**: aarch64-linux-gnu
-- **Ccache**: Custom ECS-enabled ccache with 12GB cache and level-3 compression
-
-### Patches Applied
-
-**KernelSU Integration:**
-- Setup script from KernelSU-Next or original KernelSU repo
-- Version calculation based on commit count
-- Manual hooks for older versions (< v12884)
-
-**SUSFS Integration** (if enabled):
-- Version-specific KSU compatibility patches (v1.5.8 - v2.1.0)
-- Main SUSFS kernel patch for android15-6.6
-- Multi-manager and multi-sepolicy support (v2.1.0+)
-
-**Optimizations** (if enabled):
-- Memory: optimized operations, aligned structures, cache pressure reduction
-- VFS: minimized wakeup time, file struct alignment
-- Network: TCP NODELAY, BBR congestion control
-- Math: optimized int_sqrt, memcmp
-
-**Device-specific:**
-- HMBIRD Fengchi scheduler patches for SM8750
-
-### Build Environment
-
-- **Runner**: Ubuntu latest (GitHub-hosted)
-- **Build space**: ~60GB (maximized)
-- **Parallel jobs**: $(nproc) - all available CPU cores
-- **Build time**: ~30-60 minutes depending on configuration
-
-## Outputs
-
-### Artifacts
-
-1. **AnyKernel3 ZIP**: Flashable kernel package
-   - Format: `AK3_OP13_A16_android15-6.6_KSUN_XXXX_SUSFS_vX.X.X.zip`
-   - Contains: kernel Image, AnyKernel3 scripts
-
-2. **Kernel Image**: Raw kernel binary
-   - Path: `Image_OP13_<version>`
-
-3. **Debug artifacts** (if enabled):
-   - `System.map`: Kernel symbol map
-   - `vmlinux`: Uncompressed kernel with debug symbols
-
-### Release Notes
-
-When `make_release` is enabled, automatic releases are created with:
-- Device and build configuration details
-- Enabled features list
-- SHA256 checksums
-- Installation instructions
-
-## Technical Details
-
-### Directory Structure
+## Repository layout
 
 ```
-.
-├── .github/
-│   ├── workflows/
-│   │   └── build-oneplus13-kernel.yml    # Main workflow
-│   └── actions/
-│       ├── setup-environment/             # Dependencies & ccache
-│       ├── kernel-source-sync/            # Repo tool sync
-│       └── build-kernel/                  # Build logic
-├── configs/
-│   └── OP13-6.6.89.json                  # Device config
-└── README.md
+.github/
+  workflows/build-oneplus13-kernel.yml   # OnePlus 13-only driver workflow
+  actions/
+    build-kernel/                         # vendored upstream build pipeline (pinned)
+    kernel-source-sync/                   # vendored source/toolchain sync (cache source retargeted)
+    cache/{restore,save}/                 # vendored release-backed ccache helpers
+configs/OP13-6.6.89.json                  # OnePlus 13 device config
+manifests/a16/oneplus_13_6.6.89_w.xml     # pinned OnePlus 13 manifest
 ```
-
-### Composite Actions
-
-**setup-environment**
-- Installs build dependencies (clang, repo, python, etc.)
-- Downloads custom ccache with ECS support
-- Configures ccache (12GB, compression level 3)
-- Sets up Git and Python environment
-
-**kernel-source-sync**
-- Initializes repo tool
-- Syncs kernel source from OnePlusOSS manifest
-- Verifies source structure (kernel_platform, common, defconfig)
-- Extracts kernel version
-
-**build-kernel**
-- Clones kernel patches repository
-- Sets up KernelSU (ksun or ksu variant)
-- Configures SUSFS if enabled
-- Applies version-specific compatibility patches
-- Applies optimization patches
-- Applies HMBIRD scheduler patches
-- Configures kernel defconfig
-- Builds kernel with specified optimization level and LTO
-- Packages AnyKernel3 ZIP
-- Generates SHA256 checksums
-
-### Key Differences from Source Repos
-
-| Feature | WildKernels | EmberHeart | This Repo |
-|---------|------------|------------|-----------|
-| Device support | 60+ devices | 3 devices (OP11) | OnePlus 13 only |
-| KSU variants | KSUN + KSU | KSUN only | KSUN + KSU |
-| boot.img | ❌ | ✅ | ❌ (excluded) |
-| Ccache size | 12GB | 5GB | 12GB |
-| HMBIRD patches | ✅ | ❌ | ✅ (SM8750) |
-| Config structure | JSON per device | JSON per device | Single OP13 JSON |
-| Release automation | Full | Minimal | Full |
-
-## Troubleshooting
-
-### Build fails during source sync
-- Check if OnePlusOSS manifest is available: https://github.com/OnePlusOSS/kernel_manifest/blob/oneplus/android15/oneplus_13_6.6.89_w.xml
-- Ensure manifest branch and file names are correct
-
-### Build fails during KernelSU setup
-- Verify KernelSU branch exists (dev for ksun, main for ksu)
-- Check if custom branch/commit is valid
-
-### Build fails during SUSFS integration
-- Verify SUSFS branch exists: https://gitlab.com/simonpunk/susfs4ksu/-/tree/gki-android15-6.6
-- Check SUSFS version compatibility
-
-### Kernel doesn't boot
-- Try disabling optimization patches
-- Switch from Full LTO to Thin LTO
-- Try O2 instead of O3 optimization
-
-### KernelSU manager doesn't detect kernel
-- Verify you installed the correct manager (ksun vs ksu)
-- Check kernel version matches KSU version
 
 ## Credits
 
-- **WildKernels**: https://github.com/WildKernels/OnePlus_KernelSU_SUSFS
-  - Multi-device kernel builder with extensive SUSFS integration
-  - HMBIRD patches and optimization patches
-  - Module overlay mechanism
+- Build pipeline, patches, manifest and toolchain cache: [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS) and [WildKernels/kernel_patches](https://github.com/WildKernels/kernel_patches)
+- Workflow controls adapted from [nullptr-t-oss/EmberHeart_OnePlus11](https://github.com/nullptr-t-oss/EmberHeart_OnePlus11): selectable compiler source, O2/O3, LTO mode, KSU/SUSFS refs, optional patch sets, uname/timestamp, clean build, debug modules, and stable/prerelease publishing. EmberHeart's OnePlus 11 module, boot/vendor_boot, and DLKM image targets are intentionally excluded.
+- [KernelSU](https://github.com/tiann/KernelSU), [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next), [SUSFS](https://gitlab.com/simonpunk/susfs4ksu), [AnyKernel3](https://github.com/osm0sis/AnyKernel3), [OnePlusOSS](https://github.com/OnePlusOSS)
 
-- **nullptr-t**: https://github.com/nullptr-t-oss/EmberHeart_OnePlus11
-  - EmberHeart kernel for OnePlus 11
-  - Build system improvements and optimizations
+## Licensing
 
-- **KernelSU**: https://github.com/tiann/KernelSU
-- **KernelSU-Next**: https://github.com/KernelSU-Next/KernelSU-Next
-- **SUSFS**: https://gitlab.com/simonpunk/susfs4ksu
-- **OnePlusOSS**: https://github.com/OnePlusOSS
-- **AnyKernel3**: https://github.com/osm0sis/AnyKernel3
+Workflow configuration is provided as-is. Kernel source and patches retain their upstream licenses (Linux kernel GPL-2.0; KernelSU GPL-3.0; SUSFS GPL-2.0).
 
-## License
+## Security
 
-This workflow configuration is provided as-is for educational and development purposes.
-
-Kernel source code and patches retain their original licenses:
-- Linux Kernel: GPL-2.0
-- KernelSU: GPL-3.0
-- SUSFS: GPL-2.0
-
-## Security Notice
-
-**⚠️ Important**: Never commit GitHub tokens or credentials to this repository. Use GitHub Secrets for sensitive data.
-
-If you need to authenticate for releases:
-1. Go to repository Settings → Secrets → Actions
-2. Add `GITHUB_TOKEN` (automatically provided by GitHub Actions)
-3. For custom tokens: Settings → Developer settings → Personal access tokens
-
----
-
-**Built with ❤️ for OnePlus 13 users**
+Never commit personal access tokens. Releases use the automatically provided `GITHUB_TOKEN`. If you pasted a PAT anywhere while setting this up, revoke it at https://github.com/settings/tokens.
