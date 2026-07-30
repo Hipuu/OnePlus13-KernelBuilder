@@ -13,8 +13,25 @@ fail() { echo "  FAIL  $1"; FAILED=1; }
 skip() { echo "  skip  $1"; }
 
 WORKFLOW=.github/workflows/build-oneplus13-kernel.yml
-CONFIG=configs/OP13-6.6.89.json
-MANIFEST=manifests/a16/oneplus_13_6.6.89_w.xml
+
+# All six OP13 configs and their manifests
+CONFIGS=(
+  configs/OP13-6.6.89.json
+  configs/OP13-6.6.118.json
+  configs/OP13-6.6.66.json
+  configs/OP13-6.6.30.json
+  configs/OP13-CPH-6.6.89.json
+  configs/OP13-CPH-6.6.56.json
+)
+
+MANIFESTS=(
+  manifests/a16/oneplus_13_6.6.89_w.xml
+  manifests/a16/oneplus_13_6.6.118_w.xml
+  manifests/a15/oneplus_13_6.6.66_v.xml
+  manifests/a15/oneplus_13_6.6.30_v.xml
+  manifests/a15/oneplus_13_global_6.6.89_v.xml
+  manifests/a15/oneplus_13_global_6.6.56_v.xml
+)
 
 mapfile -t ACTIONS < <(find .github/actions -name action.yml | sort)
 
@@ -27,14 +44,15 @@ for path in sys.argv[1:]:
         yaml.safe_load(fh)
     print(f"  ok    {path}")
 PY
-    PYTHONUTF8=1 python3 - "$CONFIG" "$MANIFEST" <<'PY' || FAILED=1
+    PYTHONUTF8=1 python3 - "${CONFIGS[@]}" "${MANIFESTS[@]}" <<'PY' || FAILED=1
 import json, sys, xml.etree.ElementTree as ET
-cfg, manifest = sys.argv[1], sys.argv[2]
-with open(cfg, encoding="utf-8") as fh:
-    json.load(fh)
-print(f"  ok    {cfg}")
-ET.parse(manifest)
-print(f"  ok    {manifest}")
+for path in sys.argv[1:]:
+    if path.endswith('.json'):
+        with open(path, encoding="utf-8") as fh:
+            json.load(fh)
+    else:
+        ET.parse(path)
+    print(f"  ok    {path}")
 PY
 else
     skip "python3 not found; YAML/JSON/XML parse not verified"
@@ -79,34 +97,46 @@ done < <(grep -rhoE 'uses:[[:space:]]*\./[^[:space:]]+' .github \
          | sed -E 's/uses:[[:space:]]*//' | sort -u)
 
 echo
-echo "== OnePlus 13 config targets =="
+echo "== OnePlus 13 config/manifest matrix =="
 read_json_field() {
     if command -v jq >/dev/null 2>&1; then
-        jq -r ".$1" "$CONFIG"
+        jq -r ".$2" "$1"
     else
         PYTHONUTF8=1 python3 -c \
             'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get(sys.argv[2],""))' \
-            "$CONFIG" "$1"
+            "$1" "$2"
     fi
 }
+
 if command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
-    [ "$(read_json_field branch)" = "wild/sm8750" ] \
-        && pass "branch = wild/sm8750" || fail "branch != wild/sm8750"
-    [ "$(read_json_field manifest)" = "oneplus_13_6.6.89_w.xml" ] \
-        && pass "manifest = oneplus_13_6.6.89_w.xml" || fail "unexpected manifest name"
-    [ -f "$MANIFEST" ] \
-        && pass "vendored manifest present" || fail "vendored manifest missing"
+    for cfg in "${CONFIGS[@]}"; do
+        branch=$(read_json_field "$cfg" branch)
+        manifest=$(read_json_field "$cfg" manifest)
+        os_version=$(read_json_field "$cfg" os_version)
+
+        [ "$branch" = "wild/sm8750" ] \
+            && pass "$cfg: branch = wild/sm8750" \
+            || fail "$cfg: branch != wild/sm8750 (got: $branch)"
+
+        # Resolve manifest path: manifests/<os_version-lower>/<manifest>
+        manifest_path="manifests/$(echo "$os_version" | tr '[:upper:]' '[:lower:]')/$manifest"
+        if [ -f "$manifest_path" ]; then
+            pass "$cfg: vendored manifest $manifest_path present"
+        else
+            fail "$cfg: vendored manifest $manifest_path missing"
+        fi
+    done
 else
-    skip "neither jq nor python3 found; config target checks not verified"
+    skip "neither jq nor python3 found; config/manifest matrix not verified"
 fi
 
 echo
 echo "== Manifest pins revisions =="
+# Check the reference manifest; all six share identical toolchain pins.
+REF_MANIFEST="${MANIFESTS[0]}"
 for name in AnyKernel3 android_kernel_common_oneplus_sm8750 \
             kernel/prebuilts/build-tools clang/host/linux-x86; do
-    # match the project name as a substring: the clang project is published as
-    # kernelplatform/prebuilts-master/clang/host/linux-x86
-    if grep -F "$name\"" "$MANIFEST" | grep -qE 'revision="[0-9a-f]{40}"'; then
+    if grep -F "$name\"" "$REF_MANIFEST" | grep -qE 'revision="[0-9a-f]{40}"'; then
         pass "$name pinned to a full SHA"
     else
         fail "$name not pinned to a full SHA"
@@ -115,11 +145,10 @@ done
 
 echo
 echo "== No boot image construction =="
+# Permit kernel_modules in paths; ban boot/vendor_boot/vendor_dlkm/system_dlkm.
 IMG_TOKENS='\b(mkbootimg|unpack_bootimg|mkdtboimg|avbtool)\b|boot\.img|vendor_boot|vendor_dlkm|system_dlkm'
-# The README and the release body state that these targets are absent. Those
-# disclaimers are prose, not build commands, so negations are not findings.
 IMG_HITS=$(grep -rniE "$IMG_TOKENS" .github configs manifests \
-           | grep -viE 'does not (build|create)' || true)
+           | grep -viE 'does not (build|create)|kernel_modules' || true)
 if [ -n "$IMG_HITS" ]; then
     echo "  matches found:"
     printf '%s\n' "$IMG_HITS" | sed 's/^/    /'
@@ -138,7 +167,6 @@ if command -v curl >/dev/null 2>&1 && [ "${SKIP_NETWORK:-0}" != "1" ]; then
         if [ "$code" = "200" ]; then
             pass "$label-$rev.tar.gz ($code)"
         else
-            # split assets are published as .part** instead of a single file
             pcode=$(curl -sIL -o /dev/null -w '%{http_code}' \
                     --connect-timeout 20 "$BASE/$label-$rev.tar.gz.partaa")
             if [ "$pcode" = "200" ]; then
@@ -148,9 +176,9 @@ if command -v curl >/dev/null 2>&1 && [ "${SKIP_NETWORK:-0}" != "1" ]; then
             fi
         fi
     done <<EOF
-AnyKernel3 $(grep 'name="AnyKernel3"' "$MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
-build-tools $(grep 'name="kernel/prebuilts/build-tools"' "$MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
-clang $(grep 'clang/host/linux-x86' "$MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
+AnyKernel3 $(grep 'name="AnyKernel3"' "$REF_MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
+build-tools $(grep 'name="kernel/prebuilts/build-tools"' "$REF_MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
+clang $(grep 'clang/host/linux-x86' "$REF_MANIFEST" | grep -oE 'revision="[0-9a-f]{40}"' | cut -d'"' -f2)
 EOF
 else
     skip "network check disabled or curl missing"
@@ -159,7 +187,7 @@ fi
 echo
 echo "== Required files tracked by git =="
 if git rev-parse --git-dir >/dev/null 2>&1; then
-    for f in "$WORKFLOW" "$CONFIG" "$MANIFEST" "${ACTIONS[@]}"; do
+    for f in "$WORKFLOW" "${CONFIGS[@]}" "${MANIFESTS[@]}" "${ACTIONS[@]}"; do
         if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
             pass "tracked: $f"
         else

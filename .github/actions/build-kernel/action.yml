@@ -73,6 +73,21 @@ outputs:
   zip_name:
     description: 'Name of the generated flashable ZIP'
     value: ${{ steps.create_zip.outputs.zip_name }}
+  image_path:
+    description: 'Workspace-relative path to the built kernel Image'
+    value: ${{ steps.create_zip.outputs.image_path }}
+  artifacts_dir:
+    description: 'Workspace-relative path to the artifacts directory holding the ZIPs'
+    value: ${{ steps.create_zip.outputs.artifacts_dir }}
+  modules_zip_name:
+    description: 'Name of the generated kernel modules ZIP (empty when wireless modules are disabled)'
+    value: ${{ steps.create_modules_zip.outputs.modules_zip_name }}
+  modules_zip_sha256:
+    description: 'SHA256 hash of the kernel modules ZIP'
+    value: ${{ steps.create_modules_zip.outputs.modules_zip_sha256 }}
+  modules_count:
+    description: 'Number of kernel modules packaged'
+    value: ${{ steps.create_modules_zip.outputs.modules_count }}
 
 runs:
   using: 'composite'
@@ -1686,6 +1701,178 @@ runs:
         echo "✅ Droidspaces Support applied"
         echo "::endgroup::"
 
+    # Nethunter support, ported from nullptr-t-oss/EmberHeart_OnePlus11
+    # (.github/kernel/action.yml "Add Nethunter inline configs"). These are
+    # built into the Image; the external wireless drivers are separate and
+    # handled by the "Add Nethunter wireless module configs" step below.
+    - name: Add Nethunter inline configs
+      if: ${{ env.OP_NETHUNTER == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add Nethunter inline configs"
+        cd "$COMMON_KERNEL_FOLDER"
+
+        # Bluetooth, SDR (AirSpy/HackRF), CAN bus and USB-serial adapters.
+        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_BT_HCIBTUSB=y
+        CONFIG_BT_HCIBTUSB_BCM=y
+        CONFIG_BT_HCIBTUSB_RTL=y
+        CONFIG_BT_HCIVHCI=y
+        CONFIG_BT_HCIBCM203X=y
+        CONFIG_BT_HCIBPA10X=y
+        CONFIG_BT_HCIBFUSB=y
+        CONFIG_USB_AIRSPY=y
+        CONFIG_USB_HACKRF=y
+        CONFIG_CAN=y
+        CONFIG_CAN_DEV=y
+        CONFIG_CAN_CALC_BITTIMING=y
+        CONFIG_CAN_LEDS=y
+        CONFIG_CAN_VCAN=y
+        CONFIG_CAN_GRCAN=y
+        CONFIG_CAN_XILINXCAN=y
+        CONFIG_CAN_C_CAN=y
+        CONFIG_CAN_C_CAN_PLATFORM=y
+        CONFIG_CAN_C_CAN_PCI=y
+        CONFIG_CAN_CC770=y
+        CONFIG_CAN_CC770_ISA=y
+        CONFIG_CAN_CC770_PLATFORM=y
+        CONFIG_CAN_M_CAN=y
+        CONFIG_CAN_M_CAN_PCI=y
+        CONFIG_CAN_M_CAN_PLATFORM=y
+        CONFIG_CAN_M_CAN_TCAN4X5X=y
+        CONFIG_CAN_HI311X=y
+        CONFIG_CAN_MCP251X=y
+        CONFIG_CAN_8DEV_USB=y
+        CONFIG_CAN_EMS_USB=y
+        CONFIG_CAN_ESD_USB2=y
+        CONFIG_CAN_GS_USB=y
+        CONFIG_CAN_KVASER_USB=y
+        CONFIG_CAN_PEAK_USB=y
+        CONFIG_NETLINK_DIAG=y
+        CONFIG_VSOCKETS=y
+        CONFIG_NET_SCHED=y
+        CONFIG_NET_EMATCH_CANID=y
+        CONFIG_USB_SERIAL=y
+        CONFIG_USB_SERIAL_CONSOLE=y
+        CONFIG_USB_SERIAL_GENERIC=y
+        CONFIG_USB_SERIAL_CH341=y
+        CONFIG_USB_SERIAL_FTDI_SIO=y
+        CONFIG_USB_SERIAL_PL2303=y
+        EOF
+
+        echo "✅ Nethunter inline configs added"
+        echo "::endgroup::"
+
+    # External Wi-Fi adapter drivers, ported from EmberHeart's
+    # .github/kernel_modules/action.yml. Built as loadable modules (=m) and
+    # shipped in a separate kernel_modules ZIP rather than in the Image, so
+    # they can be insmod'd on demand. OnePlus's stock mac80211 lacks
+    # __ieee80211_create_tpt_led_trigger, so our own mac80211/cfg80211 must
+    # ship alongside them (see EmberHeart docs/drivers.md).
+    - name: Add Nethunter wireless module configs
+      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add Nethunter wireless module configs"
+        cd "$COMMON_KERNEL_FOLDER"
+
+        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_CFG80211=m
+        CONFIG_MAC80211=m
+        CONFIG_MAC80211_LEDS=y
+        CONFIG_WLAN_VENDOR_ATH=y
+        CONFIG_ATH_COMMON=m
+        CONFIG_ATH9K=m
+        CONFIG_ATH9K_PCI=y
+        CONFIG_ATH9K_AHB=y
+        CONFIG_ATH9K_HW=m
+        CONFIG_ATH9K_HTC=m
+        CONFIG_ATH9K_COMMON=m
+        CONFIG_ATH10K=m
+        CONFIG_ATH10K_USB=m
+        CONFIG_ATH11K=m
+        CONFIG_CARL9170=m
+        CONFIG_CARL9170_LEDS=y
+        CONFIG_WLAN_VENDOR_REALTEK=y
+        CONFIG_RTL8187=m
+        CONFIG_RTL8187_LEDS=y
+        CONFIG_RTL8XXXU=m
+        CONFIG_RTL8XXXU_UNTESTED=y
+        CONFIG_RTW88=m
+        CONFIG_RTW88_CORE=m
+        CONFIG_RTW88_USB=m
+        CONFIG_RTW88_8821CU=m
+        CONFIG_RTW88_8822BU=m
+        CONFIG_RTW88_8822CU=m
+        CONFIG_RTW88_8723DU=m
+        CONFIG_WLAN_VENDOR_RALINK=y
+        CONFIG_RT2X00=m
+        CONFIG_RT2500USB=m
+        CONFIG_RT73USB=m
+        CONFIG_RT2800USB=m
+        CONFIG_RT2800USB_RT33XX=y
+        CONFIG_RT2800USB_RT35XX=y
+        CONFIG_RT2800USB_RT3573=y
+        CONFIG_RT2800USB_RT53XX=y
+        CONFIG_RT2800USB_RT55XX=y
+        CONFIG_RT2800USB_UNKNOWN=y
+        CONFIG_WLAN_VENDOR_ZYDAS=y
+        CONFIG_ZD1211RW=m
+        CONFIG_WLAN_VENDOR_INTERSIL=y
+        CONFIG_P54_COMMON=m
+        CONFIG_P54_USB=m
+        CONFIG_WLAN_VENDOR_MEDIATEK=y
+        CONFIG_MT7601U=m
+        CONFIG_MT76_CORE=m
+        CONFIG_MT76_USB=m
+        CONFIG_MT76x02_LIB=m
+        CONFIG_MT76x02_USB=m
+        CONFIG_MT76_CONNAC_LIB=m
+        CONFIG_MT7603E=m
+        CONFIG_MT76x2_COMMON=m
+        CONFIG_MT76x0_COMMON=m
+        CONFIG_MT76x0U=m
+        CONFIG_MT76x2U=m
+        CONFIG_MT7615_COMMON=m
+        CONFIG_MT7915E=m
+        CONFIG_MT7921_COMMON=m
+        CONFIG_MT7921E=m
+        CONFIG_MT7921U=m
+        CONFIG_MAC80211_HWSIM=m
+        CONFIG_CAN_SLCAN=m
+        EOF
+
+        echo "✅ Nethunter wireless module configs added"
+        echo "::endgroup::"
+
+    # Out-of-tree rtw88 (lwfinger) replaces the in-tree copy, matching
+    # EmberHeart. Pinned to a commit so the build stays reproducible.
+    - name: Add out-of-tree rtw88 modules
+      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' && env.OP_RTW88_COMMIT != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add out-of-tree rtw88"
+        cd "$COMMON_KERNEL_FOLDER/drivers/net/wireless/realtek"
+
+        rm -rf rtw88
+        git clone --filter=blob:none --no-checkout https://github.com/lwfinger/rtw88.git rtw88
+        git -C rtw88 fetch --depth=1 origin "$OP_RTW88_COMMIT"
+        git -C rtw88 checkout --detach "$OP_RTW88_COMMIT"
+        test "$(git -C rtw88 rev-parse HEAD)" = "$OP_RTW88_COMMIT"
+        rm -rf rtw88/.git
+
+        # The out-of-tree tree carries its own Kbuild wiring, so drop the
+        # in-tree Kconfig source line and force the parent Makefile to build
+        # it as a module.
+        sed -i 's/$(CONFIG_RTW88)/m/g' Makefile
+        sed -i '/^source "drivers\/net\/wireless\/realtek\/rtw88\/Kconfig"$/s/.*/ /' Kconfig
+
+        echo "✅ out-of-tree rtw88 added at $OP_RTW88_COMMIT"
+        echo "::endgroup::"
+
     - name: Add Build based configs
       shell: bash
       run: |
@@ -2002,6 +2189,12 @@ runs:
           cp "$COMMON_KERNEL_FOLDER/out/System.map" "$DEBUG_ARTIFACTS_FOLDER/System.map"
 
           ls -la "$DEBUG_ARTIFACTS_FOLDER"
+        elif [ "${OP_WIRELESS_MODULES:-false}" = "true" ]; then
+          # Wireless drivers are =m, so 'modules' must be built and installed
+          # even outside debug mode; the Create Kernel Modules ZIP step packages
+          # them from out/install.
+          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
+          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" INSTALL_MOD_PATH="$COMMON_KERNEL_FOLDER/out/install" modules_install 2>&1 | tee install.log
         else
           make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image 2>&1 | tee build.log
         fi
@@ -2191,6 +2384,11 @@ runs:
 
         cp "$IMAGE_PATH" "$AK3_FOLDER/Image"
 
+        # Expose the Image and artifacts locations (workspace-relative) so
+        # callers do not have to hard-code the per-variant output directory.
+        echo "image_path=${IMAGE_PATH#"$GITHUB_WORKSPACE"/}" >> "$GITHUB_OUTPUT"
+        echo "artifacts_dir=${ARTIFACTS_FOLDER#"$GITHUB_WORKSPACE"/}" >> "$GITHUB_OUTPUT"
+
         mv "${ARTIFACTS_FOLDER}/${OP_MODEL}_${OP_OS_VERSION}.txt" "$AK3_FOLDER/"
         cd "$AK3_FOLDER"
 
@@ -2204,6 +2402,7 @@ runs:
         esac
 
         ZIP_MODEL=$(echo "$OP_MODEL" | sed 's/-[0-9]\+\.[0-9]\+\.[0-9]\+$//')
+        echo "ZIP_MODEL=$ZIP_MODEL" >> "$GITHUB_ENV"
         if [ "${{ env.OP_SUSFS }}" = true ]; then
           ZIP_NAME="AK3_${ZIP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_${{ inputs.ksu_type }}_${KSUVER:-unknown}_SuSFS_${SUSVER:-unknown}.zip"
         else
@@ -2237,6 +2436,81 @@ runs:
         echo "   Name: $ZIP_NAME"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
+        echo "::endgroup::"
+
+    # Ports EmberHeart's kernel_modules_<MODEL>.zip. EmberHeart builds the
+    # msm-kernel tree and filters out stock modules with a downloaded
+    # default_modules.txt; we build only the GKI common tree, so instead of a
+    # denylist we take an allowlist of the module source directories the
+    # wireless/CAN configs above turn on. That keeps stock GKI modules out of
+    # the ZIP without depending on an external, floating list.
+    #
+    # Must run after Create Kernel ZIP: that step prunes ARTIFACTS_FOLDER down
+    # to the AnyKernel3 ZIP alone.
+    - name: Create Kernel Modules ZIP
+      id: create_modules_zip
+      if: ${{ env.OP_WIRELESS_MODULES == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Create kernel modules ZIP package"
+
+        INSTALL_ROOT="$COMMON_KERNEL_FOLDER/out/install/lib/modules"
+        if [ ! -d "$INSTALL_ROOT" ]; then
+          echo "::error::modules_install output not found at $INSTALL_ROOT"
+          exit 1
+        fi
+
+        UNAME_DIR=$(find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -type d -print -quit)
+        if [ -z "$UNAME_DIR" ]; then
+          echo "::error::No kernel release directory under $INSTALL_ROOT"
+          exit 1
+        fi
+        echo "Module release dir: $(basename "$UNAME_DIR")"
+
+        # Source directories whose modules we ship. Matches the =m symbols set
+        # by the Nethunter wireless step.
+        MODULE_DIRS=(
+          "kernel/net/wireless"
+          "kernel/net/mac80211"
+          "kernel/net/can"
+          "kernel/drivers/net/wireless"
+          "kernel/drivers/net/can"
+        )
+
+        STAGE=$(mktemp -d)
+        for dir in "${MODULE_DIRS[@]}"; do
+          if [ -d "$UNAME_DIR/$dir" ]; then
+            find "$UNAME_DIR/$dir" -type f -name '*.ko' -exec cp -n -- {} "$STAGE/" \;
+          else
+            echo "[INFO] No modules built under $dir"
+          fi
+        done
+
+        MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
+        echo "Modules collected: $MODULE_COUNT"
+        if [ "$MODULE_COUNT" -eq 0 ]; then
+          echo "::error::Wireless modules were requested but none were built"
+          exit 1
+        fi
+        find "$STAGE" -type f -name '*.ko' -printf '  %f (%s bytes)\n' | sort
+
+        MODULES_ZIP_NAME="kernel_modules_${ZIP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}.zip"
+        ( cd "$STAGE" && zip -q -j -9 "$MODULES_ZIP_NAME" ./*.ko )
+        mv "$STAGE/$MODULES_ZIP_NAME" "$ARTIFACTS_FOLDER/"
+        rm -rf "$STAGE"
+
+        MODULES_ZIP_SHA256=$(sha256sum "$ARTIFACTS_FOLDER/$MODULES_ZIP_NAME" | awk '{print $1}')
+        printf 'modules_zip_name=%s\n' "$MODULES_ZIP_NAME" >> "$GITHUB_OUTPUT"
+        printf 'modules_zip_sha256=%s\n' "$MODULES_ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        printf 'modules_count=%s\n' "$MODULE_COUNT" >> "$GITHUB_OUTPUT"
+        echo "MODULES_ZIP_NAME=$MODULES_ZIP_NAME" >> "$GITHUB_ENV"
+
+        echo ""
+        echo "✅ Kernel modules ZIP created successfully"
+        echo "   Name: $MODULES_ZIP_NAME"
+        echo "   Modules: $MODULE_COUNT"
+        echo "   SHA256: $MODULES_ZIP_SHA256"
         echo "::endgroup::"
 
     - name: Final Build Summary
@@ -2386,6 +2660,16 @@ runs:
       with:
         name: ${{ env.ZIP_NAME }}
         path: ${{ env.ARTIFACTS_FOLDER }}/${{ env.ZIP_NAME }}
+        archive: false
+        compression-level: 0
+        retention-days: 90
+
+    - name: Upload Kernel Modules ZIP
+      if: success() && steps.create_modules_zip.conclusion == 'success'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.MODULES_ZIP_NAME }}
+        path: ${{ env.ARTIFACTS_FOLDER }}/${{ env.MODULES_ZIP_NAME }}
         archive: false
         compression-level: 0
         retention-days: 90

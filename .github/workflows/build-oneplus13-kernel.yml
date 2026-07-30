@@ -7,6 +7,19 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      kernel_version:
+        description: OnePlus 13 kernel version to build
+        required: true
+        type: choice
+        options:
+          - 6.6.89 A16
+          - 6.6.118 A16
+          - 6.6.66 A15
+          - 6.6.30 A15
+          - 6.6.89 CPH A15
+          - 6.6.56 CPH A15
+          - all
+        default: 6.6.89 A16
       ksu_variant:
         description: KernelSU variant
         required: true
@@ -30,6 +43,16 @@ on:
         required: false
         type: string
         default: ''
+      nethunter:
+        description: Enable Nethunter inline configs
+        required: true
+        type: boolean
+        default: true
+      wireless_modules:
+        description: Build and package wireless kernel modules
+        required: true
+        type: boolean
+        default: true
       optimize_level:
         description: Compiler optimization
         required: true
@@ -91,9 +114,63 @@ on:
         default: false
 
 jobs:
-  build:
-    name: OnePlus 13 / A16 / Android 15-6.6
+  plan:
+    name: Plan build matrix
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Generate build matrix
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CHOICE="${{ inputs.kernel_version }}"
+
+          case "$CHOICE" in
+            "6.6.89 A16")
+              CONFIGS='["configs/OP13-6.6.89.json"]'
+              ;;
+            "6.6.118 A16")
+              CONFIGS='["configs/OP13-6.6.118.json"]'
+              ;;
+            "6.6.66 A15")
+              CONFIGS='["configs/OP13-6.6.66.json"]'
+              ;;
+            "6.6.30 A15")
+              CONFIGS='["configs/OP13-6.6.30.json"]'
+              ;;
+            "6.6.89 CPH A15")
+              CONFIGS='["configs/OP13-CPH-6.6.89.json"]'
+              ;;
+            "6.6.56 CPH A15")
+              CONFIGS='["configs/OP13-CPH-6.6.56.json"]'
+              ;;
+            "all")
+              CONFIGS='["configs/OP13-6.6.89.json","configs/OP13-6.6.118.json","configs/OP13-6.6.66.json","configs/OP13-6.6.30.json","configs/OP13-CPH-6.6.89.json","configs/OP13-CPH-6.6.56.json"]'
+              ;;
+            *)
+              echo "::error::Unknown kernel_version choice: $CHOICE"
+              exit 1
+              ;;
+          esac
+
+          echo "matrix={\"config\":$CONFIGS}" >> "$GITHUB_OUTPUT"
+          echo "Matrix: {\"config\":$CONFIGS}"
+
+  build:
+    name: ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout builder
@@ -136,7 +213,7 @@ jobs:
             echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale"
           } >> "$GITHUB_ENV"
 
-      - name: Prepare OnePlus 13 configuration
+      - name: Prepare configuration
         id: config
         shell: bash
         env:
@@ -145,21 +222,30 @@ jobs:
           LTO_MODE: ${{ inputs.lto }}
           COMPILER_MODE: ${{ inputs.compiler }}
           KERNEL_UNAME: ${{ inputs.kernel_uname }}
+          NETHUNTER: ${{ inputs.nethunter }}
+          WIRELESS_MODULES: ${{ inputs.wireless_modules }}
         run: |
           set -euo pipefail
           if [ "$COMPILER_MODE" = manifest ]; then
             zyc_compiler=''
           else
-            zyc_compiler=$(jq -r '.zyc_compiler' configs/OP13-6.6.89.json)
+            zyc_compiler=$(jq -r '.zyc_compiler' "${{ matrix.config }}")
           fi
+
+          # Extract model name from config path for the Image artifact name
+          MODEL=$(jq -r '.model' "${{ matrix.config }}")
+          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+
           config_json=$(jq -c \
             --argjson susfs "$USE_SUSFS" \
             --argjson opt "$USE_OPT_PATCHES" \
+            --argjson nethunter "$NETHUNTER" \
+            --argjson wireless_modules "$WIRELESS_MODULES" \
             --arg lto "$LTO_MODE" \
             --arg zyc "$zyc_compiler" \
             --arg uname "$KERNEL_UNAME" \
-            '.susfs = $susfs | .opt = $opt | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
-            configs/OP13-6.6.89.json)
+            '.susfs = $susfs | .opt = $opt | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
+            "${{ matrix.config }}")
           echo "config_json=$config_json" >> "$GITHUB_OUTPUT"
           jq . <<< "$config_json"
 
@@ -172,9 +258,6 @@ jobs:
           KSU_BRANCH: ${{ inputs.ksu_branch }}
         run: |
           set -euo pipefail
-          # KernelSU-Next's setup.sh with no argument checks out the latest *tag*,
-          # which lags the SUSFS patch set and leaves an unfixable kernel/Kconfig
-          # reject. Upstream always passes an explicit ref, so do the same here.
           if [ "$KSU_VARIANT" = KSUN ]; then
             owner=KernelSU-Next; name=KernelSU-Next; default_ref=dev
           else
@@ -211,7 +294,7 @@ jobs:
           echo "Resolved $KSU_VARIANT ref '$ref' -> $resolved"
           echo "ref=$resolved" >> "$GITHUB_OUTPUT"
 
-      - name: Build OnePlus 13 kernel
+      - name: Build kernel
         id: build
         uses: ./.github/actions/build-kernel
         with:
@@ -225,39 +308,146 @@ jobs:
           debug: ${{ inputs.debug }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The AnyKernel3 ZIP and the kernel-modules ZIP are already uploaded by
+      # the composite action. Only the raw Image is left to publish here, and
+      # it is uploaded *archived* on purpose: an `archive: false` upload of an
+      # extensionless file is served as application/octet-stream and browsers
+      # save it as "image.bin".
       - name: Upload raw kernel Image
         if: ${{ success() }}
         uses: actions/upload-artifact@v7
         with:
-          name: Image_OP13_A16_${{ steps.build.outputs.kernel_version }}
-          path: OP13-6.6.89/kernel_platform/common/out/arch/arm64/boot/Image
+          name: Image_${{ env.MODEL }}_${{ steps.build.outputs.kernel_version }}
+          path: ${{ steps.build.outputs.image_path }}
+          compression-level: 9
+          retention-days: 90
+
+  firmware:
+    name: Nethunter Wireless Firmware
+    runs-on: ubuntu-latest
+    if: ${{ inputs.wireless_modules }}
+    steps:
+      - name: Download latest Nethunter firmware
+        id: fetch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Fetching latest nullptr-t-oss/Nethunter-Wireless-Firmware release"
+
+          RELEASE_JSON=$(gh api repos/nullptr-t-oss/Nethunter-Wireless-Firmware/releases/latest)
+          TAG=$(jq -r '.tag_name' <<< "$RELEASE_JSON")
+          ASSET_URL=$(jq -r '.assets[0].browser_download_url' <<< "$RELEASE_JSON")
+          ASSET_NAME=$(jq -r '.assets[0].name' <<< "$RELEASE_JSON")
+
+          echo "Latest release: $TAG"
+          echo "Asset: $ASSET_NAME"
+          echo "URL: $ASSET_URL"
+
+          curl -fsSL -o "$ASSET_NAME" "$ASSET_URL"
+
+          SHA256=$(sha256sum "$ASSET_NAME" | awk '{print $1}')
+          echo "SHA256: $SHA256"
+
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.fetch.outputs.asset_name }}
+          path: ${{ steps.fetch.outputs.asset_name }}
           archive: false
           compression-level: 0
           retention-days: 90
 
-      - name: Create release
-        if: ${{ inputs.release_type != 'none' && success() }}
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    needs: [build, firmware]
+    if: ${{ inputs.release_type != 'none' && !cancelled() && needs.build.result == 'success' }}
+    steps:
+      # v8 is required, not v7: the build job uploads the ZIPs with
+      # `archive: false`, and only v8 checks Content-Type before trying to
+      # unzip a raw (already-zipped-by-us) download.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts
+
+      - name: Collect release files
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-files
+
+          # Artifacts uploaded with `archive: false` land as
+          # release-artifacts/<file-name>/<file-name>; flatten them.
+          find release-artifacts -type f \
+            \( -name 'AK3_*.zip' -o -name 'kernel_modules_*.zip' \
+               -o -name 'Nethunter-Wireless-Firmware*.zip' -o -name 'Image_*.zip' \) \
+            -exec cp -n -- {} release-files/ \;
+
+          echo "Release files:"
+          ls -la release-files/
+
+          if [ -z "$(ls -A release-files)" ]; then
+            echo "::error::No release files were collected"
+            exit 1
+          fi
+
+      - name: Prepare release body
+        id: body
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo 'body<<RELEASE_BODY_EOF'
+            echo "OnePlus 13 kernel builds for OxygenOS 15/16."
+            echo
+            echo "**Build configuration:**"
+            echo
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| KernelSU variant | ${{ inputs.ksu_variant }} |"
+            echo "| SUSFS | ${{ inputs.use_susfs }} |"
+            echo "| Nethunter inline configs | ${{ inputs.nethunter }} |"
+            echo "| Wireless modules | ${{ inputs.wireless_modules }} |"
+            echo "| Optimization | ${{ inputs.optimize_level }} |"
+            echo "| LTO | ${{ inputs.lto }} |"
+            echo "| Compiler source | ${{ inputs.compiler }} |"
+            echo "| Variants | ${{ inputs.kernel_version }} |"
+            echo
+            echo "**Artifacts (SHA256):**"
+            echo
+            for f in release-files/*; do
+              printf -- '- `%s`\n  - `%s`\n' "$(basename "$f")" "$(sha256sum "$f" | awk '{print $1}')"
+            done
+            echo
+            echo "---"
+            echo
+            echo "Flash the \`AK3_*.zip\` for your exact kernel version in a custom recovery or with the KernelSU/KSU-Next flasher."
+            echo
+            echo "\`kernel_modules_*.zip\` holds the external Wi-Fi/CAN drivers (ath9k_htc, ath10k, mt76, rtw88, rt2800usb, zd1211rw, p54, carl9170, slcan, …) built as loadable modules."
+            echo "They are built with \`CONFIG_MODVERSIONS=y\`, so a module ZIP is valid **only** for the exact matching kernel build in this same release."
+            echo "OnePlus's stock mac80211 lacks symbols these drivers need, so unload the stock stack first and \`insmod\` the bundled \`cfg80211.ko\`/\`mac80211.ko\` before the driver — see EmberHeart's \`docs/drivers.md\`."
+            echo
+            echo "\`Nethunter-Wireless-Firmware*.zip\` is re-published unmodified from [nullptr-t-oss/Nethunter-Wireless-Firmware](https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware)."
+            echo
+            echo "This repository does not build \`boot.img\`, \`vendor_boot.img\`, \`vendor_dlkm.img\`, or \`system_dlkm.img\`."
+            echo 'RELEASE_BODY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: op13-${{ github.run_number }}
-          name: OnePlus 13 ${{ steps.build.outputs.kernel_version }}
+          name: OnePlus 13 Build ${{ github.run_number }}
           generate_release_notes: false
           prerelease: ${{ inputs.release_type == 'prerelease' }}
-          body: |
-            OnePlus 13 kernel for OxygenOS 16.
-
-            - Kernel base: ${{ steps.build.outputs.kernel_version }}
-            - KernelSU variant: ${{ steps.build.outputs.ksu_type }}
-            - KernelSU version: ${{ steps.build.outputs.ksu_version }}
-            - SUSFS enabled: ${{ inputs.use_susfs }}
-            - SUSFS version: ${{ steps.build.outputs.susfs_version }}
-            - Optimization: ${{ inputs.optimize_level }}
-            - LTO: ${{ inputs.lto }}
-            - Compiler source: ${{ inputs.compiler }}
-            - Image SHA256: `${{ steps.build.outputs.image_sha256 }}`
-            - AnyKernel3 SHA256: `${{ steps.build.outputs.zip_sha256 }}`
-
-            This repository does not build boot.img, vendor_boot.img, or DLKM images.
-          files: |
-            OP13-6.6.89/artifacts/${{ steps.build.outputs.zip_name }}
-            OP13-6.6.89/kernel_platform/common/out/arch/arm64/boot/Image
+          body: ${{ steps.body.outputs.body }}
+          files: release-files/*
