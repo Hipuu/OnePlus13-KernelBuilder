@@ -1111,6 +1111,45 @@ runs:
           fi
         fi
 
+        # Backport __fold_filemap_fixup_entry for older android15-6.6 trees.
+        # The SUSFS android15-6.6 patch calls it unconditionally in
+        # show_map_vma(), but the OP13 6.6.30 common tree (f9c1a38) predates
+        # it: page_size_compat there has neither the declaration nor the
+        # definition, so the build dies with "call to undeclared function
+        # '__fold_filemap_fixup_entry'". Every newer pin (6.6.56/66/89/118)
+        # already carries it, hence the grep guard.
+        if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ] \
+           && [ -f ./include/linux/page_size_compat.h ] \
+           && ! grep -q '__fold_filemap_fixup_entry' ./include/linux/page_size_compat.h; then
+          echo "__fold_filemap_fixup_entry absent. Backporting from upstream page_size_compat."
+          sed -i -e '/^#endif \/\* __LINUX_PAGE_SIZE_COMPAT_H \*\//i struct vma_iterator;' \
+                 -e '/^#endif \/\* __LINUX_PAGE_SIZE_COMPAT_H \*\//i extern void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end);' \
+                 ./include/linux/page_size_compat.h
+          printf '%s\n' \
+            '' \
+            'void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end)' \
+            '{' \
+            '    struct vm_area_struct *next_vma;' \
+            '' \
+            '    /* Not emulating page size? */' \
+            '    if (!static_branch_unlikely(&page_shift_compat_enabled))' \
+            '        return;' \
+            '' \
+            '    /* Advance iterator */' \
+            '    next_vma = vma_next(iter);' \
+            '' \
+            '    /* If fixup VMA, adjust the end to cover its extent */' \
+            '    if (next_vma && (next_vma->vm_flags & __VM_NO_COMPAT)) {' \
+            '        *end = next_vma->vm_end;' \
+            '        return;' \
+            '    }' \
+            '' \
+            '    /* Rewind iterator */' \
+            '    vma_prev(iter);' \
+            '}' \
+            >> ./mm/page_size_compat.c
+        fi
+
         # Fake kernel patch to fix failures
         fake_patched=0
         fake_patched_expand=0
@@ -1289,7 +1328,9 @@ runs:
           echo "Patching hmbird!"
           HMBIRD_MODEL=$(echo "$OP_MODEL" | sed 's/-[0-9]\+\.[0-9]\+\.[0-9]\+$//')
           case "$OP_MODEL" in
-            OP-ACE-5-ULTRA-6.6.50|OP-ACE-5-PRO-6.6.30|OP13-6.6.30|OP13-CPH-6.6.56|OP13T-6.6.89|OP13-6.6.89|OP-ACE-5-PRO-6.6.89)
+            OP-ACE-5-ULTRA-6.6.50|OP-ACE-5-PRO-6.6.30|OP13-6.6.30|OP13-6.6.66|OP13-CPH-6.6.56|OP13T-6.6.89|OP13-6.6.89|OP-ACE-5-PRO-6.6.89)
+              # OP13-6.6.66 is a local variant with no upstream config; the only
+              # fengchi_OP13_A15.patch in kernel_patches lives under deprecated/.
               FENGCHI_DIR="$KERNEL_PATCHES_FOLDER/oneplus/hmbird/deprecated" ;;
             *)
               FENGCHI_DIR="$KERNEL_PATCHES_FOLDER/oneplus/hmbird" ;;
@@ -1792,7 +1833,9 @@ runs:
         CONFIG_ATH9K_COMMON=m
         CONFIG_ATH10K=m
         CONFIG_ATH10K_USB=m
-        CONFIG_ATH11K=m
+        # No CONFIG_ATH11K: it depends on QCOM_QMI_HELPERS, which GKI does not
+        # enable, so Kconfig drops it silently and no ath11k.ko is produced.
+        # The hardware it drives is PCIe/AHB-attached anyway, not USB OTG.
         CONFIG_CARL9170=m
         CONFIG_CARL9170_LEDS=y
         CONFIG_WLAN_VENDOR_REALTEK=y
@@ -2469,7 +2512,11 @@ runs:
         echo "Module release dir: $(basename "$UNAME_DIR")"
 
         # Source directories whose modules we ship. Matches the =m symbols set
-        # by the Nethunter wireless step.
+        # by the Nethunter wireless step. These are only the seed: the real
+        # set is the transitive closure over modules.dep, because a driver's
+        # dependencies live outside these directories -- cfg80211 depends on
+        # kernel/net/rfkill/rfkill.ko and mac80211 on kernel/lib/crypto/libarc4.ko.
+        # Shipping the seed alone makes insmod fail with unknown symbols.
         MODULE_DIRS=(
           "kernel/net/wireless"
           "kernel/net/mac80211"
@@ -2478,19 +2525,73 @@ runs:
           "kernel/drivers/net/can"
         )
 
-        STAGE=$(mktemp -d)
+        DEP_FILE="$UNAME_DIR/modules.dep"
+        if [ ! -f "$DEP_FILE" ]; then
+          echo "[INFO] modules.dep absent; running depmod"
+          depmod -b "$COMMON_KERNEL_FOLDER/out/install" "$(basename "$UNAME_DIR")" || true
+        fi
+        if [ ! -f "$DEP_FILE" ]; then
+          echo "::error::modules.dep missing at $DEP_FILE; cannot resolve module dependencies"
+          exit 1
+        fi
+
+        SEEDS=""
         for dir in "${MODULE_DIRS[@]}"; do
           if [ -d "$UNAME_DIR/$dir" ]; then
-            find "$UNAME_DIR/$dir" -type f -name '*.ko' -exec cp -n -- {} "$STAGE/" \;
+            SEEDS+="$( cd "$UNAME_DIR" && find "$dir" -type f -name '*.ko' )"$'\n'
           else
             echo "[INFO] No modules built under $dir"
           fi
         done
 
-        MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
-        echo "Modules collected: $MODULE_COUNT"
-        if [ "$MODULE_COUNT" -eq 0 ]; then
+        SEED_COUNT=$(printf '%s' "$SEEDS" | grep -c '\.ko$' || true)
+        if [ "$SEED_COUNT" -eq 0 ]; then
           echo "::error::Wireless modules were requested but none were built"
+          exit 1
+        fi
+
+        # Close the seed set over modules.dep. Each line is
+        #   kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/rfkill.ko ...
+        WANTED=$(awk -v seeds="$SEEDS" '
+          BEGIN {
+            n = split(seeds, s, "\n")
+            for (i = 1; i <= n; i++) if (s[i] != "") want[s[i]] = 1
+          }
+          {
+            key = $1
+            sub(/:$/, "", key)
+            for (i = 2; i <= NF; i++) dep[key] = dep[key] " " $i
+          }
+          END {
+            changed = 1
+            while (changed) {
+              changed = 0
+              split("", add)
+              for (m in want) {
+                k = split(dep[m], d, " ")
+                for (i = 1; i <= k; i++)
+                  if (d[i] != "" && !(d[i] in want)) add[d[i]] = 1
+              }
+              for (a in add) { want[a] = 1; changed = 1 }
+            }
+            for (m in want) print m
+          }' "$DEP_FILE" | sort)
+
+        STAGE=$(mktemp -d)
+        while IFS= read -r rel; do
+          [ -n "$rel" ] || continue
+          if [ -f "$UNAME_DIR/$rel" ]; then
+            cp -n -- "$UNAME_DIR/$rel" "$STAGE/"
+          else
+            echo "::warning::modules.dep lists $rel but it is not in the install tree"
+          fi
+        done <<< "$WANTED"
+
+        MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
+        echo "Seeded from module dirs: $SEED_COUNT"
+        echo "After dependency closure: $MODULE_COUNT"
+        if [ "$MODULE_COUNT" -lt "$SEED_COUNT" ]; then
+          echo "::error::Dependency closure lost modules ($MODULE_COUNT < $SEED_COUNT)"
           exit 1
         fi
         find "$STAGE" -type f -name '*.ko' -printf '  %f (%s bytes)\n' | sort

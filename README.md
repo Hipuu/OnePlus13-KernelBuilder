@@ -16,7 +16,7 @@ The OnePlus 13 (SM8750 / "sun") kernel is built with WildKernels' manifest fork,
 - **KernelSU variants**: KernelSU-Next (`KSUN`) and original KernelSU (`KSU`)
 - **SUSFS**: version auto-detected from the SUSFS branch (currently `v2.2.0` on `gki-android15-6.6`), with the upstream KSU-side patch/rej-fix logic
 - **Nethunter support**: Bluetooth adapters (HCIBTUSB variants, BCM203X, BPA10X, BFUSB), SDR (AirSpy, HackRF), full CAN stack (VCAN, SLCAN, C_CAN, CC770, M_CAN, HI311X, MCP251X, 8DEV/EMS/ESD/GS/KVASER/PEAK USB), serial adapters (CH341, FTDI, PL2303)
-- **Wireless modules**: External Wi-Fi/Bluetooth adapters built as loadable modules — Atheros (ath9k_htc, ath10k, ath11k, carl9170), Realtek (rtl8187, rtl8xxxu, rtw88 from lwfinger/rtw88), Ralink (rt2500usb, rt73usb, rt2800usb), Zydas (zd1211rw), Intersil (p54usb), MediaTek (mt7601u, mt76x0u, mt76x2u, mt7921u), and mac80211_hwsim. Ships as `kernel_modules_<MODEL>_<OS_VERSION>_<KERNEL_VER>.zip`.
+- **Wireless modules**: External Wi-Fi/Bluetooth adapters built as loadable modules — Atheros (ath9k_htc, ath10k_usb, carl9170), Realtek (rtl8187, rtl8xxxu, rtw88 from lwfinger/rtw88), Ralink (rt2500usb, rt73usb, rt2800usb), Zydas (zd1211rw), Intersil (p54usb), MediaTek (mt7601u, mt76x0u, mt76x2u, mt7921u), and mac80211_hwsim. Ships as `kernel_modules_<MODEL>_<OS_VERSION>_<KERNEL_VER>.zip`.
 - **Nethunter Wireless Firmware**: re-published unmodified from [nullptr-t-oss/Nethunter-Wireless-Firmware](https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware)
 - **HMBIRD (Fengchi) scheduler** patches for the OnePlus 13 (SM8750)
 - **Optimization patches**: memory, VFS, scheduler and network tweaks
