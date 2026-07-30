@@ -60,8 +60,17 @@ fi
 
 echo
 echo "== actionlint =="
+# actionlint up to 1.7.7 still hard-codes a 10-input cap for
+# workflow_dispatch. GitHub raised that long ago -- the documented limit is
+# now 25 top-level inputs (65,535 characters of payload) -- and this
+# workflow's 16 inputs dispatch fine. Suppress only that stale rule.
+ACTIONLINT_IGNORE='maximum number of inputs for "workflow_dispatch" event'
 if command -v actionlint >/dev/null 2>&1; then
-    if actionlint; then pass "actionlint"; else fail "actionlint"; fi
+    if actionlint -ignore "$ACTIONLINT_IGNORE"; then
+        pass "actionlint"
+    else
+        fail "actionlint"
+    fi
 else
     skip "actionlint not installed (https://github.com/rhysd/actionlint)"
 fi
