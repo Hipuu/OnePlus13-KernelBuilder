@@ -1337,6 +1337,19 @@ runs:
           esac
           dos2unix "$FENGCHI_DIR/fengchi_${HMBIRD_MODEL}_${OP_OS_VERSION}.patch"
           patch -p1 -F 3 < "$FENGCHI_DIR/fengchi_${HMBIRD_MODEL}_${OP_OS_VERSION}.patch"
+          # hmbird.c/hmbird_sched_proc.c call show_/store_scaling_governor, which
+          # cpufreq.c exports but not every pinned common tree declares. The
+          # OP13-CPH fengchi patch carries the declarations; fengchi_OP13_A15
+          # does not, because the 6.6.30 tree it targets already has them.
+          # The 6.6.66 tree (9920459) does not, so the build dies with
+          # "call to undeclared function 'show_scaling_governor'". Add them here
+          # when missing, guarded so trees that already declare them are untouched.
+          if ! grep -q 'scaling_governor' ./include/linux/cpufreq.h; then
+            echo "show_/store_scaling_governor undeclared. Adding prototypes to cpufreq.h."
+            sed -i -e '/^struct cpufreq_cpuinfo {/i ssize_t store_scaling_governor(struct cpufreq_policy *policy, const char *buf, size_t count);' \
+                   -e '/^struct cpufreq_cpuinfo {/i ssize_t show_scaling_governor(struct cpufreq_policy *policy, char *buf);' \
+                   ./include/linux/cpufreq.h
+          fi
           dos2unix "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/overwriter.patch"
           patch -p1 -F 3 < "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/overwriter.patch"
           chmod +x ./drivers/of/overwriter/overwrite_configs/convert_configs.sh

@@ -88,11 +88,11 @@ The `kernel_version` input supports `all`, which builds every variant in paralle
 
 Kernel modules are built with `CONFIG_MODVERSIONS=y`, so a module ZIP is valid **only** for the exact matching kernel build. Modules from one release will not load on another, even if both use the same base kernel version.
 
-OnePlus's stock mac80211 stack lacks symbols these drivers need (`__ieee80211_create_tpt_led_trigger`, etc.). You must unload the stock stack and load the bundled `cfg80211.ko`/`mac80211.ko` before the driver module. Example:
+OnePlus's stock mac80211 stack lacks symbols these drivers need (`__ieee80211_create_tpt_led_trigger`, etc.). Both `cfg80211.ko` **and** `mac80211.ko` must come from the ZIP: the bundled `mac80211` refuses to load against the platform `cfg80211` (`mac80211: disagrees about version of symbol wiphy_new_nm`), because `/vendor/lib/modules/cfg80211.ko` is built from OnePlus's own tree and its symbol CRCs differ. Example, verified on a OnePlus 13 running the 6.6.118 A16 build:
 
 ```bash
-# Unload stock stack
-rmmod wlan
+# Turn Wi-Fi off in Settings first, then unload the stock stack
+rmmod qca_cld3_peach_v2
 rmmod cfg80211
 
 # Load bundled stack
@@ -100,10 +100,13 @@ insmod /path/to/cfg80211.ko
 insmod /path/to/mac80211.ko
 
 # Load driver (example: ath9k_htc)
+insmod /path/to/ath.ko
 insmod /path/to/ath9k_hw.ko
 insmod /path/to/ath9k_common.ko
 insmod /path/to/ath9k_htc.ko
 ```
+
+Displacing the platform `cfg80211` costs the internal Wi-Fi for the rest of the boot. Reversing the steps reloads the kernel modules fine, but Android's `WifiService` stays latched in a failed state — reboot to get internal Wi-Fi back.
 
 See EmberHeart's `docs/drivers.md` for the full procedure and per-driver dependency chains.
 
