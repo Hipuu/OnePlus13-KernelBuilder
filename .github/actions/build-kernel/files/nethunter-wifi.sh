@@ -58,7 +58,7 @@ DEFAULT_DRIVERS=ath9k_htc
 die() { echo "error: $*" >&2; exit 1; }
 
 need_root() {
-  [ "$(id -u)" = 0 ] || die "must run as root (su -c '$0 $*')"
+  [ "$(id -u)" = 0 ] || die "must run as root, e.g. su -c '$0 $INVOCATION'"
 }
 
 # /proc/modules spells names with underscores; filenames may use dashes.
@@ -342,6 +342,10 @@ cmd_uninstall() {
 }
 
 action=${1:-load}
+# Kept for the need_root message: the subcommand's own args are shifted away
+# before it runs, so reconstruct the full invocation here. With no args at all
+# the action defaults to "load", so name it explicitly.
+INVOCATION=${*:-$action}
 [ $# -gt 0 ] && shift
 case "$action" in
   load)      cmd_load "$@" ;;
