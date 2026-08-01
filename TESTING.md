@@ -114,7 +114,7 @@ Release creation is a single aggregate job on purpose: a per-matrix-job release 
 ## Expected artifacts
 
 - `AK3_<MODEL>_<OS>_<KERNEL>_<KSU>_<VER>.zip` — flashable AnyKernel3 package.
-- `kernel_modules_<MODEL>_<OS>_<KERNEL>.zip` — wireless/CAN loadable modules, when `wireless_modules=true`.
+- `kernel_modules_<MODEL>_<OS>_<KERNEL>.zip` — wireless/CAN loadable modules, plus a flattened `modules.dep` and the `nethunter-wifi.sh` loader, when `wireless_modules=true`.
 - `Nethunter-Wireless-Firmware-<VER>.zip` — firmware passthrough, when `wireless_modules=true`.
 - `Image_<MODEL>_<KERNEL>` — raw ARM64 kernel `Image`.
 - Debug artifact(s) when `debug=true`.
@@ -137,6 +137,31 @@ insmod ./cfg80211.ko
 ```
 
 If that fails with a version-magic or unknown-symbol error, the pack does not match the running kernel. If it succeeds, load `mac80211.ko` next, then the driver chain. See the README's "Using wireless modules" section for the full unload/load procedure.
+
+In practice, use the bundled loader instead of doing that by hand:
+
+```bash
+./nethunter-wifi.sh load       # ath9k_htc by default
+./nethunter-wifi.sh status
+./nethunter-wifi.sh restore
+```
+
+### Checking the packaging step
+
+The `Create Kernel Modules ZIP` step asserts that `modules.dep` has exactly one line per packaged module and fails the build otherwise. Confirm in the log:
+
+```
+After dependency closure: 77
+modules.dep entries: 77
+```
+
+A downloaded pack should contain `<n>` `.ko` files plus exactly two extra entries (`modules.dep`, `nethunter-wifi.sh`).
+
+### Checking the loader without a device
+
+`validate_workflow.sh` covers the loader statically: POSIX syntax via `dash -n`, no bashisms or `awk` (Android's toybox has neither), LF line endings, and the `#!/system/bin/sh` shebang. A CRLF script does not execute on Android at all — the kernel reads the shebang as `/system/bin/sh\r` and reports "No such file or directory". `.gitattributes` pins `*.sh` to `eol=lf` to prevent that on Windows checkouts.
+
+The dependency walk can be exercised off-device by sourcing its functions against a pack's real `modules.dep` and stubbing `insmod`/`resident`, then asserting that no module is loaded before one of its dependencies. Worth re-running after any change to `load_closure`, `closure_of`, or the packaging `awk`: the deep chains (`rtw_8723cs`, `mt7921u`) and the dashed module names (`mt76-usb`, `crc-itu-t`) are where ordering bugs surface.
 
 ## Historical failures
 
