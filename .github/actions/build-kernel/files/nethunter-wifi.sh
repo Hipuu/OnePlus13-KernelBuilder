@@ -27,6 +27,8 @@
 #   ./nethunter-wifi.sh restore             unload them, restore internal Wi-Fi
 #   ./nethunter-wifi.sh status              show what is currently resident
 #   ./nethunter-wifi.sh list                list every driver in this pack
+#   ./nethunter-wifi.sh monitor [if] [ch]   put the adapter into monitor mode
+#   ./nethunter-wifi.sh managed [if]        undo monitor mode
 #   ./nethunter-wifi.sh install [driver ...]  autoload at every boot (KernelSU)
 #   ./nethunter-wifi.sh uninstall           undo install
 #
@@ -102,6 +104,12 @@ closure_of() {
 }
 
 # Point the firmware loader at whichever directory actually holds the blobs.
+#
+# This only helps for directories the kernel can read directly. A path under
+# /data is rejected with -2 under SELinux (shell_data_file is not readable by
+# the firmware loader); such loads only succeed because ueventd's usermode
+# helper then searches its own fixed list from /system/etc/ueventd.rc. So
+# prefer the real firmware directories, which both mechanisms can reach.
 set_firmware_path() {
   [ -w "$FIRMWARE_PARAM" ] || return 0
   for d in $FIRMWARE_CANDIDATES; do
@@ -292,6 +300,17 @@ cmd_status() {
   echo
   echo "=== firmware search path ==="
   cat "$FIRMWARE_PARAM" 2>/dev/null || echo "  (default)"
+  echo
+  echo "=== regulatory domain ==="
+  # Android ships no regulatory.db, so cfg80211 falls back to world roaming
+  # ("country 00"): 20 dBm everywhere, channels 12-14 no-IR, 5GHz passive-scan
+  # only. Injection and beaconing work on channels 1-11 regardless.
+  if command -v iw >/dev/null 2>&1; then
+    iw reg get 2>/dev/null | grep -E "^(global|country)" | head -2
+    echo "  (country 00 = world roaming; see README, regulatory database)"
+  else
+    echo "  iw not available"
+  fi
 }
 
 cmd_list() {
@@ -300,6 +319,54 @@ cmd_list() {
     [ -f "$f" ] || continue
     echo "  $(basename "$f" .ko)"
   done
+}
+
+# Put the adapter's interface into monitor mode. The interface must be down
+# before the type change; iw rejects it otherwise.
+cmd_monitor() {
+  need_root
+  command -v iw >/dev/null 2>&1 || die "iw not found"
+  _iface=${1:-}
+  if [ -z "$_iface" ]; then
+    _iface=$(iw dev 2>/dev/null | grep -m1 -o 'Interface .*' | cut -d' ' -f2)
+  fi
+  [ -n "$_iface" ] || die "no wireless interface found (load a driver first)"
+  _chan=${2:-}
+
+  ip link set "$_iface" down 2>/dev/null
+  if iw dev "$_iface" set type monitor 2>"$ERR"; then
+    ip link set "$_iface" up 2>/dev/null
+    echo "  $_iface -> monitor"
+  else
+    ip link set "$_iface" up 2>/dev/null
+    die "could not set monitor mode: $(cat "$ERR" 2>/dev/null)"
+  fi
+
+  if [ -n "$_chan" ]; then
+    iw dev "$_iface" set channel "$_chan" 2>"$ERR" \
+      && echo "  channel $_chan" \
+      || echo "  could not set channel $_chan: $(cat "$ERR" 2>/dev/null)"
+  fi
+  iw dev "$_iface" info 2>/dev/null | grep -E "type|channel|txpower"
+  echo
+  echo "Capture with: tcpdump -i $_iface -nn"
+  echo "Back to normal: $0 managed $_iface"
+}
+
+# Undo monitor mode.
+cmd_managed() {
+  need_root
+  command -v iw >/dev/null 2>&1 || die "iw not found"
+  _iface=${1:-}
+  if [ -z "$_iface" ]; then
+    _iface=$(iw dev 2>/dev/null | grep -m1 -o 'Interface .*' | cut -d' ' -f2)
+  fi
+  [ -n "$_iface" ] || die "no wireless interface found"
+  ip link set "$_iface" down 2>/dev/null
+  iw dev "$_iface" set type managed 2>"$ERR" \
+    && echo "  $_iface -> managed" \
+    || echo "  failed: $(cat "$ERR" 2>/dev/null)"
+  ip link set "$_iface" up 2>/dev/null
 }
 
 cmd_install() {
@@ -352,10 +419,12 @@ case "$action" in
   restore)   cmd_restore ;;
   status)    cmd_status ;;
   list)      cmd_list ;;
+  monitor)   cmd_monitor "$@" ;;
+  managed)   cmd_managed "$@" ;;
   install)   cmd_install "$@" ;;
   uninstall) cmd_uninstall ;;
   -h|--help|help)
-    sed -n '23,32p' "$0" | sed -e 's/^#  *//' -e 's/^#$//'
+    sed -n '23,34p' "$0" | sed -e 's/^#  *//' -e 's/^#$//'
     ;;
   *)
     die "unknown command '$action' (try: $0 --help)"

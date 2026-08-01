@@ -94,13 +94,51 @@ The ZIP ships a loader script, `nethunter-wifi.sh`, plus a flattened `modules.de
 ./nethunter-wifi.sh load            # default: ath9k_htc (AR9271)
 ./nethunter-wifi.sh load mt76x2u    # or any driver in the pack
 ./nethunter-wifi.sh list            # every driver available
-./nethunter-wifi.sh status          # what is resident, plus PHY interfaces
+./nethunter-wifi.sh status          # what is resident, plus PHY and regdomain
+./nethunter-wifi.sh monitor "" 6    # monitor mode on channel 6
+./nethunter-wifi.sh managed         # back out of monitor mode
 ./nethunter-wifi.sh restore         # unload and put the internal Wi-Fi back
 ```
 
 `load` resolves the dependency chain from `modules.dep`, unloads the platform Wi-Fi stack when the requested driver needs `mac80211`, and points the firmware loader at whichever directory holds the Nethunter firmware blobs. Extract the firmware ZIP first, or `ath9k_htc` will bind to the adapter and then fail to fetch `ath9k_htc/htc_9271-1.4.0.fw`.
 
+`restore` reloads the platform modules cleanly, but Android's `WifiService` generally stays latched in a failed state afterwards — in testing the internal Wi-Fi did **not** come back without a reboot. Treat a reboot as the normal way to end a session with an external adapter.
+
+#### Verified hardware
+
+Atheros **AR9271** (`040d:3801`, "VIA USB2.0 WLAN"), on a OnePlus 13 running the 6.6.118 A16 build, over USB OTG:
+
+```
+usb 1-1: ath9k_htc: Firmware ath9k_htc/htc_9271-1.4.0.fw requested
+usb 1-1: ath9k_htc: Transferred FW: ath9k_htc/htc_9271-1.4.0.fw, size: 51008
+ath9k_htc 1-1:1.0: ath9k_htc: HTC initialized with 33 credits
+ath9k_htc 1-1:1.0: ath9k_htc: FW Version: 1.4
+usbcore: registered new interface driver ath9k_htc
+```
+
+`phy0` registered, `wlan0` created, and `iw phy` reports IBSS / managed / **AP** / AP-VLAN / **monitor** / P2P-client / P2P-GO. Monitor mode confirmed end to end via `./nethunter-wifi.sh monitor "" 6`: the interface came up as `link/ieee802.11/radiotap` on 2437 MHz at 20 dBm, and `tcpdump -i wlan0` captured live 802.11 control and data frames (514 frames received by the filter in 6 seconds, 0 dropped by the kernel). No unknown-symbol or version-disagreement errors anywhere in the chain.
+
 To load at every boot (KernelSU/Magisk), `./nethunter-wifi.sh install` copies the pack to `/data/adb/nethunter-wifi` and adds a `service.d` hook. This costs the internal Wi-Fi on **every** boot; undo it with `./nethunter-wifi.sh uninstall`.
+
+#### Regulatory database
+
+`cfg80211` looks for `regulatory.db` and Android does not ship one, so the log shows:
+
+```
+cfg80211: failed to load regulatory.db
+```
+
+The radio then falls back to the world regulatory domain (`country 00`). Verified consequences on an AR9271: 20 dBm cap on every channel, channels 12–14 flagged `no IR` (no initiating radiation — injection and beaconing are blocked there), 5 GHz entirely `PASSIVE-SCAN`, and `iw reg set US` accepted but silently ignored. Channels 1–11 are fully usable, including monitor mode and injection.
+
+To lift it, install `regulatory.db` and `regulatory.db.p7s` from [wireless-regdb](https://git.kernel.org/pub/scm/linux/kernel/git/sforshee/wireless-regdb.git) into a directory `ueventd` searches. Setting `/sys/module/firmware_class/parameters/path` is **not** sufficient — the kernel's direct load from `/data` fails with `-2` under SELinux (`shell_data_file` is not readable by the firmware loader) and only succeeds because ueventd's usermode helper then finds the blob on its own search path. That list is fixed in `/system/etc/ueventd.rc`:
+
+```
+/etc/firmware/  /odm/firmware/  /data/vendor/firmware/update/  /vendor/firmware/
+/firmware/image/  /vendor/firmware_mnt/image/qca6490/  /data/oplus/fw_update/
+/mnt/vendor/persist/copy/  /mnt/vendor/persist/  /odm/etc/wifi/  /vendor/firmware_mnt/image/
+```
+
+A KernelSU/Magisk module that overlays `system/etc/firmware/` is the practical route, which is also how the Nethunter firmware ZIP delivers the ath9k blobs.
 
 #### Why these drivers are not built into the Image
 

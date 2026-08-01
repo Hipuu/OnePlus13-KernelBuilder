@@ -146,6 +146,26 @@ In practice, use the bundled loader instead of doing that by hand:
 ./nethunter-wifi.sh restore
 ```
 
+### Testing over wireless ADB
+
+Loading any `mac80211` driver displaces the internal Wi-Fi — including the link carrying an `adb connect` session. Test scripts must therefore be self-contained and detached, and must restore the stack themselves:
+
+```bash
+adb -s <ip>:5555 shell 'su -c "setsid /data/local/tmp/test.sh"'
+```
+
+Three things that cost time here:
+
+- `setsid`, not `nohup`. `nohup` tries to create `nohup.out` in the cwd, which is `/` and read-only, so it exits before running anything. Redirect inside the script with `exec >"$LOG" 2>&1` instead.
+- Set `persist.adb.tcp.port 5555` before starting, so the daemon still listens on TCP after the reboot that a failed restore forces.
+- **The device usually returns on a different IP.** Each restore/reboot cycle took a new DHCP lease in testing (`.2` → `.22` → `.24` → `.26`), so poll a port sweep rather than reconnecting to the old address:
+
+```bash
+for n in $(seq 2 60); do timeout 1 bash -c "echo > /dev/tcp/192.168.1.$n/5555" 2>/dev/null && echo "$n"; done
+```
+
+Note that `adb connect` to a dead address blocks ~20s on TCP timeout, so probe the port first — a bare reconnect loop will exceed the tool timeout long before the device is back.
+
 ### Checking the packaging step
 
 The `Create Kernel Modules ZIP` step asserts that `modules.dep` has exactly one line per packaged module and fails the build otherwise. Confirm in the log:
