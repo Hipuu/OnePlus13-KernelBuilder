@@ -208,6 +208,60 @@ else
 fi
 
 echo
+echo "== Module loader script =="
+LOADER=.github/actions/build-kernel/files/nethunter-wifi.sh
+if [ -f "$LOADER" ]; then
+    pass "$LOADER present"
+
+    # Android's shell is mksh/toybox, not bash: the script must be POSIX sh.
+    if command -v dash >/dev/null 2>&1; then
+        dash -n "$LOADER" && pass "POSIX sh syntax (dash -n)" \
+                          || fail "POSIX sh syntax (dash -n)"
+    elif sh -n "$LOADER" 2>/dev/null; then
+        pass "sh -n (dash unavailable; weaker check)"
+    else
+        fail "sh -n"
+    fi
+
+    # toybox ships no awk, and bash-only syntax will not run on device.
+    # \blocal\b would match the "local" in /data/local/tmp, so require the
+    # keyword at the start of a statement instead.
+    BAD=$(grep -nE '\[\[|(^|[;&|]|then |do |else )[[:space:]]*local[[:space:]]|(^|[^_.[:alnum:]])awk[[:space:]]|\bmapfile\b|<<<|\bdeclare\b' "$LOADER" \
+          | grep -viE '^[0-9]+:[[:space:]]*#' || true)
+    if [ -n "$BAD" ]; then
+        printf '%s\n' "$BAD" | sed 's/^/    /'
+        fail "loader uses bashisms or awk (unavailable in toybox)"
+    else
+        pass "no bashisms or awk outside comments"
+    fi
+
+    # A CRLF script does not execute on Android: the kernel reads the shebang
+    # as "/system/bin/sh\r" and fails with "No such file or directory".
+    if grep -qU $'\r' "$LOADER" 2>/dev/null; then
+        fail "loader has CRLF line endings (will not execute on device)"
+    else
+        pass "LF line endings"
+    fi
+
+    grep -q '^#!/system/bin/sh' "$LOADER" \
+        && pass "Android shebang" \
+        || fail "loader must start with #!/system/bin/sh"
+
+    # The packaging step copies it from $GITHUB_ACTION_PATH/files/.
+    grep -q 'files/nethunter-wifi.sh' .github/actions/build-kernel/action.yml \
+        && pass "packaging step references the loader" \
+        || fail "packaging step does not reference the loader"
+
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        git ls-files --error-unmatch "$LOADER" >/dev/null 2>&1 \
+            && pass "tracked: $LOADER" \
+            || fail "untracked: $LOADER (a fresh checkout would not have it)"
+    fi
+else
+    fail "$LOADER missing"
+fi
+
+echo
 if [ "$FAILED" -eq 0 ]; then
     echo "All validation checks passed."
 else

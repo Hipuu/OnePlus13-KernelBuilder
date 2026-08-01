@@ -2609,8 +2609,56 @@ runs:
         fi
         find "$STAGE" -type f -name '*.ko' -printf '  %f (%s bytes)\n' | sort
 
+        # Ship a flattened modules.dep next to the .ko files. The install-tree
+        # copy uses paths ("kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/
+        # rfkill.ko"), but the ZIP is flat, so rewrite every entry to bare
+        # module names and keep only modules actually in the pack. This is what
+        # nethunter-wifi.sh walks to insmod a driver's dependencies in order.
+        awk '
+          {
+            key = $1; sub(/:$/, "", key)
+            gsub(/^.*\//, "", key); sub(/\.ko$/, "", key)
+            line = key ":"
+            for (i = 2; i <= NF; i++) {
+              d = $i
+              gsub(/^.*\//, "", d); sub(/\.ko$/, "", d)
+              line = line " " d
+            }
+            print line
+          }' "$DEP_FILE" > "$STAGE/modules.dep.all"
+
+        awk 'NR == FNR { have[$1] = 1; next }
+             {
+               key = $1; sub(/:$/, "", key)
+               if (!(key in have)) next
+               line = key ":"
+               for (i = 2; i <= NF; i++) if ($i in have) line = line " " $i
+               print line
+             }' \
+          <(cd "$STAGE" && find . -name '*.ko' -printf '%f\n' | sed 's/\.ko$//') \
+          "$STAGE/modules.dep.all" > "$STAGE/modules.dep"
+        rm -f "$STAGE/modules.dep.all"
+
+        DEP_LINES=$(wc -l < "$STAGE/modules.dep")
+        echo "modules.dep entries: $DEP_LINES"
+        if [ "$DEP_LINES" -ne "$MODULE_COUNT" ]; then
+          echo "::error::modules.dep has $DEP_LINES entries for $MODULE_COUNT modules"
+          exit 1
+        fi
+
+        # One-command loader. ath9k_htc and friends cannot be built into the
+        # Image -- Kconfig would force CFG80211=y with them, which permanently
+        # breaks the internal Wi-Fi (see the script's header comment) -- so ship
+        # a script that does the unload/insmod dance instead.
+        LOADER="$GITHUB_ACTION_PATH/files/nethunter-wifi.sh"
+        if [ ! -f "$LOADER" ]; then
+          echo "::error::loader script missing at $LOADER"
+          exit 1
+        fi
+        install -m 755 "$LOADER" "$STAGE/nethunter-wifi.sh"
+
         MODULES_ZIP_NAME="kernel_modules_${ZIP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}.zip"
-        ( cd "$STAGE" && zip -q -j -9 "$MODULES_ZIP_NAME" ./*.ko )
+        ( cd "$STAGE" && zip -q -j -9 "$MODULES_ZIP_NAME" ./*.ko modules.dep nethunter-wifi.sh )
         mv "$STAGE/$MODULES_ZIP_NAME" "$ARTIFACTS_FOLDER/"
         rm -rf "$STAGE"
 

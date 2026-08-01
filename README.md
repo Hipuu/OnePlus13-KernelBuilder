@@ -16,7 +16,7 @@ The OnePlus 13 (SM8750 / "sun") kernel is built with WildKernels' manifest fork,
 - **KernelSU variants**: KernelSU-Next (`KSUN`) and original KernelSU (`KSU`)
 - **SUSFS**: version auto-detected from the SUSFS branch (currently `v2.2.0` on `gki-android15-6.6`), with the upstream KSU-side patch/rej-fix logic
 - **Nethunter support**: Bluetooth adapters (HCIBTUSB variants, BCM203X, BPA10X, BFUSB), SDR (AirSpy, HackRF), full CAN stack (VCAN, SLCAN, C_CAN, CC770, M_CAN, HI311X, MCP251X, 8DEV/EMS/ESD/GS/KVASER/PEAK USB), serial adapters (CH341, FTDI, PL2303)
-- **Wireless modules**: External Wi-Fi/Bluetooth adapters built as loadable modules — Atheros (ath9k_htc, ath10k_usb, carl9170), Realtek (rtl8187, rtl8xxxu, rtw88 from lwfinger/rtw88), Ralink (rt2500usb, rt73usb, rt2800usb), Zydas (zd1211rw), Intersil (p54usb), MediaTek (mt7601u, mt76x0u, mt76x2u, mt7921u), and mac80211_hwsim. Ships as `kernel_modules_<MODEL>_<OS_VERSION>_<KERNEL_VER>.zip`.
+- **Wireless modules**: External Wi-Fi/Bluetooth adapters built as loadable modules — Atheros (ath9k_htc, ath10k_usb, carl9170), Realtek (rtl8187, rtl8xxxu, rtw88 from lwfinger/rtw88), Ralink (rt2500usb, rt73usb, rt2800usb), Zydas (zd1211rw), Intersil (p54usb), MediaTek (mt7601u, mt76x0u, mt76x2u, mt7921u), and mac80211_hwsim. Ships as `kernel_modules_<MODEL>_<OS_VERSION>_<KERNEL_VER>.zip` with a `nethunter-wifi.sh` loader that resolves dependency order and swaps the platform Wi-Fi stack in one command.
 - **Nethunter Wireless Firmware**: re-published unmodified from [nullptr-t-oss/Nethunter-Wireless-Firmware](https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware)
 - **HMBIRD (Fengchi) scheduler** patches for the OnePlus 13 (SM8750)
 - **Optimization patches**: memory, VFS, scheduler and network tweaks
@@ -88,7 +88,27 @@ The `kernel_version` input supports `all`, which builds every variant in paralle
 
 Kernel modules are built with `CONFIG_MODVERSIONS=y`, so a module ZIP is valid **only** for the exact matching kernel build. Modules from one release will not load on another, even if both use the same base kernel version.
 
-OnePlus's stock mac80211 stack lacks symbols these drivers need (`__ieee80211_create_tpt_led_trigger`, etc.). Both `cfg80211.ko` **and** `mac80211.ko` must come from the ZIP: the bundled `mac80211` refuses to load against the platform `cfg80211` (`mac80211: disagrees about version of symbol wiphy_new_nm`), because `/vendor/lib/modules/cfg80211.ko` is built from OnePlus's own tree and its symbol CRCs differ. Example, verified on a OnePlus 13 running the 6.6.118 A16 build:
+The ZIP ships a loader script, `nethunter-wifi.sh`, plus a flattened `modules.dep`. Extract the ZIP on the device and run it as root:
+
+```bash
+./nethunter-wifi.sh load            # default: ath9k_htc (AR9271)
+./nethunter-wifi.sh load mt76x2u    # or any driver in the pack
+./nethunter-wifi.sh list            # every driver available
+./nethunter-wifi.sh status          # what is resident, plus PHY interfaces
+./nethunter-wifi.sh restore         # unload and put the internal Wi-Fi back
+```
+
+`load` resolves the dependency chain from `modules.dep`, unloads the platform Wi-Fi stack when the requested driver needs `mac80211`, and points the firmware loader at whichever directory holds the Nethunter firmware blobs. Extract the firmware ZIP first, or `ath9k_htc` will bind to the adapter and then fail to fetch `ath9k_htc/htc_9271-1.4.0.fw`.
+
+To load at every boot (KernelSU/Magisk), `./nethunter-wifi.sh install` copies the pack to `/data/adb/nethunter-wifi` and adds a `service.d` hook. This costs the internal Wi-Fi on **every** boot; undo it with `./nethunter-wifi.sh uninstall`.
+
+#### Why these drivers are not built into the Image
+
+`ath9k_htc` — the AR9271 driver — is `depends on USB && MAC80211` in Kconfig, and Kconfig will not let a built-in driver depend on a modular provider. `CONFIG_ATH9K_HTC=y` therefore forces `CONFIG_MAC80211=y`, `CONFIG_CFG80211=y` and `CONFIG_RFKILL=y`.
+
+That is not survivable here. OnePlus builds its own `cfg80211` in a separate tree with different symbol CRCs — the bundled `mac80211` already refuses to load against the platform one (`mac80211: disagrees about version of symbol wiphy_new_nm`). With `cfg80211` compiled into the Image, `/vendor/lib/modules/cfg80211.ko` can no longer load at all, so `qca_cld3_peach_v2` fails its CRC check on every boot and the internal Wi-Fi is permanently dead. Keeping the drivers modular confines that cost to the moment you actually run the loader, and a reboot undoes it.
+
+The same applies to the manual procedure: both `cfg80211.ko` **and** `mac80211.ko` must come from the ZIP. Verified on a OnePlus 13 running the 6.6.118 A16 build:
 
 ```bash
 # Turn Wi-Fi off in Settings first, then unload the stock stack

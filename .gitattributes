@@ -1,0 +1,10 @@
+# Shell scripts that run on the Android device must keep LF endings. A CRLF
+# script fails to execute: the kernel reads the shebang as "/system/bin/sh\r"
+# and reports "No such file or directory".
+*.sh text eol=lf
+
+# The build pipeline is consumed by Linux runners only.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
