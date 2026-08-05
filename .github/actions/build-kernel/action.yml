@@ -1768,6 +1768,16 @@ runs:
         cd "$COMMON_KERNEL_FOLDER"
 
         # Bluetooth, SDR (AirSpy/HackRF), CAN bus and USB-serial adapters.
+        #
+        # CONFIG_CAN, CONFIG_CAN_DEV, CONFIG_CAN_VCAN and the USB-serial core
+        # are =m, not =y. GKI's module_outs for //common:kernel_aarch64 declares
+        # net/can/{can,can-bcm,can-gw,can-raw}.ko,
+        # drivers/net/can/{dev/can-dev,vcan}.ko and
+        # drivers/usb/serial/{usbserial,ftdi_sio}.ko, and kernel_build fails if a
+        # declared module is not produced. Building them in silently removed
+        # them from the modules ZIP too, even though the packaging step seeds
+        # from kernel/net/can and kernel/drivers/net/can and the README
+        # documents slcan as loadable.
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_BT_HCIBTUSB=y
         CONFIG_BT_HCIBTUSB_BCM=y
@@ -1778,41 +1788,40 @@ runs:
         CONFIG_BT_HCIBFUSB=y
         CONFIG_USB_AIRSPY=y
         CONFIG_USB_HACKRF=y
-        CONFIG_CAN=y
-        CONFIG_CAN_DEV=y
+        CONFIG_CAN=m
+        CONFIG_CAN_DEV=m
         CONFIG_CAN_CALC_BITTIMING=y
         CONFIG_CAN_LEDS=y
-        CONFIG_CAN_VCAN=y
-        CONFIG_CAN_GRCAN=y
-        CONFIG_CAN_XILINXCAN=y
-        CONFIG_CAN_C_CAN=y
-        CONFIG_CAN_C_CAN_PLATFORM=y
-        CONFIG_CAN_C_CAN_PCI=y
-        CONFIG_CAN_CC770=y
-        CONFIG_CAN_CC770_ISA=y
-        CONFIG_CAN_CC770_PLATFORM=y
-        CONFIG_CAN_M_CAN=y
-        CONFIG_CAN_M_CAN_PCI=y
-        CONFIG_CAN_M_CAN_PLATFORM=y
-        CONFIG_CAN_M_CAN_TCAN4X5X=y
-        CONFIG_CAN_HI311X=y
-        CONFIG_CAN_MCP251X=y
-        CONFIG_CAN_8DEV_USB=y
-        CONFIG_CAN_EMS_USB=y
-        CONFIG_CAN_ESD_USB2=y
-        CONFIG_CAN_GS_USB=y
-        CONFIG_CAN_KVASER_USB=y
-        CONFIG_CAN_PEAK_USB=y
+        CONFIG_CAN_VCAN=m
+        CONFIG_CAN_GRCAN=m
+        CONFIG_CAN_XILINXCAN=m
+        CONFIG_CAN_C_CAN=m
+        CONFIG_CAN_C_CAN_PLATFORM=m
+        CONFIG_CAN_C_CAN_PCI=m
+        CONFIG_CAN_CC770=m
+        CONFIG_CAN_CC770_ISA=m
+        CONFIG_CAN_CC770_PLATFORM=m
+        CONFIG_CAN_M_CAN=m
+        CONFIG_CAN_M_CAN_PCI=m
+        CONFIG_CAN_M_CAN_PLATFORM=m
+        CONFIG_CAN_M_CAN_TCAN4X5X=m
+        CONFIG_CAN_HI311X=m
+        CONFIG_CAN_MCP251X=m
+        CONFIG_CAN_8DEV_USB=m
+        CONFIG_CAN_EMS_USB=m
+        CONFIG_CAN_ESD_USB2=m
+        CONFIG_CAN_GS_USB=m
+        CONFIG_CAN_KVASER_USB=m
+        CONFIG_CAN_PEAK_USB=m
         CONFIG_NETLINK_DIAG=y
         CONFIG_VSOCKETS=y
         CONFIG_NET_SCHED=y
         CONFIG_NET_EMATCH_CANID=y
-        CONFIG_USB_SERIAL=y
-        CONFIG_USB_SERIAL_CONSOLE=y
+        CONFIG_USB_SERIAL=m
         CONFIG_USB_SERIAL_GENERIC=y
-        CONFIG_USB_SERIAL_CH341=y
-        CONFIG_USB_SERIAL_FTDI_SIO=y
-        CONFIG_USB_SERIAL_PL2303=y
+        CONFIG_USB_SERIAL_CH341=m
+        CONFIG_USB_SERIAL_FTDI_SIO=m
+        CONFIG_USB_SERIAL_PL2303=m
         EOF
 
         echo "✅ Nethunter inline configs added"
