@@ -53,6 +53,16 @@ on:
         required: true
         type: boolean
         default: true
+      ddk:
+        description: 'Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (6.6.118 A16 only; ignored elsewhere)'
+        required: false
+        type: boolean
+        default: true
+      ddk_injection:
+        description: 'Patch qcacld monitor mode for frame injection (experimental, unverified on hardware)'
+        required: false
+        type: boolean
+        default: true
       optimize_level:
         description: Compiler optimization
         required: true
@@ -224,6 +234,8 @@ jobs:
           KERNEL_UNAME: ${{ inputs.kernel_uname }}
           NETHUNTER: ${{ inputs.nethunter }}
           WIRELESS_MODULES: ${{ inputs.wireless_modules }}
+          DDK: ${{ inputs.ddk }}
+          DDK_INJECTION: ${{ inputs.ddk_injection }}
         run: |
           set -euo pipefail
           if [ "$COMPILER_MODE" = manifest ]; then
@@ -236,15 +248,34 @@ jobs:
           MODEL=$(jq -r '.model' "${{ matrix.config }}")
           echo "MODEL=$MODEL" >> "$GITHUB_ENV"
 
+          # The DDK inputs can only turn a variant's DDK build off, never on:
+          # only manifests carrying the Kleaf/Bazel projects can build it, and
+          # only OP13-6.6.118 does today. Forcing it on elsewhere would fail
+          # during Bazel's load phase with a far less obvious error.
+          config_ddk=$(jq -r '.ddk // false' "${{ matrix.config }}")
+          if [ "$config_ddk" != "true" ]; then
+            ddk=false
+            ddk_injection=false
+          else
+            ddk="$DDK"
+            if [ "$ddk" = "true" ]; then
+              ddk_injection="$DDK_INJECTION"
+            else
+              ddk_injection=false
+            fi
+          fi
+
           config_json=$(jq -c \
             --argjson susfs "$USE_SUSFS" \
             --argjson opt "$USE_OPT_PATCHES" \
             --argjson nethunter "$NETHUNTER" \
             --argjson wireless_modules "$WIRELESS_MODULES" \
+            --argjson ddk "$ddk" \
+            --argjson ddk_injection "$ddk_injection" \
             --arg lto "$LTO_MODE" \
             --arg zyc "$zyc_compiler" \
             --arg uname "$KERNEL_UNAME" \
-            '.susfs = $susfs | .opt = $opt | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
+            '.susfs = $susfs | .opt = $opt | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .ddk = $ddk | .ddk_injection = $ddk_injection | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
             "${{ matrix.config }}")
           echo "config_json=$config_json" >> "$GITHUB_OUTPUT"
           jq . <<< "$config_json"
