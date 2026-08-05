@@ -1,0 +1,14 @@
+# Exposes the build config / defconfig fragments used by the DDK build to
+# Bazel. Copied into kernel_platform/ddk_ext/ by the "Prepare Bazel/DDK build"
+# step, which is why the labels are //ddk_ext:... and not tied to this repo's
+# layout.
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "gki_build_config.fragment",
+])
+
+filegroup(
+    name = "gki_build_config_fragment",
+    srcs = ["gki_build_config.fragment"],
+)

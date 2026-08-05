@@ -1,0 +1,16 @@
+# Build config fragment appended to build.config.gki.aarch64 via
+# --gki_build_config_fragment. kernel_build_config cat's its srcs in order and
+# this fragment is last (common_kernels.bzl), and build.config.gki.aarch64
+# sources GKI_BUILD_CONFIG_FRAGMENT after build.config.gki has already run, so
+# assignments here win.
+#
+# build.config.gki sets POST_DEFCONFIG_CMDS="check_defconfig", and
+# check_defconfig (build/kernel/_setup_env.sh) runs `savedefconfig` and diffs
+# the result against the whole arch/arm64/configs/gki_defconfig, failing the
+# build on any mismatch. This pipeline appends KSU, SUSFS, BBR, NTSync,
+# NetHunter and debloat options to that file, so the diff can never be empty.
+#
+# Clearing it keeps the appends authoritative. Individual options are still
+# verified: options that must take effect are asserted after the build by the
+# "Verify Bazel defconfig" step, which greps the resolved .config.
+POST_DEFCONFIG_CMDS=""

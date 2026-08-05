@@ -2070,8 +2070,258 @@ runs:
           patch -p1 < "$KERNEL_PATCHES_FOLDER/common/vendor_modules/0001-Support-conditional-vendor-modules-blacklisting-6.1-and-above.patch"
         fi
 
+    - name: Prepare Bazel/DDK build
+      id: prepare_ddk
+      if: ${{ env.OP_DDK == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Prepare Bazel/DDK build"
+
+        # tools/bazel is a symlink to ../build/kernel/kleaf/bazel.sh, which execs
+        # prebuilts/build-tools/path/linux-x86/python3. Both come from the
+        # manifest; fail loudly rather than 20 minutes into a build.
+        BAZEL_LAUNCHER="$KERNEL_PLATFORM_FOLDER/tools/bazel"
+        BAZEL_BIN="$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel"
+        HERMETIC_PYTHON="$KERNEL_PLATFORM_FOLDER/prebuilts/build-tools/path/linux-x86/python3"
+
+        MISSING=0
+        for f in "$BAZEL_LAUNCHER" "$BAZEL_BIN" "$HERMETIC_PYTHON" \
+                 "$KERNEL_PLATFORM_FOLDER/MODULE.bazel" \
+                 "$MSM_KERNEL_FOLDER/BUILD.bazel" \
+                 "$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0/BUILD.bazel"; do
+          if [ ! -e "$f" ]; then
+            echo "::error::Missing Bazel prerequisite: $f"
+            MISSING=1
+          fi
+        done
+
+        # MODULE.bazel names each of these with local_path_override /
+        # new_kleaf_local_repository, so a missing one is a load-phase failure
+        # with a far less obvious message.
+        for d in external/bazel-skylib external/bazelbuild-apple_support \
+                 external/bazelbuild-bazel-central-registry \
+                 external/bazelbuild-platforms external/bazelbuild-rules_cc \
+                 external/bazelbuild-rules_java external/bazelbuild-rules_license \
+                 external/bazelbuild-rules_pkg external/bazelbuild-rules_python \
+                 external/dtc external/libcap external/libcap-ng external/lz4 \
+                 external/pigz external/python/absl-py external/toybox \
+                 external/zlib external/zopfli prebuilts/ndk-r26 \
+                 build/bazel_common_rules prebuilts/build-tools; do
+          if [ ! -d "$KERNEL_PLATFORM_FOLDER/$d" ]; then
+            echo "::error::Missing Bazel workspace dependency: kernel_platform/$d"
+            MISSING=1
+          fi
+        done
+        [ "$MISSING" -eq 0 ] || exit 1
+
+        # The qcacld api/cmn symlinks are intra-repo and survive the tarball
+        # sync, but a broken one silently drops every fw-api header.
+        QCACLD="$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0"
+        for l in api cmn; do
+          if [ ! -d "$QCACLD/$l" ]; then
+            echo "::error::qcacld-3.0/$l does not resolve (expected symlink to ../$( [ "$l" = api ] && echo fw-api || echo qca-wifi-host-cmn ))"
+            ls -la "$QCACLD/$l" || true
+            exit 1
+          fi
+        done
+
+        install -d "$KERNEL_PLATFORM_FOLDER/ddk_ext"
+        install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/BUILD.bazel" "$KERNEL_PLATFORM_FOLDER/ddk_ext/BUILD.bazel"
+        install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/gki_build_config.fragment" "$KERNEL_PLATFORM_FOLDER/ddk_ext/gki_build_config.fragment"
+        install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/user.bazelrc" "$KERNEL_PLATFORM_FOLDER/user.bazelrc"
+
+        # Kleaf's common.bazelrc try-imports %workspace%/user.bazelrc last, so
+        # append rather than replace to keep the flags above.
+        {
+          echo ""
+          echo "# --- appended by Prepare Bazel/DDK build ---"
+          echo "build --jobs=$(nproc --all)"
+          case "${{ env.OP_LTO }}" in
+            none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
+            *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
+          esac
+        } >> "$KERNEL_PLATFORM_FOLDER/user.bazelrc"
+
+        echo "Effective user.bazelrc:"
+        cat "$KERNEL_PLATFORM_FOLDER/user.bazelrc"
+
+        KERNEL_TARGET="//msm-kernel:${OP_DDK_TARGET}"
+        MODULE_TARGET="//vendor/qcom/opensource/wlan/qcacld-3.0:${OP_DDK_TARGET}_qca_cld_${OP_DDK_CHIPSET}"
+        echo "DDK_KERNEL_TARGET=$KERNEL_TARGET" >> "$GITHUB_ENV"
+        echo "DDK_MODULE_TARGET=$MODULE_TARGET" >> "$GITHUB_ENV"
+        echo "Kernel target : $KERNEL_TARGET"
+        echo "Module target : $MODULE_TARGET"
+        echo "::endgroup::"
+
+    - name: Build Kernel and DDK modules with Bazel
+      id: build_ddk_step
+      if: ${{ env.OP_DDK == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Build kernel + qcacld-3.0 with Bazel"
+
+        cd "$KERNEL_PLATFORM_FOLDER"
+
+        export KBUILD_BUILD_USER="${BUILD_USER:-kernel}"
+        export KBUILD_BUILD_HOST="${BUILD_HOST:-kleaf}"
+        if [ -n "${{ inputs.build_timestamp }}" ]; then
+          export KBUILD_BUILD_TIMESTAMP="${{ inputs.build_timestamp }}"
+        else
+          export KBUILD_BUILD_TIMESTAMP="$(date -u)"
+        fi
+        echo "EFFECTIVE_BUILD_TIMESTAMP=$KBUILD_BUILD_TIMESTAMP" >> "$GITHUB_ENV"
+
+        BUILD_START=$(date +%s)
+        set -o pipefail
+
+        # The module's kernel_build is //msm-kernel:<target>, whose base_kernel
+        # is //common:kernel_aarch64, so one invocation builds GKI, the vendor
+        # kernel and the module against a single consistent Module.symvers.
+        ./tools/bazel build \
+          --config=fast \
+          "$DDK_KERNEL_TARGET" \
+          "$DDK_MODULE_TARGET" \
+          2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"
+
+        BUILD_END=$(date +%s)
+        echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
+        echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
+        echo "BUILD_TIME=$((BUILD_END - BUILD_START))" >> "$GITHUB_ENV"
+        echo "::endgroup::"
+
+    - name: Stage Bazel outputs
+      if: ${{ env.OP_DDK == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Stage Bazel outputs"
+
+        cd "$KERNEL_PLATFORM_FOLDER"
+
+        # Downstream steps (Collect Build Stats, Create Kernel ZIP, Create
+        # Kernel Modules ZIP) read from out/ and out/install, so mirror the
+        # kbuild layout instead of teaching each of them about bazel-bin.
+        OUT="$COMMON_KERNEL_FOLDER/out"
+        install -d "$OUT/arch/arm64/boot"
+
+        IMAGE="$(find -L bazel-bin -type f -name Image -path '*kernel_aarch64*' -print -quit 2>/dev/null || true)"
+        if [ -z "$IMAGE" ]; then
+          IMAGE="$(find -L bazel-bin -type f -name Image -print -quit 2>/dev/null || true)"
+        fi
+        if [ -z "$IMAGE" ]; then
+          echo "::error::No kernel Image found under bazel-bin"
+          find -L bazel-bin -maxdepth 4 -name 'Image*' 2>/dev/null | head -20 || true
+          exit 1
+        fi
+        echo "Image: $IMAGE"
+        install -m 0644 "$IMAGE" "$OUT/arch/arm64/boot/Image"
+
+        # Create Kernel Modules ZIP walks out/install/lib/modules/<release>/ and
+        # resolves the transitive closure over modules.dep, so reproduce a real
+        # modules_install tree rather than a flat directory. Kleaf's
+        # <target>_modules_install runfiles already have that shape; prefer it
+        # and fall back to staging the raw .ko files plus depmod.
+        MODINSTALL="$(find -L bazel-bin -type d -name modules -path '*modules_install*' -print -quit 2>/dev/null || true)"
+        install -d "$OUT/install/lib/modules"
+        if [ -n "$MODINSTALL" ] && [ -n "$(find -L "$MODINSTALL" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
+          echo "Using Kleaf modules_install tree: $MODINSTALL"
+          rsync -aL --no-o --no-g "$MODINSTALL/" "$OUT/install/lib/modules/"
+          chmod -R u+w "$OUT/install/lib/modules"
+        else
+          echo "No modules_install tree found; staging .ko files and running depmod"
+          KREL="$(cat "$(find -L bazel-bin -type f -name 'kernel.release' -print -quit 2>/dev/null || echo /dev/null)" 2>/dev/null || true)"
+          if [ -z "$KREL" ]; then
+            KREL="${KERNEL_FULL_VER}${CUSTOM_LOCALVERSION:-}"
+            echo "kernel.release not found; using $KREL"
+          fi
+          install -d "$OUT/install/lib/modules/$KREL/kernel"
+          while IFS= read -r ko; do
+            install -m 0644 "$ko" "$OUT/install/lib/modules/$KREL/kernel/$(basename "$ko")"
+          done < <(find -L bazel-bin -type f -name '*.ko' 2>/dev/null | sort -u)
+          depmod -b "$OUT/install" "$KREL" || true
+        fi
+
+        # The DDK module is built by its own ddk_module target and is not part of
+        # the kernel's modules_install tree, so place it explicitly.
+        EXPECTED_KO="qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_').ko"
+        DDK_KO="$(find -L bazel-bin -type f -name "$EXPECTED_KO" -print -quit 2>/dev/null || true)"
+        if [ -z "$DDK_KO" ]; then
+          echo "::error::DDK module $EXPECTED_KO was not produced"
+          find -L bazel-bin -type f -name '*.ko' 2>/dev/null | head -40 || true
+          exit 1
+        fi
+        UNAME_DIR="$(find "$OUT/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+        install -d "$UNAME_DIR/kernel/drivers/net/wireless"
+        install -m 0644 "$DDK_KO" "$UNAME_DIR/kernel/drivers/net/wireless/$EXPECTED_KO"
+        echo "✅ DDK module: $EXPECTED_KO ($(stat -c%s "$DDK_KO") bytes)"
+
+        # Re-run depmod so the DDK module appears in modules.dep; the ZIP step
+        # resolves its dependency closure from that file.
+        depmod -b "$OUT/install" "$(basename "$UNAME_DIR")" || true
+
+        MODCOUNT="$(find "$OUT/install/lib/modules" -type f -name '*.ko' | wc -l)"
+        echo "Staged $MODCOUNT module(s) under $(basename "$UNAME_DIR")"
+
+        for f in vmlinux Module.symvers System.map; do
+          found="$(find -L bazel-bin -type f -name "$f" -print -quit 2>/dev/null || true)"
+          [ -n "$found" ] && install -m 0644 "$found" "$OUT/$f" || true
+        done
+        echo "::endgroup::"
+
+    - name: Verify Bazel defconfig
+      if: ${{ env.OP_DDK == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Verify Bazel defconfig"
+
+        # gki_build_config.fragment clears POST_DEFCONFIG_CMDS, which disables
+        # Kleaf's whole-file check_defconfig. Assert the options this pipeline
+        # actually depends on made it into the resolved .config instead.
+        cd "$KERNEL_PLATFORM_FOLDER"
+        DOTCONFIG="$(find -L bazel-bin -type f -name '.config' -path '*kernel_aarch64*' -print -quit 2>/dev/null || true)"
+        if [ -z "$DOTCONFIG" ]; then
+          DOTCONFIG="$(find -L bazel-bin -type f -name '.config' -print -quit 2>/dev/null || true)"
+        fi
+        if [ -z "$DOTCONFIG" ]; then
+          echo "::warning::No resolved .config found under bazel-bin; skipping verification"
+          echo "::endgroup::"
+          exit 0
+        fi
+        echo "Using $DOTCONFIG"
+
+        FAILED=0
+        assert_config() {
+          if ! grep -qx "$1" "$DOTCONFIG"; then
+            echo "::error::Expected '$1' in resolved .config"
+            grep -E "^(# )?${1%%=*}[= ]" "$DOTCONFIG" || echo "  (option absent entirely)"
+            FAILED=1
+          fi
+        }
+
+        [ "${{ inputs.ksu_type }}" = "none" ] || assert_config "CONFIG_KSU=y"
+        if [ "$OP_SUSFS" = "true" ]; then
+          assert_config "CONFIG_KSU_SUSFS=y"
+        fi
+        if [ "$OP_NTSYNC" = "true" ]; then
+          assert_config "CONFIG_NTSYNC=y"
+        fi
+        if [ "$OP_BBR3" = "true" ] || [ "$OP_BBR" = "true" ]; then
+          assert_config "CONFIG_TCP_CONG_BBR=y"
+        fi
+        if [ "$OP_WIRELESS_MODULES" = "true" ]; then
+          assert_config "CONFIG_CFG80211=m"
+          assert_config "CONFIG_MAC80211=m"
+        fi
+        [ "$FAILED" -eq 0 ] || exit 1
+        echo "✅ defconfig assertions passed"
+        echo "::endgroup::"
+
     - name: Build Kernel
       id: build_kernel_step
+      if: ${{ env.OP_DDK != 'true' }}
       shell: bash
       env:
         PYTHONWARNINGS: "ignore:invalid escape sequence"

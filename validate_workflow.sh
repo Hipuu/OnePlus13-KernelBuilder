@@ -155,9 +155,15 @@ done
 echo
 echo "== No boot image construction =="
 # Permit kernel_modules in paths; ban boot/vendor_boot/vendor_dlkm/system_dlkm.
+#
+# Kleaf's define_msm_la instantiates avb_sign_boot_image unconditionally, so
+# //tools/mkbootimg must resolve at analysis time even when only the kernel and
+# DDK module targets are built. Syncing the project as a manifest dependency is
+# therefore allowed; invoking mkbootimg.py to produce an image is not.
 IMG_TOKENS='\b(mkbootimg|unpack_bootimg|mkdtboimg|avbtool)\b|boot\.img|vendor_boot|vendor_dlkm|system_dlkm'
 IMG_HITS=$(grep -rniE "$IMG_TOKENS" .github configs manifests \
-           | grep -viE 'does not (build|create)|kernel_modules' || true)
+           | grep -viE 'does not (build|create)|kernel_modules' \
+           | grep -viE '^manifests/[^:]+:[0-9]+: *<project [^>]*tools/mkbootimg' || true)
 if [ -n "$IMG_HITS" ]; then
     echo "  matches found:"
     printf '%s\n' "$IMG_HITS" | sed 's/^/    /'

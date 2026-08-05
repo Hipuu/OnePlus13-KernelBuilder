@@ -1,0 +1,35 @@
+# Bazel flags for the DDK build. Copied to kernel_platform/user.bazelrc by the
+# "Prepare Bazel/DDK build" step; Kleaf's bazel.py imports user.bazelrc last, so
+# these win over the checked-in bazelrc fragments.
+
+# --- KMI enforcement ------------------------------------------------------
+# //common:kernel_aarch64 is declared with trim_nonlisted_kmi = True and
+# kmi_symbol_list_strict_mode = True (common/BUILD.bazel). KernelSU and SUSFS
+# add exported symbols and touch core structs, so a stock build of the patched
+# tree fails the ABI contract instead of warning. These three flags are what
+# turn that back into a warning; without them the build cannot complete.
+build --notrim
+build --nokmi_symbol_list_strict_mode
+build --nokmi_symbol_list_violations_check
+
+# Appending to gki_defconfig makes savedefconfig diverge from the checked-in
+# file; see files/ddk/gki_build_config.fragment.
+build --gki_build_config_fragment=//ddk_ext:gki_build_config_fragment
+
+# --- Host environment -----------------------------------------------------
+# ccache lives outside the workspace, and Kleaf sandboxes actions with a
+# scrubbed environment, so the wrapper needs these passed through explicitly.
+build --action_env=CCACHE_DIR
+build --action_env=CCACHE_BASEDIR
+build --action_env=CCACHE_MAXSIZE
+build --action_env=CCACHE_COMPRESS
+build --action_env=CCACHE_COMPRESSLEVEL
+build --action_env=CCACHE_SLOPPINESS
+
+# Kleaf writes the sandbox under the workspace by default; on the CI runner the
+# workspace is on the slower mount and /dev/shm is not large enough for a full
+# kernel build, so leave the default but keep output brief.
+build --verbose_failures
+build --noshow_progress_rate_limit
+build --color=no
+build --curses=no
