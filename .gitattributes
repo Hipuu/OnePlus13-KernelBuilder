@@ -15,3 +15,6 @@
 *.bazelrc text eol=lf
 *.bzl text eol=lf
 *.fragment text eol=lf
+
+# Patches are applied to LF kernel sources; CRLF context lines never match.
+*.patch text eol=lf
