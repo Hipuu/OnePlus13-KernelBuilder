@@ -2183,6 +2183,26 @@ runs:
           fi
         done
 
+        # msm-kernel's msm_platforms.bzl does load("//build:msm_kernel_extensions.bzl"),
+        # which is a symlink normally created by build_with_bazel.py's
+        # setup_extensions(). Create it directly: we invoke tools/bazel rather
+        # than that wrapper, and a missing load() fails at parse time.
+        #
+        # build/abl_extensions.bzl is deliberately not created. Nothing
+        # load()s it -- msm_abl.bzl only aliases //bootable/bootloader/edk2,
+        # and an alias is only resolved if built, which no target here does.
+        EXT_LINK="$KERNEL_PLATFORM_FOLDER/build/msm_kernel_extensions.bzl"
+        if [ ! -e "$EXT_LINK" ]; then
+          [ -L "$EXT_LINK" ] && rm -f "$EXT_LINK"
+          ln -s "../msm-kernel/msm_kernel_extensions.bzl" "$EXT_LINK"
+          echo "Linked build/msm_kernel_extensions.bzl -> ../msm-kernel/msm_kernel_extensions.bzl"
+        fi
+        if [ ! -f "$EXT_LINK" ]; then
+          echo "::error::$EXT_LINK does not resolve to a file"
+          ls -la "$EXT_LINK" || true
+          exit 1
+        fi
+
         # Kleaf's common.bazelrc try-imports %workspace%/user.bazelrc last, so
         # append rather than replace to keep the flags above.
         {
