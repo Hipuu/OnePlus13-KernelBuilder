@@ -2284,6 +2284,20 @@ runs:
           "$DDK_MODULE_TARGET" \
           2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"
 
+        # The vendor kernel's module_outs are part of its DefaultInfo, so
+        # cfg80211.ko and mac80211.ko should exist after the build above. Run
+        # 31037418577 produced neither, and only sun_perf_config, _env and
+        # _modules_prepare appeared in the action graph, so report what Bazel
+        # thinks it produced. This is diagnostic output, not a gate.
+        echo "::group::Bazel output inventory"
+        echo "--- cquery files for $DDK_KERNEL_TARGET ---"
+        ./tools/bazel cquery --output=files "$DDK_KERNEL_TARGET" 2>/dev/null | head -40 || true
+        echo "--- cfg80211/mac80211 anywhere under the output base ---"
+        find -L bazel-bin bazel-out -name 'cfg80211.ko' -o -name 'mac80211.ko' 2>/dev/null | head -10 || true
+        echo "--- modules_staging archives ---"
+        find -L bazel-bin bazel-out -name 'modules_staging_dir*.tar.gz' -printf '%p (%s)\n' 2>/dev/null | head -10 || true
+        echo "::endgroup::"
+
         BUILD_END=$(date +%s)
         echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
         echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
@@ -2324,37 +2338,38 @@ runs:
         # only the modules staged by hand below.
         #
         # Take it from modules_staging_dir.tar.gz, which kernel_build produces
-        # for every target and kernel_modules_install merely extracts. Earlier
-        # attempts looked for the _modules_install directory output instead;
-        # cquery --output=files does not report directory outputs, and the
-        # directory is not under bazel-bin/msm-kernel/, so both the query and
-        # the find came back empty (run 31034271333). The archive is a plain
-        # file at bazel-bin/<pkg>/<target>/modules_staging_dir.tar.gz and
-        # already contains lib/modules/<release>/ with the full layout.
+        # for every target and kernel_modules_install merely extracts. When a
+        # target has a base_kernel -- //msm-kernel:<target> does -- Kleaf
+        # repacks that archive to hold the vendor modules *and* the GKI ones
+        # (_repack_modules_staging_archive), so the vendor archive alone is the
+        # complete set. That matters here: cfg80211 and mac80211 are vendor
+        # in-tree modules and are absent from the GKI archive, which is why run
+        # 31037418577 produced a 27-module pack without them.
         install -d "$OUT/install/lib/modules"
-        STAGED=0
-        for tgz in \
-          "bazel-bin/msm-kernel/${OP_DDK_TARGET}/modules_staging_dir.tar.gz" \
-          "bazel-bin/common/kernel_aarch64/modules_staging_dir.tar.gz"; do
-          if [ -f "$tgz" ]; then
-            echo "Extracting $tgz"
-            tar xzf "$tgz" -C "$OUT/install" ./lib/modules 2>/dev/null ||
-              tar xzf "$tgz" -C "$OUT/install" lib/modules 2>/dev/null ||
-              tar xzf "$tgz" -C "$OUT/install"
-            STAGED=$((STAGED + 1))
-          else
-            echo "[INFO] absent: $tgz"
-          fi
-        done
 
-        if [ "$STAGED" -eq 0 ]; then
-          echo "Named archives absent; searching bazel-bin"
-          while IFS= read -r tgz; do
-            echo "Extracting $tgz"
-            tar xzf "$tgz" -C "$OUT/install" 2>/dev/null || true
-            STAGED=$((STAGED + 1))
-          done < <(find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' 2>/dev/null | sort -u)
+        echo "modules_staging archives under bazel-bin:"
+        find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' \
+          -printf '  %p (%s bytes)\n' 2>/dev/null | sort || true
+
+        # Prefer the vendor archive wherever it is; fall back to GKI's. Matching
+        # on the target directory rather than a fixed path, because the previous
+        # three attempts all guessed the layout wrong.
+        VENDOR_TGZ="$(find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' \
+          -path "*/${OP_DDK_TARGET}/*" -print -quit 2>/dev/null || true)"
+        if [ -z "$VENDOR_TGZ" ]; then
+          VENDOR_TGZ="$(find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' \
+            -path '*msm-kernel*' -print -quit 2>/dev/null || true)"
         fi
+        GKI_TGZ="$(find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' \
+          -path '*kernel_aarch64*' -print -quit 2>/dev/null || true)"
+
+        STAGED=0
+        for tgz in "$VENDOR_TGZ" "$GKI_TGZ"; do
+          [ -n "$tgz" ] && [ -f "$tgz" ] || continue
+          echo "Extracting $tgz"
+          tar xzf "$tgz" -C "$OUT/install" 2>/dev/null || true
+          STAGED=$((STAGED + 1))
+        done
 
         chmod -R u+w "$OUT/install/lib/modules" 2>/dev/null || true
         UNAME_DIR="$(find "$OUT/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
