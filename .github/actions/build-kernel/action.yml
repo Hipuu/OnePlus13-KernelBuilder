@@ -1999,6 +1999,26 @@ runs:
         CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
 
+        # The make path applies this with `scripts/config --set-str LOCALVERSION`
+        # in the Build Kernel step. Kleaf cannot: kernel_env hardcodes
+        # `export LOCALVERSION=""` after the build config is sourced
+        # (impl/stamp.bzl set_localversion_cmd), so an assignment in the build
+        # config fragment is overwritten. Set CONFIG_LOCALVERSION in the
+        # defconfig instead, which survives because Kleaf builds from this same
+        # gki_defconfig. Without it the DDK build reported
+        # 6.6.118-android15-8-o-4k and lost the configured uname entirely.
+        if [ "${OP_DDK:-false}" = "true" ]; then
+          DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+          # Keep the stock "-4k" page-size marker; only prepend the branding.
+          STOCK_LV="$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"$/\1/p' "$DEFCONFIG" | head -1)"
+          NEW_LV="-${OP_UNAME}${STOCK_LV}"
+          sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${NEW_LV}\"|" "$DEFCONFIG"
+          if ! grep -qx "CONFIG_LOCALVERSION=\"${NEW_LV}\"" "$DEFCONFIG"; then
+            echo "CONFIG_LOCALVERSION=\"${NEW_LV}\"" >> "$DEFCONFIG"
+          fi
+          echo "DDK localversion: '${STOCK_LV}' -> '${NEW_LV}'"
+        fi
+
     - name: Disable GPUEB
       shell: bash
       if: ${{ env.KERNEL_VER == '5.10' && (startsWith(env.OP_SOC, 'dimensity') || startsWith(env.OP_SOC, 'helio')) }}
@@ -2284,18 +2304,12 @@ runs:
           "$DDK_MODULE_TARGET" \
           2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"
 
-        # The vendor kernel's module_outs are part of its DefaultInfo, so
-        # cfg80211.ko and mac80211.ko should exist after the build above. Run
-        # 31037418577 produced neither, and only sun_perf_config, _env and
-        # _modules_prepare appeared in the action graph, so report what Bazel
-        # thinks it produced. This is diagnostic output, not a gate.
+        # The vendor kernel's archive is named modules_staging_dir_self.tar.gz:
+        # Kleaf declares the "_self" variant for any target with a base_kernel,
+        # because _repack_modules_staging_archive later merges the GKI modules
+        # into it. Both archives are listed here for the record.
         echo "::group::Bazel output inventory"
-        echo "--- cquery files for $DDK_KERNEL_TARGET ---"
-        ./tools/bazel cquery --output=files "$DDK_KERNEL_TARGET" 2>/dev/null | head -40 || true
-        echo "--- cfg80211/mac80211 anywhere under the output base ---"
-        find -L bazel-bin bazel-out -name 'cfg80211.ko' -o -name 'mac80211.ko' 2>/dev/null | head -10 || true
-        echo "--- modules_staging archives ---"
-        find -L bazel-bin bazel-out -name 'modules_staging_dir*.tar.gz' -printf '%p (%s)\n' 2>/dev/null | head -10 || true
+        find -L bazel-bin -name 'modules_staging_dir*.tar.gz' -printf '  %p (%s bytes)\n' 2>/dev/null | sort || true
         echo "::endgroup::"
 
         BUILD_END=$(date +%s)
@@ -2504,6 +2518,17 @@ runs:
         # "Stage Bazel outputs" step.
         [ "$FAILED" -eq 0 ] || exit 1
         echo "✅ defconfig assertions passed"
+
+        # The configured uname must reach the Image. Kleaf ignores LOCALVERSION
+        # from the environment, so this comes from CONFIG_LOCALVERSION set by
+        # the branding step; run 31041327572 shipped 6.6.118-android15-8-o-4k
+        # with no branding at all.
+        if ! grep -q "^CONFIG_LOCALVERSION=\".*${OP_UNAME}.*\"$" "$DOTCONFIG"; then
+          echo "::error::CONFIG_LOCALVERSION does not carry '${OP_UNAME}'"
+          grep "^CONFIG_LOCALVERSION" "$DOTCONFIG" || echo "  (unset)"
+          exit 1
+        fi
+        echo "✅ localversion carries ${OP_UNAME}"
         echo "::endgroup::"
 
     - name: Build Kernel
