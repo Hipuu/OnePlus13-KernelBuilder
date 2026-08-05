@@ -2212,7 +2212,6 @@ runs:
         # is //common:kernel_aarch64, so one invocation builds GKI, the vendor
         # kernel and the module against a single consistent Module.symvers.
         ./tools/bazel build \
-          --config=fast \
           "$DDK_KERNEL_TARGET" \
           "$DDK_MODULE_TARGET" \
           2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"

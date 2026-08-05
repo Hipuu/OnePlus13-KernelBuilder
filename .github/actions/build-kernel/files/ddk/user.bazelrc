@@ -28,8 +28,9 @@ build --action_env=CCACHE_SLOPPINESS
 
 # Kleaf writes the sandbox under the workspace by default; on the CI runner the
 # workspace is on the slower mount and /dev/shm is not large enough for a full
-# kernel build, so leave the default but keep output brief.
+# kernel build, so leave the default but keep output readable in Actions logs.
+# show_progress_rate_limit takes seconds, not a boolean: 0 means every update.
 build --verbose_failures
-build --noshow_progress_rate_limit
+build --show_progress_rate_limit=30
 build --color=no
 build --curses=no
