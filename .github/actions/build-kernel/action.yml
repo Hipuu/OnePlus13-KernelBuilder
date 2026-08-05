@@ -2077,7 +2077,7 @@ runs:
         set -euo pipefail
         echo "::group::Apply qcacld monitor injection patch"
 
-        QCACLD="$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0"
+        QCACLD="$CONFIG_FOLDER/vendor/qcom/opensource/wlan/qcacld-3.0"
         PATCH="$GITHUB_ACTION_PATH/files/ddk/qcacld-monitor-injection.patch"
 
         if [ ! -d "$QCACLD" ]; then
@@ -2121,7 +2121,7 @@ runs:
         for f in "$BAZEL_LAUNCHER" "$BAZEL_BIN" "$HERMETIC_PYTHON" \
                  "$KERNEL_PLATFORM_FOLDER/MODULE.bazel" \
                  "$MSM_KERNEL_FOLDER/BUILD.bazel" \
-                 "$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0/BUILD.bazel"; do
+                 "$CONFIG_FOLDER/vendor/qcom/opensource/wlan/qcacld-3.0/BUILD.bazel"; do
           if [ ! -e "$f" ]; then
             echo "::error::Missing Bazel prerequisite: $f"
             MISSING=1
@@ -2149,7 +2149,7 @@ runs:
 
         # The qcacld api/cmn symlinks are intra-repo and survive the tarball
         # sync, but a broken one silently drops every fw-api header.
-        QCACLD="$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0"
+        QCACLD="$CONFIG_FOLDER/vendor/qcom/opensource/wlan/qcacld-3.0"
         for l in api cmn; do
           if [ ! -d "$QCACLD/$l" ]; then
             echo "::error::qcacld-3.0/$l does not resolve (expected symlink to ../$( [ "$l" = api ] && echo fw-api || echo qca-wifi-host-cmn ))"
@@ -2162,6 +2162,26 @@ runs:
         install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/BUILD.bazel" "$KERNEL_PLATFORM_FOLDER/ddk_ext/BUILD.bazel"
         install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/gki_build_config.fragment" "$KERNEL_PLATFORM_FOLDER/ddk_ext/gki_build_config.fragment"
         install -m 0644 "$GITHUB_ACTION_PATH/files/ddk/user.bazelrc" "$KERNEL_PLATFORM_FOLDER/user.bazelrc"
+
+        # kernel_platform/ holds MODULE.bazel, and bazel.py finds the workspace
+        # by walking up from the cwd to the first repo boundary file, so
+        # kernel_platform is the workspace root and //vendor/... resolves to
+        # kernel_platform/vendor/... The WLAN sources live one level up, in the
+        # modules repo that syncs to the config dir. Bridge that with a symlink
+        # so the labels in qcacld's own wlan_qcacld3_modules.bzl (which are all
+        # //vendor/qcom/opensource/...) resolve unmodified.
+        for d in vendor; do
+          if [ ! -e "$KERNEL_PLATFORM_FOLDER/$d" ]; then
+            ln -s "../$d" "$KERNEL_PLATFORM_FOLDER/$d"
+            echo "Linked kernel_platform/$d -> ../$d"
+          fi
+        done
+        for d in wlan/qcacld-3.0 wlan/platform dataipa; do
+          if [ ! -d "$KERNEL_PLATFORM_FOLDER/vendor/qcom/opensource/$d" ]; then
+            echo "::error::kernel_platform/vendor/qcom/opensource/$d does not resolve"
+            exit 1
+          fi
+        done
 
         # Kleaf's common.bazelrc try-imports %workspace%/user.bazelrc last, so
         # append rather than replace to keep the flags above.
