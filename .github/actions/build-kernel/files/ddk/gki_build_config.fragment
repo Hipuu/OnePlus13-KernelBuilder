@@ -14,3 +14,14 @@
 # verified: options that must take effect are asserted after the build by the
 # "Verify Bazel defconfig" step, which greps the resolved .config.
 POST_DEFCONFIG_CMDS=""
+
+# The kernel builds with -Werror. Several patches this pipeline applies leave
+# warnings behind -- the module intercept/overlay patch leaves an unused
+# variable in kernel/module/main.c, which fails as
+# "error: unused variable 'i' [-Werror,-Wunused-variable]".
+#
+# The make-based path has always tolerated this by passing -Wno-error in
+# KCFLAGS (see the "Build Kernel" step). kernel_env sources this build config
+# and exports the resulting environment to the build, so setting it here is
+# the Kleaf equivalent rather than a new concession.
+KCFLAGS="${KCFLAGS} -Wno-error"

@@ -16,6 +16,14 @@ build --nokmi_symbol_list_violations_check
 # file; see files/ddk/gki_build_config.fragment.
 build --gki_build_config_fragment=//ddk_ext:gki_build_config_fragment
 
+# The Nethunter wireless step sets ath9k_htc, mac80211, rtw88 and friends to =m.
+# kernel_build cross-checks every produced .ko against its module_outs, and
+# //common:kernel_aarch64 only declares the stock GKI module list, so those
+# extra modules abort the build with "built but not copied". They are collected
+# from the modules_install tree by the Create Kernel Modules ZIP step, not from
+# module_outs, so downgrade the check to a warning.
+build --allow_undeclared_modules
+
 # --- Host environment -----------------------------------------------------
 # ccache lives outside the workspace, and Kleaf sandboxes actions with a
 # scrubbed environment, so the wrapper needs these passed through explicitly.
