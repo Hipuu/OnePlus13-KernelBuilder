@@ -2004,19 +2004,38 @@ runs:
         # `export LOCALVERSION=""` after the build config is sourced
         # (impl/stamp.bzl set_localversion_cmd), so an assignment in the build
         # config fragment is overwritten. Set CONFIG_LOCALVERSION in the
-        # defconfig instead, which survives because Kleaf builds from this same
-        # gki_defconfig. Without it the DDK build reported
-        # 6.6.118-android15-8-o-4k and lost the configured uname entirely.
+        # defconfig instead, which Kleaf builds from.
+        #
+        # Both trees need it. GKI builds from common/arch/arm64/configs/, and the
+        # vendor kernel builds from msm-kernel/arch/arm64/configs/gki_defconfig
+        # merged with vendor/sun_perf.config; each carries its own
+        # CONFIG_LOCALVERSION="-4k". Branding only common/ gave an Image at
+        # 6.6.118-android15-8-o-OP-WILD-4k with modules still built as
+        # 6.6.118-android15-8-o-4k (run 31045666257) -- a vermagic mismatch,
+        # which is worse than no branding: the modules would be refused at load.
         if [ "${OP_DDK:-false}" = "true" ]; then
-          DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
-          # Keep the stock "-4k" page-size marker; only prepend the branding.
-          STOCK_LV="$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"$/\1/p' "$DEFCONFIG" | head -1)"
-          NEW_LV="-${OP_UNAME}${STOCK_LV}"
-          sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${NEW_LV}\"|" "$DEFCONFIG"
-          if ! grep -qx "CONFIG_LOCALVERSION=\"${NEW_LV}\"" "$DEFCONFIG"; then
-            echo "CONFIG_LOCALVERSION=\"${NEW_LV}\"" >> "$DEFCONFIG"
+          BRANDED=0
+          for DEFCONFIG in \
+            "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" \
+            "$MSM_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"; do
+            [ -f "$DEFCONFIG" ] || { echo "[INFO] absent: $DEFCONFIG"; continue; }
+            # Keep the stock "-4k" page-size marker; only prepend the branding.
+            STOCK_LV="$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"$/\1/p' "$DEFCONFIG" | head -1)"
+            case "$STOCK_LV" in
+              *"$OP_UNAME"*) echo "[INFO] already branded: $DEFCONFIG"; BRANDED=$((BRANDED+1)); continue ;;
+            esac
+            NEW_LV="-${OP_UNAME}${STOCK_LV}"
+            sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${NEW_LV}\"|" "$DEFCONFIG"
+            if ! grep -qx "CONFIG_LOCALVERSION=\"${NEW_LV}\"" "$DEFCONFIG"; then
+              echo "CONFIG_LOCALVERSION=\"${NEW_LV}\"" >> "$DEFCONFIG"
+            fi
+            echo "Branded ${DEFCONFIG#"$KERNEL_PLATFORM_FOLDER/"}: '${STOCK_LV}' -> '${NEW_LV}'"
+            BRANDED=$((BRANDED+1))
+          done
+          if [ "$BRANDED" -lt 2 ]; then
+            echo "::error::Expected to brand two defconfigs, branded $BRANDED"
+            exit 1
           fi
-          echo "DDK localversion: '${STOCK_LV}' -> '${NEW_LV}'"
         fi
 
     - name: Disable GPUEB
@@ -2519,16 +2538,31 @@ runs:
         [ "$FAILED" -eq 0 ] || exit 1
         echo "✅ defconfig assertions passed"
 
-        # The configured uname must reach the Image. Kleaf ignores LOCALVERSION
-        # from the environment, so this comes from CONFIG_LOCALVERSION set by
-        # the branding step; run 31041327572 shipped 6.6.118-android15-8-o-4k
-        # with no branding at all.
-        if ! grep -q "^CONFIG_LOCALVERSION=\".*${OP_UNAME}.*\"$" "$DOTCONFIG"; then
-          echo "::error::CONFIG_LOCALVERSION does not carry '${OP_UNAME}'"
-          grep "^CONFIG_LOCALVERSION" "$DOTCONFIG" || echo "  (unset)"
-          exit 1
-        fi
-        echo "✅ localversion carries ${OP_UNAME}"
+        # Compare the shipped artifacts, not a config file. The previous check
+        # read GKI's .config, found the branding, and passed -- while the vendor
+        # modules had been built from msm-kernel's own defconfig and carried a
+        # different vermagic (run 31045666257). A module whose vermagic differs
+        # from the kernel is refused at load, so this is the check that matters.
+        IMG="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
+        KREL="$(basename "$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+        MISMATCH=0
+        for ko in "qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_')" cfg80211 mac80211; do
+          f="$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -name "$ko.ko" -print -quit)"
+          [ -n "$f" ] || { echo "::error::$ko.ko not staged"; MISMATCH=1; continue; }
+          VM="$(tr -d '\0' < "$f" | grep -ao 'vermagic=[^ ]*' | head -1 | cut -d= -f2)"
+          if [ "$VM" != "$KREL" ]; then
+            echo "::error::$ko.ko vermagic '$VM' != kernel release '$KREL'"
+            MISMATCH=1
+          else
+            echo "  $ko.ko vermagic $VM"
+          fi
+        done
+        case "$KREL" in
+          *"$OP_UNAME"*) echo "  kernel release carries $OP_UNAME" ;;
+          *) echo "::error::kernel release '$KREL' does not carry '$OP_UNAME'"; MISMATCH=1 ;;
+        esac
+        [ "$MISMATCH" -eq 0 ] || exit 1
+        echo "✅ Image and modules agree on $KREL"
         echo "::endgroup::"
 
     - name: Build Kernel
