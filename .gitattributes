@@ -8,3 +8,10 @@
 *.yaml text eol=lf
 *.json text eol=lf
 *.xml text eol=lf
+
+# Bazel/Kleaf inputs. user.bazelrc and the build config fragment are sourced as
+# shell by Kleaf, so CRLF would put a stray \r into POST_DEFCONFIG_CMDS.
+*.bazel text eol=lf
+*.bazelrc text eol=lf
+*.bzl text eol=lf
+*.fragment text eol=lf

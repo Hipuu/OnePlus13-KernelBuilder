@@ -2070,6 +2070,38 @@ runs:
           patch -p1 < "$KERNEL_PATCHES_FOLDER/common/vendor_modules/0001-Support-conditional-vendor-modules-blacklisting-6.1-and-above.patch"
         fi
 
+    - name: Apply qcacld monitor injection patch
+      if: ${{ env.OP_DDK == 'true' && env.OP_DDK_INJECTION == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply qcacld monitor injection patch"
+
+        QCACLD="$GITHUB_WORKSPACE/$CONFIG/vendor/qcom/opensource/wlan/qcacld-3.0"
+        PATCH="$GITHUB_ACTION_PATH/files/ddk/qcacld-monitor-injection.patch"
+
+        if [ ! -d "$QCACLD" ]; then
+          echo "::error::qcacld-3.0 not found at $QCACLD"
+          exit 1
+        fi
+
+        cd "$QCACLD"
+        if ! patch -p1 --dry-run < "$PATCH" >/dev/null 2>&1; then
+          echo "::error::monitor injection patch does not apply to this qcacld revision"
+          patch -p1 --dry-run < "$PATCH" 2>&1 | head -30 || true
+          exit 1
+        fi
+        patch -p1 < "$PATCH"
+
+        # Fail loudly if the Tx hook is not actually in place: a silently
+        # unpatched driver looks identical until injection is tried on-device.
+        if ! grep -q 'ndo_start_xmit = hdd_mon_hard_start_xmit' core/hdd/src/wlan_hdd_main.c; then
+          echo "::error::patch applied but .ndo_start_xmit hook is missing"
+          exit 1
+        fi
+        echo "✅ Monitor injection patch applied"
+        echo "::endgroup::"
+
     - name: Prepare Bazel/DDK build
       id: prepare_ddk
       if: ${{ env.OP_DDK == 'true' }}

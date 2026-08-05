@@ -18,6 +18,7 @@
   "ddk": false,
   "ddk_target": "sun_perf",
   "ddk_chipset": "peach-v2",
+  "ddk_injection": false,
   "opt": true,
   "ds": true,
   "bbg": true,

@@ -1,0 +1,198 @@
+Frame injection for qcacld-3.0 monitor mode.
+
+Stock wlan_mon_drv_ops has no .ndo_start_xmit -- the upstream comment reads
+"does not Tx and most of operations" -- so a radiotap frame written to the
+monitor netdev is dropped by the network stack before the driver ever sees it.
+This adds a Tx handler that strips the radiotap header and hands the 802.11
+frame to wlan_cfg80211_mgmt_tx(), the same call cfg80211's .mgmt_tx uses to
+reach the firmware.
+
+Why this can work at all: __hdd_mon_open() calls hdd_start_adapter() and sets
+SME_SESSION_OPENED, so a monitor-mode adapter owns a real vdev. That makes
+hdd_objmgr_get_vdev_by_user() succeed, which is the precondition monitor mode
+would otherwise fail. Note that __wlan_hdd_mgmt_tx()'s own device_mode
+branches are all skipped for QDF_MONITOR_MODE, which is why this calls
+wlan_cfg80211_mgmt_tx() directly rather than reusing that wrapper.
+
+Limitations, in order of how likely they are to bite:
+
+  * The firmware decides whether to accept a frame on a monitor vdev. It may
+    silently drop anything that is not a management frame, or drop
+    everything. This cannot be verified without the hardware.
+  * Radiotap is parsed only far enough to find where the 802.11 frame begins.
+    Requested rate, retries and TX_NOACK are ignored; the firmware chooses.
+  * Data and control frames are handed to the same entry point.
+    wlan_cfg80211_mgmt_tx() is a management-frame API, so those are the most
+    likely to be rejected.
+  * The 20 dBm world-regulatory cap and the "no IR" flag on channels 12-14
+    still apply; they are enforced by cfg80211 and the firmware, not here.
+    See README.md#regulatory-database.
+
+Frames are dropped, never requeued, on any error: returning anything other
+than NETDEV_TX_OK from ndo_start_xmit would make the stack retry a frame that
+can never succeed.
+
+--- a/core/hdd/src/wlan_hdd_main.c
++++ b/core/hdd/src/wlan_hdd_main.c
+@@ -7306,10 +7306,160 @@
+ };
+ 
+ #ifdef FEATURE_MONITOR_MODE_SUPPORT
+-/* Monitor mode net_device_ops, does not Tx and most of operations. */
++/*
++ * Minimal radiotap header, as written by libpcap/aircrack-ng and friends.
++ * Only it_len is needed: everything up to it is metadata describing how the
++ * frame should be sent, and the 802.11 frame itself starts at it_len.
++ */
++struct hdd_mon_radiotap_hdr {
++	uint8_t it_version;
++	uint8_t it_pad;
++	uint16_t it_len;
++	uint32_t it_present;
++} __packed;
++
++#define HDD_MON_RADIOTAP_VERSION 0
++
++/* Shortest 802.11 header worth sending: the 24-byte 3-address MAC header. */
++#define HDD_MON_MIN_80211_LEN 24
++
++/**
++ * hdd_mon_strip_radiotap() - find the 802.11 frame inside a radiotap frame
++ * @skb: socket buffer as handed to us by the network stack
++ *
++ * The monitor netdev is ARPHRD_IEEE80211_RADIOTAP, so userspace prepends a
++ * radiotap header whose length is self-describing. Advance past it.
++ *
++ * Return: 0 on success, -EINVAL if the header is malformed or the remaining
++ * frame is too short to be 802.11.
++ */
++static int hdd_mon_strip_radiotap(struct sk_buff *skb)
++{
++	struct hdd_mon_radiotap_hdr *rthdr;
++	uint16_t rtap_len;
++
++	if (skb->len < sizeof(*rthdr))
++		return -EINVAL;
++
++	rthdr = (struct hdd_mon_radiotap_hdr *)skb->data;
++
++	if (rthdr->it_version != HDD_MON_RADIOTAP_VERSION)
++		return -EINVAL;
++
++	/* it_len is little-endian on the wire regardless of host order. */
++	rtap_len = le16_to_cpu(rthdr->it_len);
++
++	if (rtap_len < sizeof(*rthdr) || rtap_len > skb->len)
++		return -EINVAL;
++
++	/*
++	 * A frame needs at least the 24-byte 802.11 MAC header to be worth
++	 * handing to the firmware. Anything shorter is malformed.
++	 */
++	if (skb->len - rtap_len < HDD_MON_MIN_80211_LEN)
++		return -EINVAL;
++
++	skb_pull(skb, rtap_len);
++
++	return 0;
++}
++
++/**
++ * hdd_mon_hard_start_xmit() - Tx handler for monitor mode injection
++ * @skb: radiotap-framed packet from userspace
++ * @dev: monitor mode net_device
++ *
++ * Return: always NETDEV_TX_OK; failures free the skb rather than asking the
++ * stack to retry a frame that cannot be sent.
++ */
++static netdev_tx_t hdd_mon_hard_start_xmit(struct sk_buff *skb,
++					   struct net_device *dev)
++{
++	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
++	struct hdd_context *hdd_ctx;
++	struct wlan_hdd_link_info *link_info;
++	struct wlan_objmgr_vdev *vdev;
++	struct ieee80211_channel *chan = NULL;
++	uint64_t cookie = 0;
++	uint32_t frame_len;
++	int errno;
++
++	if (!adapter) {
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
++	if (wlan_hdd_validate_context(hdd_ctx)) {
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	link_info = adapter->deflink;
++	if (!link_info || wlan_hdd_validate_vdev_id(link_info->vdev_id)) {
++		hdd_debug_rl("Monitor vdev not ready; dropping injected frame");
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	if (skb_linearize(skb)) {
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	if (hdd_mon_strip_radiotap(skb)) {
++		hdd_debug_rl("Malformed radiotap frame; dropping");
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_P2P_ID);
++	if (!vdev) {
++		hdd_debug_rl("No vdev for monitor injection; dropping");
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	/* skb is freed below, so cache the length used for statistics. */
++	frame_len = skb->len;
++
++	/*
++	 * chan == NULL means "use the vdev's current channel", which for a
++	 * monitor vdev is whatever channel it was set to. offchan is false
++	 * and wait is 0: an injected frame is fire-and-forget, and
++	 * dont_wait_for_ack keeps a missing ACK from stalling the caller.
++	 *
++	 * Note this returns a plain errno, not a QDF_STATUS.
++	 */
++	errno = wlan_cfg80211_mgmt_tx(vdev, chan, false, 0,
++				      skb->data, frame_len,
++				      false, true, &cookie,
++				      QDF_MONITOR_MODE);
++
++	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_P2P_ID);
++
++	if (errno) {
++		hdd_debug_rl("Injection rejected, errno %d", errno);
++		dev->stats.tx_dropped++;
++	} else {
++		dev->stats.tx_packets++;
++		dev->stats.tx_bytes += frame_len;
++	}
++
++	kfree_skb(skb);
++
++	return NETDEV_TX_OK;
++}
++
++/*
++ * Monitor mode net_device_ops. Upstream omits .ndo_start_xmit entirely; it is
++ * added here so radiotap frames written to the monitor interface reach the
++ * firmware. See files/ddk/qcacld-monitor-injection.patch for the caveats.
++ */
+ static const struct net_device_ops wlan_mon_drv_ops = {
+ 	.ndo_open = hdd_mon_open,
+ 	.ndo_stop = hdd_stop,
++	.ndo_start_xmit = hdd_mon_hard_start_xmit,
+ 	.ndo_get_stats = hdd_get_stats,
+ };
+ 
