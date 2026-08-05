@@ -37,6 +37,54 @@ Drivers are built as modules and shipped in `kernel_modules_*.zip`:
 
 - **No boot.img / vendor_boot / DLKM images.** Output is a raw `Image`, an AnyKernel3 ZIP, and a modules ZIP.
 - **No other devices.** OnePlus 13 only.
+- **No external USB Wi-Fi adapters on the DDK build.** See [DDK build](#ddk-build).
+
+## DDK build
+
+`OP13-6.6.118` builds with Bazel/Kleaf instead of `make`, and additionally
+produces OnePlus's own Wi-Fi driver, `qca_cld3_peach_v2.ko`, as a DDK
+(`ddk_module`) external module. Because it is compiled against the same
+`Module.symvers` as the shipped `Image`, it passes the CRC check that the
+stock module fails on a patched kernel — which is what makes monitor mode on
+the **internal** Wi-Fi possible.
+
+Monitor mode itself needs no patch: `CONFIG_FEATURE_MONITOR_MODE_SUPPORT`,
+`CONFIG_QCA_MONITOR_PKT_SUPPORT` and `CONFIG_WIFI_MONITOR_SUPPORT` are already
+enabled in the stock `sun_gki_peach-v2_defconfig` and gated at runtime by the
+`con_mode` module parameter. Injection does require a patch; see
+[monitor-mode injection](#monitor-mode-injection).
+
+> [!IMPORTANT]
+> The DDK build and the external-adapter module pack are mutually exclusive.
+> `msm-kernel` declares `cfg80211.ko` and `mac80211.ko` among its in-tree
+> modules, and the vendor kernel is a mixed build on top of GKI, so adding the
+> same two to the GKI defconfig makes `modpost` fail with `'wiphy_new_nm'
+> exported twice`. Only one copy can exist. The DDK build keeps the platform
+> pair, since that is what `qca_cld3_peach_v2.ko` is CRC-matched against, so
+> `ath9k_htc` and the other external drivers are not built on this variant.
+> This is the same incompatibility described in
+> [why the drivers are not built in](#why-the-drivers-are-not-built-in),
+> reached at build time rather than on device.
+
+Build the other five variants for external adapter support, or set `ddk` to
+`false` to build `6.6.118` the `make` way.
+
+### Monitor-mode injection
+
+`ddk_injection` patches `wlan_mon_drv_ops` with a `.ndo_start_xmit` handler
+that strips the radiotap header and calls `wlan_cfg80211_mgmt_tx()`. Upstream
+omits Tx from monitor mode entirely — the comment reads *"does not Tx and most
+of operations"* — so without this a radiotap frame written to the monitor
+interface is dropped by the network stack before the driver sees it.
+
+> [!WARNING]
+> This is **experimental and unverified on hardware.** The firmware decides
+> whether to accept a frame on a monitor vdev and may drop anything that is not
+> a management frame, or drop everything, in which case the handler is dead
+> code. Radiotap Tx flags (rate, retries, `TX_NOACK`) are parsed only far enough
+> to locate the 802.11 frame and are otherwise ignored. The 20 dBm world
+> regulatory cap and the `no IR` flag on channels 12–14 still apply.
+
 
 ## Supported variants
 
@@ -74,6 +122,8 @@ gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
 | `lto` | `thin`, `full`, or `none` | `thin` |
 | `compiler` | Pinned ZyC Clang 19 or manifest Clang | `zycromerz-19` |
 | `use_opt_patches` | Apply optimization patches | `true` |
+| `ddk` | Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (`6.6.118 A16` only) | `true` |
+| `ddk_injection` | Patch qcacld monitor mode for frame injection (experimental) | `true` |
 | `kernel_uname` | uname suffix | `OP-WILD` |
 | `build_timestamp` | Custom uname timestamp (empty = current UTC) | empty |
 | `clean_build` | Build without ccache restore | `false` |

@@ -1833,8 +1833,19 @@ runs:
     # they can be insmod'd on demand. OnePlus's stock mac80211 lacks
     # __ieee80211_create_tpt_led_trigger, so our own mac80211/cfg80211 must
     # ship alongside them (see EmberHeart docs/drivers.md).
+    #
+    # Skipped on the DDK path. //msm-kernel:<target> declares
+    # net/wireless/cfg80211.ko and net/mac80211/mac80211.ko in its own
+    # in_tree_modules, and the vendor kernel is a mixed build on top of GKI, so
+    # adding them to the GKI defconfig too makes modpost fail with
+    # "'wiphy_new_nm' exported twice". Only one copy can exist, and the DDK
+    # build keeps the platform pair because qca_cld3_<chipset>.ko is
+    # CRC-matched against it. External USB adapters need the GKI-built pair
+    # instead and are therefore unavailable on this variant -- the same
+    # incompatibility described in README.md#why-the-drivers-are-not-built-in,
+    # surfacing at build time rather than on device.
     - name: Add Nethunter wireless module configs
-      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' }}
+      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' && env.OP_DDK != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -1914,8 +1925,10 @@ runs:
 
     # Out-of-tree rtw88 (lwfinger) replaces the in-tree copy, matching
     # EmberHeart. Pinned to a commit so the build stays reproducible.
+    # Also skipped on the DDK path: rtw88 depends on mac80211, which is not
+    # built for GKI there. See the note on the wireless module configs above.
     - name: Add out-of-tree rtw88 modules
-      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' && env.OP_RTW88_COMMIT != '' }}
+      if: ${{ env.OP_NETHUNTER == 'true' && env.OP_WIRELESS_MODULES == 'true' && env.OP_RTW88_COMMIT != '' && env.OP_DDK != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -2260,8 +2273,14 @@ runs:
         # The module's kernel_build is //msm-kernel:<target>, whose base_kernel
         # is //common:kernel_aarch64, so one invocation builds GKI, the vendor
         # kernel and the module against a single consistent Module.symvers.
+        #
+        # <target>_modules_install is built explicitly: the vendor kernel's
+        # in_tree_modules include the cfg80211/mac80211 that the DDK module
+        # links against, and the staging step needs them in a depmod-shaped
+        # tree to resolve the dependency closure for the modules ZIP.
         ./tools/bazel build \
           "$DDK_KERNEL_TARGET" \
+          "${DDK_KERNEL_TARGET}_modules_install" \
           "$DDK_MODULE_TARGET" \
           2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"
 
@@ -2303,7 +2322,13 @@ runs:
         # modules_install tree rather than a flat directory. Kleaf's
         # <target>_modules_install runfiles already have that shape; prefer it
         # and fall back to staging the raw .ko files plus depmod.
-        MODINSTALL="$(find -L bazel-bin -type d -name modules -path '*modules_install*' -print -quit 2>/dev/null || true)"
+        MODINSTALL="$(find -L "bazel-bin/msm-kernel/${OP_DDK_TARGET}_modules_install" -type d -name modules -print -quit 2>/dev/null || true)"
+        if [ -z "$MODINSTALL" ]; then
+          MODINSTALL="$(find -L bazel-bin -type d -name modules -path "*${OP_DDK_TARGET}_modules_install*" -print -quit 2>/dev/null || true)"
+        fi
+        if [ -z "$MODINSTALL" ]; then
+          MODINSTALL="$(find -L bazel-bin -type d -name modules -path '*modules_install*' -print -quit 2>/dev/null || true)"
+        fi
         install -d "$OUT/install/lib/modules"
         if [ -n "$MODINSTALL" ] && [ -n "$(find -L "$MODINSTALL" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
           echo "Using Kleaf modules_install tree: $MODINSTALL"
@@ -2391,10 +2416,13 @@ runs:
         if [ "$OP_BBR3" = "true" ] || [ "$OP_BBR" = "true" ]; then
           assert_config "CONFIG_TCP_CONG_BBR=y"
         fi
-        if [ "$OP_WIRELESS_MODULES" = "true" ]; then
+        if [ "$OP_WIRELESS_MODULES" = "true" ] && [ "$OP_DDK" != "true" ]; then
           assert_config "CONFIG_CFG80211=m"
           assert_config "CONFIG_MAC80211=m"
         fi
+        # On the DDK path the wireless stack comes from msm-kernel's
+        # in_tree_modules instead, and the DDK module itself is checked by the
+        # "Stage Bazel outputs" step.
         [ "$FAILED" -eq 0 ] || exit 1
         echo "✅ defconfig assertions passed"
         echo "::endgroup::"
@@ -2860,6 +2888,11 @@ runs:
         # dependencies live outside these directories -- cfg80211 depends on
         # kernel/net/rfkill/rfkill.ko and mac80211 on kernel/lib/crypto/libarc4.ko.
         # Shipping the seed alone makes insmod fail with unknown symbols.
+        #
+        # On the DDK path the external adapter drivers are not built, and
+        # kernel/drivers/net/wireless holds qca_cld3_<chipset>.ko instead,
+        # placed there by the "Stage Bazel outputs" step. The closure then
+        # pulls in the platform cfg80211/mac80211 it links against.
         MODULE_DIRS=(
           "kernel/net/wireless"
           "kernel/net/mac80211"
