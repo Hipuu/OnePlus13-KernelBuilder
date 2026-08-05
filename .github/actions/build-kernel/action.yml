@@ -2319,10 +2319,27 @@ runs:
 
         # Create Kernel Modules ZIP walks out/install/lib/modules/<release>/ and
         # resolves the transitive closure over modules.dep, so reproduce a real
-        # modules_install tree rather than a flat directory. Kleaf's
-        # <target>_modules_install runfiles already have that shape; prefer it
-        # and fall back to staging the raw .ko files plus depmod.
-        MODINSTALL="$(find -L "bazel-bin/msm-kernel/${OP_DDK_TARGET}_modules_install" -type d -name modules -print -quit 2>/dev/null || true)"
+        # modules_install tree rather than a flat directory: a flat one has no
+        # kernel/net/can or kernel/net/mac80211 for the packaging step to seed
+        # from, and the ZIP silently ends up with only the modules staged by
+        # hand below.
+        #
+        # Ask Bazel where the tree is instead of searching for it. bazel-bin is a
+        # symlink into an output base whose layout depends on the configuration
+        # hash, and a find that guesses wrong falls through to the flat fallback
+        # without failing.
+        MODINSTALL=""
+        MI_TARGET="${DDK_KERNEL_TARGET}_modules_install"
+        MI_PATHS="$(./tools/bazel cquery --output=files "$MI_TARGET" 2>/dev/null || true)"
+        echo "cquery reported for $MI_TARGET:"
+        printf '  %s\n' ${MI_PATHS:-"(nothing)"}
+        for p in $MI_PATHS; do
+          if [ -d "$p/lib/modules" ]; then MODINSTALL="$p/lib/modules"; break; fi
+          if [ -d "$p" ] && [ -n "$(find -L "$p" -type d -name modules -print -quit 2>/dev/null)" ]; then
+            MODINSTALL="$(find -L "$p" -type d -name modules -print -quit)"
+            break
+          fi
+        done
         if [ -z "$MODINSTALL" ]; then
           MODINSTALL="$(find -L bazel-bin -type d -name modules -path "*${OP_DDK_TARGET}_modules_install*" -print -quit 2>/dev/null || true)"
         fi
@@ -2335,17 +2352,13 @@ runs:
           rsync -aL --no-o --no-g "$MODINSTALL/" "$OUT/install/lib/modules/"
           chmod -R u+w "$OUT/install/lib/modules"
         else
-          echo "No modules_install tree found; staging .ko files and running depmod"
-          KREL="$(cat "$(find -L bazel-bin -type f -name 'kernel.release' -print -quit 2>/dev/null || echo /dev/null)" 2>/dev/null || true)"
-          if [ -z "$KREL" ]; then
-            KREL="${KERNEL_FULL_VER}${CUSTOM_LOCALVERSION:-}"
-            echo "kernel.release not found; using $KREL"
-          fi
-          install -d "$OUT/install/lib/modules/$KREL/kernel"
-          while IFS= read -r ko; do
-            install -m 0644 "$ko" "$OUT/install/lib/modules/$KREL/kernel/$(basename "$ko")"
-          done < <(find -L bazel-bin -type f -name '*.ko' 2>/dev/null | sort -u)
-          depmod -b "$OUT/install" "$KREL" || true
+          # Not a warning: a flat tree drops every module the packaging step
+          # seeds by directory, which is how run 31029431344 shipped a two-module
+          # ZIP from a successful build.
+          echo "::error::Could not locate the ${MI_TARGET} tree; refusing to stage a flat directory"
+          echo "Searched cquery outputs and bazel-bin. Directories named 'modules' under bazel-bin:"
+          find -L bazel-bin -maxdepth 6 -type d -name modules 2>/dev/null | head -20 || true
+          exit 1
         fi
 
         # The DDK module is built by its own ddk_module target and is not part of
@@ -3009,6 +3022,27 @@ runs:
           exit 1
         fi
         find "$STAGE" -type f -name '*.ko' -printf '  %f (%s bytes)\n' | sort
+
+        # Assert the pack contains what the loader needs, rather than trusting
+        # that the seed directories existed. Run 31029431344 shipped a
+        # two-module ZIP from a green build because the staging tree was flat
+        # and every seed directory was missing.
+        missing=""
+        if [ "$OP_DDK" = "true" ]; then
+          # mac80211 and cfg80211 come from msm-kernel's in_tree_modules and are
+          # what qca_cld3_<chipset>.ko links against.
+          for m in "qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_')" cfg80211 mac80211; do
+            [ -n "$(find "$STAGE" -name "$m.ko" -print -quit)" ] || missing="$missing $m.ko"
+          done
+        else
+          for m in cfg80211 mac80211 ath9k_htc; do
+            [ -n "$(find "$STAGE" -name "$m.ko" -print -quit)" ] || missing="$missing $m.ko"
+          done
+        fi
+        if [ -n "$missing" ]; then
+          echo "::error::Modules ZIP is missing:$missing"
+          exit 1
+        fi
 
         # Ship a flattened modules.dep next to the .ko files. The install-tree
         # copy uses paths ("kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/
