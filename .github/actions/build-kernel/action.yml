@@ -2318,46 +2318,59 @@ runs:
         install -m 0644 "$IMAGE" "$OUT/arch/arm64/boot/Image"
 
         # Create Kernel Modules ZIP walks out/install/lib/modules/<release>/ and
-        # resolves the transitive closure over modules.dep, so reproduce a real
-        # modules_install tree rather than a flat directory: a flat one has no
-        # kernel/net/can or kernel/net/mac80211 for the packaging step to seed
-        # from, and the ZIP silently ends up with only the modules staged by
-        # hand below.
+        # resolves the transitive closure over modules.dep, so it needs a real
+        # modules_install tree: a flat directory has no kernel/net/can or
+        # kernel/net/mac80211 to seed from, and the ZIP silently ends up holding
+        # only the modules staged by hand below.
         #
-        # Ask Bazel where the tree is instead of searching for it. bazel-bin is a
-        # symlink into an output base whose layout depends on the configuration
-        # hash, and a find that guesses wrong falls through to the flat fallback
-        # without failing.
-        MODINSTALL=""
-        MI_TARGET="${DDK_KERNEL_TARGET}_modules_install"
-        MI_PATHS="$(./tools/bazel cquery --output=files "$MI_TARGET" 2>/dev/null || true)"
-        echo "cquery reported for $MI_TARGET:"
-        printf '  %s\n' ${MI_PATHS:-"(nothing)"}
-        for p in $MI_PATHS; do
-          if [ -d "$p/lib/modules" ]; then MODINSTALL="$p/lib/modules"; break; fi
-          if [ -d "$p" ] && [ -n "$(find -L "$p" -type d -name modules -print -quit 2>/dev/null)" ]; then
-            MODINSTALL="$(find -L "$p" -type d -name modules -print -quit)"
-            break
+        # Take it from modules_staging_dir.tar.gz, which kernel_build produces
+        # for every target and kernel_modules_install merely extracts. Earlier
+        # attempts looked for the _modules_install directory output instead;
+        # cquery --output=files does not report directory outputs, and the
+        # directory is not under bazel-bin/msm-kernel/, so both the query and
+        # the find came back empty (run 31034271333). The archive is a plain
+        # file at bazel-bin/<pkg>/<target>/modules_staging_dir.tar.gz and
+        # already contains lib/modules/<release>/ with the full layout.
+        install -d "$OUT/install/lib/modules"
+        STAGED=0
+        for tgz in \
+          "bazel-bin/msm-kernel/${OP_DDK_TARGET}/modules_staging_dir.tar.gz" \
+          "bazel-bin/common/kernel_aarch64/modules_staging_dir.tar.gz"; do
+          if [ -f "$tgz" ]; then
+            echo "Extracting $tgz"
+            tar xzf "$tgz" -C "$OUT/install" ./lib/modules 2>/dev/null ||
+              tar xzf "$tgz" -C "$OUT/install" lib/modules 2>/dev/null ||
+              tar xzf "$tgz" -C "$OUT/install"
+            STAGED=$((STAGED + 1))
+          else
+            echo "[INFO] absent: $tgz"
           fi
         done
-        if [ -z "$MODINSTALL" ]; then
-          MODINSTALL="$(find -L bazel-bin -type d -name modules -path "*${OP_DDK_TARGET}_modules_install*" -print -quit 2>/dev/null || true)"
+
+        if [ "$STAGED" -eq 0 ]; then
+          echo "Named archives absent; searching bazel-bin"
+          while IFS= read -r tgz; do
+            echo "Extracting $tgz"
+            tar xzf "$tgz" -C "$OUT/install" 2>/dev/null || true
+            STAGED=$((STAGED + 1))
+          done < <(find -L bazel-bin -type f -name 'modules_staging_dir*.tar.gz' 2>/dev/null | sort -u)
         fi
-        if [ -z "$MODINSTALL" ]; then
-          MODINSTALL="$(find -L bazel-bin -type d -name modules -path '*modules_install*' -print -quit 2>/dev/null || true)"
+
+        chmod -R u+w "$OUT/install/lib/modules" 2>/dev/null || true
+        UNAME_DIR="$(find "$OUT/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
+        if [ "$STAGED" -eq 0 ] || [ -z "$UNAME_DIR" ]; then
+          # Failing here is deliberate: staging a flat directory is what let run
+          # 31029431344 ship a two-module ZIP from a green build.
+          echo "::error::No modules_staging archive could be staged"
+          find -L bazel-bin -name 'modules_staging*' 2>/dev/null | head -20 || true
+          exit 1
         fi
-        install -d "$OUT/install/lib/modules"
-        if [ -n "$MODINSTALL" ] && [ -n "$(find -L "$MODINSTALL" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
-          echo "Using Kleaf modules_install tree: $MODINSTALL"
-          rsync -aL --no-o --no-g "$MODINSTALL/" "$OUT/install/lib/modules/"
-          chmod -R u+w "$OUT/install/lib/modules"
-        else
-          # Not a warning: a flat tree drops every module the packaging step
-          # seeds by directory, which is how run 31029431344 shipped a two-module
-          # ZIP from a successful build.
-          echo "::error::Could not locate the ${MI_TARGET} tree; refusing to stage a flat directory"
-          echo "Searched cquery outputs and bazel-bin. Directories named 'modules' under bazel-bin:"
-          find -L bazel-bin -maxdepth 6 -type d -name modules 2>/dev/null | head -20 || true
+        echo "Staged $STAGED archive(s) into $UNAME_DIR"
+        # A real modules_install tree has the kernel/ subtree the packaging step
+        # seeds from; a flat one does not.
+        if [ ! -d "$UNAME_DIR/kernel" ]; then
+          echo "::error::$UNAME_DIR has no kernel/ subtree; layout is not modules_install-shaped"
+          ls -la "$UNAME_DIR" | head -20 || true
           exit 1
         fi
 
@@ -2370,7 +2383,7 @@ runs:
           find -L bazel-bin -type f -name '*.ko' 2>/dev/null | head -40 || true
           exit 1
         fi
-        UNAME_DIR="$(find "$OUT/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+        # UNAME_DIR was resolved when the staging archive was extracted.
         install -d "$UNAME_DIR/kernel/drivers/net/wireless"
         install -m 0644 "$DDK_KO" "$UNAME_DIR/kernel/drivers/net/wireless/$EXPECTED_KO"
         echo "DDK module staged: $EXPECTED_KO ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$DDK_KO")") unstripped)"
