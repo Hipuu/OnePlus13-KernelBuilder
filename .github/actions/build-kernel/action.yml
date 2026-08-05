@@ -2360,7 +2360,45 @@ runs:
         UNAME_DIR="$(find "$OUT/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)"
         install -d "$UNAME_DIR/kernel/drivers/net/wireless"
         install -m 0644 "$DDK_KO" "$UNAME_DIR/kernel/drivers/net/wireless/$EXPECTED_KO"
-        echo "✅ DDK module: $EXPECTED_KO ($(stat -c%s "$DDK_KO") bytes)"
+        echo "DDK module staged: $EXPECTED_KO ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$DDK_KO")") unstripped)"
+
+        # kernel_build.strip_modules defaults to False and msm-kernel never sets
+        # it (only //common:kernel_aarch64 passes strip_modules = True), so every
+        # vendor and DDK module carries full debug info. Unstripped,
+        # qca_cld3_peach_v2.ko alone is ~700 MiB and the modules ZIP came to
+        # 323 MiB, which is not shippable.
+        #
+        # Strip debug sections only. --strip-debug keeps the symbol table and
+        # .modinfo, so modversions CRCs and depmod still work, which
+        # --strip-unneeded or a plain strip would break.
+        STRIP_BIN=""
+        for cand in "${CLANG_BIN_PATH:-}/llvm-strip" \
+                    "$KERNEL_PLATFORM_FOLDER/prebuilts/clang/host/linux-x86/clang-r510928/bin/llvm-strip"; do
+          if [ -n "$cand" ] && [ -x "$cand" ]; then STRIP_BIN="$cand"; break; fi
+        done
+        if [ -z "$STRIP_BIN" ]; then
+          STRIP_BIN="$(command -v llvm-strip || command -v aarch64-linux-gnu-strip || command -v strip || true)"
+        fi
+        if [ -z "$STRIP_BIN" ]; then
+          echo "::error::No strip tool found; modules would ship unstripped"
+          exit 1
+        fi
+        echo "Stripping debug info with $STRIP_BIN"
+        BEFORE=$(du -sb "$OUT/install/lib/modules" | cut -f1)
+        find "$OUT/install/lib/modules" -type f -name '*.ko' -print0 |
+          xargs -0 -r -n 32 -P "$(nproc --all)" "$STRIP_BIN" --strip-debug
+        AFTER=$(du -sb "$OUT/install/lib/modules" | cut -f1)
+        echo "Modules: $(numfmt --to=iec-i --suffix=B "$BEFORE") -> $(numfmt --to=iec-i --suffix=B "$AFTER")"
+
+        DDK_STAGED="$UNAME_DIR/kernel/drivers/net/wireless/$EXPECTED_KO"
+        DDK_SIZE=$(stat -c%s "$DDK_STAGED")
+        echo "✅ DDK module: $EXPECTED_KO ($(numfmt --to=iec-i --suffix=B "$DDK_SIZE"))"
+        # A stripped qcacld module is tens of MiB. Anything near the unstripped
+        # size means the strip silently did nothing.
+        if [ "$DDK_SIZE" -gt 209715200 ]; then
+          echo "::error::$EXPECTED_KO is still $(numfmt --to=iec-i --suffix=B "$DDK_SIZE") after stripping"
+          exit 1
+        fi
 
         # Re-run depmod so the DDK module appears in modules.dep; the ZIP step
         # resolves its dependency closure from that file.
