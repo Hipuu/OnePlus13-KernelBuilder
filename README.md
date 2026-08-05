@@ -69,6 +69,12 @@ enabled in the stock `sun_gki_peach-v2_defconfig` and gated at runtime by the
 Build the other five variants for external adapter support, or set `ddk` to
 `false` to build `6.6.118` the `make` way.
 
+The module pack on this variant contains `qca_cld3_peach_v2.ko`, the platform
+`cfg80211`/`mac80211`/`rfkill` it links against, the full dependency closure
+that `modules.dep` resolves (about 60 modules), and the CAN and USB-serial
+drivers. The build fails if the shipped modules' `vermagic` does not match the
+`Image`, since a mismatch makes them unloadable.
+
 ### Monitor-mode injection
 
 `ddk_injection` patches `wlan_mon_drv_ops` with a `.ndo_start_xmit` handler
@@ -88,16 +94,16 @@ interface is dropped by the network stack before the driver sees it.
 
 ## Supported variants
 
-| Model | Kernel | OS | Manifest |
-|-------|--------|----|----|
-| `OP13-6.6.89` | 6.6.89 | A16 | `oneplus_13_6.6.89_w.xml` |
-| `OP13-6.6.118` | 6.6.118 | A16 | `oneplus_13_6.6.118_w.xml` |
-| `OP13-6.6.66` | 6.6.66 | A15 | `oneplus_13_6.6.66_v.xml` |
-| `OP13-6.6.30` | 6.6.30 | A15 | `oneplus_13_6.6.30_v.xml` |
-| `OP13-CPH-6.6.89` | 6.6.89 | A15 (global) | `oneplus_13_global_6.6.89_v.xml` |
-| `OP13-CPH-6.6.56` | 6.6.56 | A15 (global) | `oneplus_13_global_6.6.56_v.xml` |
+| Model | Kernel | OS | Build | Manifest |
+|-------|--------|----|-------|----|
+| `OP13-6.6.89` | 6.6.89 | A16 | make | `oneplus_13_6.6.89_w.xml` |
+| `OP13-6.6.118` | 6.6.118 | A16 | **Bazel + DDK** | `oneplus_13_6.6.118_w.xml` |
+| `OP13-6.6.66` | 6.6.66 | A15 | make | `oneplus_13_6.6.66_v.xml` |
+| `OP13-6.6.30` | 6.6.30 | A15 | make | `oneplus_13_6.6.30_v.xml` |
+| `OP13-CPH-6.6.89` | 6.6.89 | A15 (global) | make | `oneplus_13_global_6.6.89_v.xml` |
+| `OP13-CPH-6.6.56` | 6.6.56 | A15 (global) | make | `oneplus_13_global_6.6.56_v.xml` |
 
-All share the same SoC (Snapdragon 8 Elite / SM8750), Android version (`android15`), and manifest branch (`wild/sm8750`).
+All share the same SoC (Snapdragon 8 Elite / SM8750), Android version (`android15`), and manifest branch (`wild/sm8750`). Only `OP13-6.6.118` carries the Kleaf/Bazel projects in its manifest; see [DDK build](#ddk-build).
 
 ## Usage
 

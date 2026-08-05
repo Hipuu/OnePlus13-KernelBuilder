@@ -3037,6 +3037,10 @@ runs:
           "kernel/net/can"
           "kernel/drivers/net/wireless"
           "kernel/drivers/net/can"
+          # CH341/FTDI/PL2303 adapters, which README lists under Nethunter.
+          # They only became loadable modules when the CAN and USB-serial
+          # stacks moved from =y to =m, so this directory was previously empty.
+          "kernel/drivers/usb/serial"
         )
 
         DEP_FILE="$UNAME_DIR/modules.dep"
