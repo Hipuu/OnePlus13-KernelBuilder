@@ -21,6 +21,9 @@
 # insmod dance into one command and resolves the dependency order itself, from
 # the modules.dep shipped alongside the .ko files.
 #
+# Modules are built with CONFIG_MODVERSIONS=y, so this pack only works on the
+# exact kernel build it shipped with.
+#
 # Usage, run as root from the directory this pack was extracted to:
 #
 #   ./nethunter-wifi.sh load [driver ...]   load drivers (default: ath9k_htc)
@@ -29,11 +32,19 @@
 #   ./nethunter-wifi.sh list                list every driver in this pack
 #   ./nethunter-wifi.sh monitor [if] [ch]   put the adapter into monitor mode
 #   ./nethunter-wifi.sh managed [if]        undo monitor mode
+#   ./nethunter-wifi.sh conmode sta|monitor [ch]
+#                                           switch the *internal* Wi-Fi between
+#                                           normal and monitor (reloads qcacld)
 #   ./nethunter-wifi.sh install [driver ...]  autoload at every boot (KernelSU)
 #   ./nethunter-wifi.sh uninstall           undo install
 #
-# Modules are built with CONFIG_MODVERSIONS=y, so this pack only works on the
-# exact kernel build it shipped with.
+# monitor/managed retype an *external* adapter's netdev in place, which is all
+# ath9k_htc and friends need. That does not work for the internal Qualcomm chip:
+# its mode is chosen when its driver loads, so use conmode for wlan0.
+#
+# conmode power-cycles the WLAN chip over PCIe/MHI, and that occasionally does
+# not come back: cnss2 times out and wlan0 disappears until you reboot. It is
+# intermittent, not every switch, and the script tells you when it happens.
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 DEP="$DIR/modules.dep"
@@ -47,6 +58,14 @@ INSTALL_DIR=/data/adb/nethunter-wifi
 # Wi-Fi, so it happens only when a requested driver actually needs mac80211.
 PLATFORM_MODULES="qca_cld3_peach_v2 mac80211 cfg80211"
 PLATFORM_DIR=/vendor/lib/modules
+
+# The internal Qualcomm Wi-Fi driver. Its operating mode is fixed at insmod time
+# by the con_mode module parameter, which qcacld declares read-only in sysfs
+# (S_IRUSR), so switching means unload + reload. iw cannot retype this netdev.
+QCACLD=qca_cld3_peach_v2
+CONMODE_PARAM=/sys/module/$QCACLD/parameters/con_mode
+CONMODE_STA=0
+CONMODE_MONITOR=4
 
 # Where the Nethunter firmware ZIP puts its blobs. ath9k_htc asks for
 # ath9k_htc/htc_9271-1.4.0.fw; the firmware loader only searches /lib/firmware
@@ -298,6 +317,14 @@ cmd_status() {
   echo "=== wireless interfaces ==="
   ls /sys/class/ieee80211 2>/dev/null || echo "  none"
   echo
+  echo "=== internal Wi-Fi (qcacld) ==="
+  if resident "$QCACLD"; then
+    _c=$(conmode_now)
+    echo "  con_mode ${_c:-?} -> $(conmode_name "$_c")"
+  else
+    echo "  $QCACLD not loaded"
+  fi
+  echo
   echo "=== firmware search path ==="
   cat "$FIRMWARE_PARAM" 2>/dev/null || echo "  (default)"
   echo
@@ -369,6 +396,140 @@ cmd_managed() {
   ip link set "$_iface" up 2>/dev/null
 }
 
+# Which qca_cld3 .ko to reload. Prefer the one in this pack: on builds with the
+# monitor-mode injection patch it is the only copy that can transmit, and it is
+# the copy whose symbol CRCs were built against this kernel. Fall back to the
+# stock vendor module when the pack does not ship one.
+qcacld_ko() {
+  if have_module "$QCACLD"; then
+    echo "$DIR/$QCACLD.ko"
+  else
+    echo "$PLATFORM_DIR/$QCACLD.ko"
+  fi
+}
+
+conmode_now() { cat "$CONMODE_PARAM" 2>/dev/null; }
+
+conmode_name() {
+  case "$1" in
+    "$CONMODE_STA") echo "sta (normal Wi-Fi)" ;;
+    1) echo "ap" ;;
+    "$CONMODE_MONITOR") echo "monitor" ;;
+    5) echo "ftm" ;;
+    6) echo "epping" ;;
+    "") echo "(driver not loaded)" ;;
+    *) echo "unknown ($1)" ;;
+  esac
+}
+
+# Switch the internal chip between normal Wi-Fi and monitor mode.
+#
+# Unloading qcacld while Android's WifiService holds the interface fails with
+# -EBUSY, so the framework is stopped first and the refcount is checked. In
+# monitor mode wlan0 becomes ARPHRD_IEEE80211_RADIOTAP (type 803) and carries
+# no IP -- expect adb-over-Wi-Fi to drop if that is how you are connected.
+#
+# Reloading qcacld power-cycles the WLAN chip over PCIe/MHI, and that does not
+# always come back: cnss2 reports "MHI power up returns timeout" and
+# "Failed to start MHI, err = -110", after which no wlan0 is created and no
+# amount of reloading helps -- only a reboot re-establishes the link. Seen once
+# in several switches on 6.6.118, so it is intermittent rather than a hard
+# two-switch limit. Either way the mode is verified after the load and a wedged
+# link is reported plainly rather than left to look like a script bug.
+cmd_conmode() {
+  need_root
+  _mode=${1:-}
+  _chan=${2:-}
+
+  if [ -z "$_mode" ] || [ "$_mode" = show ]; then
+    _cur=$(conmode_now)
+    echo "  con_mode: ${_cur:-unset} -> $(conmode_name "$_cur")"
+    [ -n "$_cur" ] && ip link show wlan0 2>/dev/null | head -1
+    echo
+    echo "usage: $0 conmode sta|monitor [channel]"
+    return 0
+  fi
+
+  case "$_mode" in
+    sta|managed|normal|0) _want=$CONMODE_STA ;;
+    monitor|mon|4)        _want=$CONMODE_MONITOR ;;
+    *) die "unknown mode '$_mode' (want: sta | monitor)" ;;
+  esac
+
+  _ko=$(qcacld_ko)
+  [ -f "$_ko" ] || die "no $QCACLD.ko in this pack or $PLATFORM_DIR"
+
+  _cur=$(conmode_now)
+  if [ "$_cur" = "$_want" ] && [ -z "$_chan" ]; then
+    echo "  already in $(conmode_name "$_want")"
+    return 0
+  fi
+
+  echo "=== stopping Wi-Fi framework ==="
+  wifi_cmd set-wifi-enabled disabled
+  sleep 3
+  ip link set wlan0 down 2>/dev/null
+
+  if resident "$QCACLD"; then
+    _refs=$(cat "/sys/module/$QCACLD/refcnt" 2>/dev/null)
+    [ "${_refs:-0}" = 0 ] || echo "  warning: refcount $_refs, unload may fail"
+    if rmmod "$QCACLD" 2>"$ERR"; then
+      echo "  unloaded $QCACLD"
+    else
+      die "cannot unload $QCACLD: $(cat "$ERR" 2>/dev/null)
+  something still holds it; stop Wi-Fi/hotspot/tethering and retry"
+    fi
+    sleep 1
+  fi
+
+  echo "=== loading $QCACLD con_mode=$_want ($(conmode_name "$_want")) ==="
+  echo "  from $_ko"
+  insmod "$_ko" "con_mode=$_want" 2>"$ERR" \
+    || die "insmod failed: $(cat "$ERR" 2>/dev/null)"
+
+  # The chip enumerates over PCIe/MHI asynchronously, so wlan0 appears a second
+  # or two after insmod returns. Wait for it rather than racing it.
+  _waited=0
+  while [ "$_waited" -lt 15 ]; do
+    [ -e /sys/class/net/wlan0 ] && break
+    sleep 1
+    _waited=$((_waited + 1))
+  done
+
+  if [ ! -e /sys/class/net/wlan0 ]; then
+    echo
+    echo "  no wlan0 after ${_waited}s. Kernel log:"
+    dmesg | grep -iE "cnss:|peach_v2" | tail -6 | sed 's/^/    /'
+    if dmesg | grep -q "MHI power up returns timeout\|Failed to start MHI"; then
+      die "the WLAN chip's MHI link is wedged and only a reboot clears it.
+  This is a cnss2/firmware limitation, not a problem with the module:
+  reboot, then switch modes at most once per boot."
+    fi
+    die "driver loaded but no wlan0 appeared; see the log above"
+  fi
+
+  _got=$(conmode_now)
+  [ "$_got" = "$_want" ] \
+    || echo "  warning: asked for con_mode=$_want but driver reports ${_got:-unset}"
+
+  if [ "$_want" = "$CONMODE_MONITOR" ]; then
+    ip link set wlan0 up 2>/dev/null
+    if [ -n "$_chan" ] && command -v iw >/dev/null 2>&1; then
+      iw dev wlan0 set channel "$_chan" 2>"$ERR" \
+        && echo "  channel $_chan" \
+        || echo "  could not set channel $_chan: $(cat "$ERR" 2>/dev/null)"
+    fi
+    echo "  wlan0 type: $(cat /sys/class/net/wlan0/type 2>/dev/null) (803 = radiotap)"
+    command -v iw >/dev/null 2>&1 && iw dev wlan0 info 2>/dev/null | grep -E "type|channel"
+    echo
+    echo "Capture with: tcpdump -i wlan0 -e -nn"
+    echo "Back to normal: $0 conmode sta"
+  else
+    wifi_cmd set-wifi-enabled enabled
+    echo "  Wi-Fi re-enabled; reconnection takes a few seconds"
+  fi
+}
+
 cmd_install() {
   need_root
   drivers=${*:-$DEFAULT_DRIVERS}
@@ -421,10 +582,14 @@ case "$action" in
   list)      cmd_list ;;
   monitor)   cmd_monitor "$@" ;;
   managed)   cmd_managed "$@" ;;
+  conmode)   cmd_conmode "$@" ;;
   install)   cmd_install "$@" ;;
   uninstall) cmd_uninstall ;;
   -h|--help|help)
-    sed -n '23,34p' "$0" | sed -e 's/^#  *//' -e 's/^#$//'
+    # Print the usage comment block: from the "Usage" heading up to the last
+    # line before the first non-comment line, dropping that line itself.
+    sed -n '/^# Usage, run as root/,/^[^#]/{/^[^#]/d;p;}' "$0" \
+      | sed -e 's/^# \{0,1\}//'
     ;;
   *)
     die "unknown command '$action' (try: $0 --help)"

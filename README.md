@@ -165,12 +165,32 @@ Extract `kernel_modules_*.zip` on the device, extract the firmware ZIP, and run 
 ./nethunter-wifi.sh monitor         # monitor mode, auto-detected interface
 ./nethunter-wifi.sh monitor "" 6    # monitor mode on channel 6
 ./nethunter-wifi.sh managed         # leave monitor mode
+./nethunter-wifi.sh conmode monitor 6   # internal Wi-Fi -> monitor, channel 6
+./nethunter-wifi.sh conmode sta     # internal Wi-Fi -> normal
+./nethunter-wifi.sh conmode         # show the current mode
 ./nethunter-wifi.sh restore         # unload and restore internal Wi-Fi
 ./nethunter-wifi.sh install         # autoload at boot (KernelSU/Magisk)
 ./nethunter-wifi.sh uninstall       # remove boot service
 ```
 
 `load` walks the shipped `modules.dep` to resolve dependency order, displaces the platform Wi-Fi stack when the driver requires `mac80211`, and points the firmware loader at the directory holding the NetHunter blobs.
+
+### Internal Wi-Fi monitor mode (`conmode`)
+
+`monitor`/`managed` retype an external adapter's netdev in place. The internal Qualcomm chip cannot be retyped that way — qcacld fixes its role at load time from the `con_mode` module parameter, which is read-only in sysfs. `conmode` reloads the driver with the value you ask for:
+
+| `con_mode` | Mode |
+|-----------|------|
+| `0` | STA — normal Wi-Fi (default) |
+| `1` | AP |
+| `4` | Monitor |
+| `5` | FTM (factory test) |
+| `6` | EPPING |
+
+Verified on a OnePlus 13 running the DDK build: `wlan0` becomes `ARPHRD_IEEE80211_RADIOTAP` (type `803`) and `tcpdump -i wlan0 -e -nn` captures beacons, data frames, RTS/CTS and block-ACKs from all nearby networks with radiotap RSSI and rate annotations.
+
+> [!WARNING]
+> `conmode` power-cycles the WLAN chip over PCIe/MHI, and the link occasionally fails to come back — `cnss2` logs `MHI power up returns timeout` / `Failed to start MHI, err = -110`, and `wlan0` stays gone until you reboot. The script detects this and says so. It is intermittent, not every switch.
 
 ### Behavior to expect
 
