@@ -84,12 +84,14 @@ of operations"* — so without this a radiotap frame written to the monitor
 interface is dropped by the network stack before the driver sees it.
 
 > [!WARNING]
-> This is **experimental and unverified on hardware.** The firmware decides
-> whether to accept a frame on a monitor vdev and may drop anything that is not
-> a management frame, or drop everything, in which case the handler is dead
-> code. Radiotap Tx flags (rate, retries, `TX_NOACK`) are parsed only far enough
-> to locate the 802.11 frame and are otherwise ignored. The 20 dBm world
-> regulatory cap and the `no IR` flag on channels 12–14 still apply.
+> Monitor mode itself is confirmed working on a OnePlus 13 — see
+> [internal Wi-Fi monitor mode](#internal-wi-fi-monitor-mode-conmode). **The
+> injection path is not.** The firmware decides whether to accept a frame on a
+> monitor vdev and may drop anything that is not a management frame, or drop
+> everything, in which case the handler is dead code. Radiotap Tx flags (rate,
+> retries, `TX_NOACK`) are parsed only far enough to locate the 802.11 frame and
+> are otherwise ignored. The 20 dBm world regulatory cap and the `no IR` flag on
+> channels 12–14 still apply.
 
 
 ## Supported variants
@@ -129,7 +131,7 @@ gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
 | `compiler` | Pinned ZyC Clang 19 or manifest Clang | `zycromerz-19` |
 | `use_opt_patches` | Apply optimization patches | `true` |
 | `ddk` | Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (`6.6.118 A16` only) | `true` |
-| `ddk_injection` | Patch qcacld monitor mode for frame injection (experimental) | `true` |
+| `ddk_injection` | Patch qcacld for frame injection in monitor mode (experimental; requires `ddk`) | `true` |
 | `kernel_uname` | uname suffix | `OP-WILD` |
 | `build_timestamp` | Custom uname timestamp (empty = current UTC) | empty |
 | `clean_build` | Build without ccache restore | `false` |

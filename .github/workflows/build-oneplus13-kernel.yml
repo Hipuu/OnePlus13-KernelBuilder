@@ -59,7 +59,7 @@ on:
         type: boolean
         default: true
       ddk_injection:
-        description: 'Patch qcacld monitor mode for frame injection (experimental, unverified on hardware)'
+        description: 'Patch qcacld for frame injection in monitor mode (experimental; requires ddk, so 6.6.118 A16 only)'
         required: false
         type: boolean
         default: true
