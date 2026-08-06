@@ -26,6 +26,7 @@
 #
 # Usage, run as root from the directory this pack was extracted to:
 #
+#   ./nethunter-wifi.sh                     interactive menu (no arguments)
 #   ./nethunter-wifi.sh load [driver ...]   load drivers (default: ath9k_htc)
 #   ./nethunter-wifi.sh restore             unload them, restore internal Wi-Fi
 #   ./nethunter-wifi.sh status              show what is currently resident
@@ -569,13 +570,105 @@ cmd_uninstall() {
   echo "Reboot to get the internal Wi-Fi back."
 }
 
-action=${1:-load}
+cmd_help() {
+  # Print the usage comment block: from the "Usage" heading up to the last
+  # line before the first non-comment line, dropping that line itself.
+  sed -n '/^# Usage, run as root/,/^[^#]/{/^[^#]/d;p;}' "$0" \
+    | sed -e 's/^# \{0,1\}//'
+}
+
+# Interactive menu, shown when the script is run with no arguments.
+#
+# Every entry maps onto a subcommand that also works non-interactively, so the
+# menu is a convenience and never the only way to reach something. It re-reads
+# the live state each pass rather than caching it, because the modes it offers
+# change what is true underneath -- and because a wedged MHI link means the
+# state after an action is not always the state that was asked for.
+menu_state() {
+  if resident "$QCACLD"; then
+    _c=$(conmode_now)
+    echo "internal Wi-Fi: $(conmode_name "$_c")"
+  else
+    echo "internal Wi-Fi: $QCACLD not loaded"
+  fi
+}
+
+cmd_menu() {
+  # read -r is POSIX; toybox sh supports it. No `read -p`, that is a bashism.
+  while :; do
+    echo
+    echo "=============================================="
+    echo " nethunter-wifi -- $(menu_state)"
+    echo "=============================================="
+    echo "  1) internal Wi-Fi -> monitor mode"
+    echo "  2) internal Wi-Fi -> normal (sta)"
+    echo "  3) load an external adapter driver"
+    echo "  4) external adapter -> monitor mode"
+    echo "  5) external adapter -> managed mode"
+    echo "  6) status"
+    echo "  7) list drivers in this pack"
+    echo "  8) restore platform Wi-Fi stack"
+    echo "  9) help"
+    echo "  0) quit"
+    echo
+    printf 'choice: '
+    read -r _sel || { echo; return 0; }
+
+    case "$_sel" in
+      1)
+        printf 'channel (blank = leave as is): '
+        read -r _ch
+        cmd_conmode monitor "$_ch"
+        ;;
+      2) cmd_conmode sta ;;
+      3)
+        cmd_list
+        printf 'driver (blank = %s): ' "$DEFAULT_DRIVERS"
+        read -r _drv
+        cmd_load ${_drv:-$DEFAULT_DRIVERS}
+        ;;
+      4)
+        printf 'interface (blank = auto-detect): '
+        read -r _if
+        printf 'channel (blank = leave as is): '
+        read -r _ch
+        cmd_monitor "$_if" "$_ch"
+        ;;
+      5)
+        printf 'interface (blank = auto-detect): '
+        read -r _if
+        cmd_managed "$_if"
+        ;;
+      6) cmd_status ;;
+      7) cmd_list ;;
+      8) cmd_restore ;;
+      9) cmd_help ;;
+      0|q|quit|exit) return 0 ;;
+      "") ;;
+      *) echo "  no such choice: $_sel" ;;
+    esac
+  done
+}
+
+
+# No arguments means the interactive menu -- but only when there is a terminal
+# to prompt at. A scripted caller with no arguments gets the help text rather
+# than a menu that immediately reads EOF, or a surprise driver load.
+if [ $# -eq 0 ]; then
+  if [ -t 0 ]; then
+    action=menu
+  else
+    action=help
+  fi
+else
+  action=$1
+fi
 # Kept for the need_root message: the subcommand's own args are shifted away
-# before it runs, so reconstruct the full invocation here. With no args at all
-# the action defaults to "load", so name it explicitly.
+# before it runs, so reconstruct the full invocation here.
 INVOCATION=${*:-$action}
 [ $# -gt 0 ] && shift
 case "$action" in
+  menu)      cmd_menu ;;
   load)      cmd_load "$@" ;;
   restore)   cmd_restore ;;
   status)    cmd_status ;;
@@ -586,10 +679,7 @@ case "$action" in
   install)   cmd_install "$@" ;;
   uninstall) cmd_uninstall ;;
   -h|--help|help)
-    # Print the usage comment block: from the "Usage" heading up to the last
-    # line before the first non-comment line, dropping that line itself.
-    sed -n '/^# Usage, run as root/,/^[^#]/{/^[^#]/d;p;}' "$0" \
-      | sed -e 's/^# \{0,1\}//'
+    cmd_help
     ;;
   *)
     die "unknown command '$action' (try: $0 --help)"

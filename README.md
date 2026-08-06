@@ -155,7 +155,29 @@ gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
 > [!IMPORTANT]
 > Modules are built with `CONFIG_MODVERSIONS=y`. A module pack loads **only** on the exact kernel build it shipped with — matching base versions is not sufficient.
 
-Extract `kernel_modules_*.zip` on the device, extract the firmware ZIP, and run the bundled loader as root:
+Extract `kernel_modules_*.zip` on the device, extract the firmware ZIP, and run the bundled loader as root. Run it with no arguments for an interactive menu:
+
+```bash
+./nethunter-wifi.sh                 # interactive menu
+```
+
+```
+==============================================
+ nethunter-wifi -- internal Wi-Fi: sta (normal Wi-Fi)
+==============================================
+  1) internal Wi-Fi -> monitor mode
+  2) internal Wi-Fi -> normal (sta)
+  3) load an external adapter driver
+  4) external adapter -> monitor mode
+  5) external adapter -> managed mode
+  6) status
+  7) list drivers in this pack
+  8) restore platform Wi-Fi stack
+  9) help
+  0) quit
+```
+
+The header shows the live mode and refreshes after every action. Each entry maps onto a subcommand that also works directly:
 
 ```bash
 ./nethunter-wifi.sh load            # load default driver (ath9k_htc)
@@ -172,6 +194,8 @@ Extract `kernel_modules_*.zip` on the device, extract the firmware ZIP, and run 
 ./nethunter-wifi.sh install         # autoload at boot (KernelSU/Magisk)
 ./nethunter-wifi.sh uninstall       # remove boot service
 ```
+
+With no arguments and no terminal attached — piped, or run from a boot service — it prints this help instead of opening a menu it could not read.
 
 `load` walks the shipped `modules.dep` to resolve dependency order, displaces the platform Wi-Fi stack when the driver requires `mac80211`, and points the firmware loader at the directory holding the NetHunter blobs.
 

@@ -141,9 +141,18 @@ If that fails with a version-magic or unknown-symbol error, the pack does not ma
 In practice, use the bundled loader instead of doing that by hand:
 
 ```bash
+./nethunter-wifi.sh            # interactive menu
 ./nethunter-wifi.sh load       # ath9k_htc by default
 ./nethunter-wifi.sh status
 ./nethunter-wifi.sh restore
+```
+
+To put the *internal* Wi-Fi into monitor mode (no external adapter needed):
+
+```bash
+./nethunter-wifi.sh conmode monitor 6
+tcpdump -i wlan0 -e -nn
+./nethunter-wifi.sh conmode sta
 ```
 
 ### Testing over wireless ADB
