@@ -146,7 +146,7 @@ can never succeed.
 +		return NETDEV_TX_OK;
 +	}
 +
-+	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_P2P_ID);
++	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_ID);
 +	if (!vdev) {
 +		hdd_debug_rl("No vdev for monitor injection; dropping");
 +		kfree_skb(skb);
@@ -169,7 +169,7 @@ can never succeed.
 +				      false, true, &cookie,
 +				      QDF_MONITOR_MODE);
 +
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_P2P_ID);
++	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
 +
 +	if (errno) {
 +		hdd_debug_rl("Injection rejected, errno %d", errno);

@@ -877,9 +877,9 @@ runs:
         echo "Adding KernelSU Next..."
         KSU_INPUT="${{ inputs.ksu_branch_or_hash }}"
         if [ -z "$KSU_INPUT" ]; then
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -
         else
-          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_INPUT"
+          curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s "$KSU_INPUT"
         fi
         git submodule update --init --recursive
         cd KernelSU-Next/kernel
@@ -893,7 +893,20 @@ runs:
         fi
 
         KSU_VERSION=$(expr $COMMITS_COUNT "+" $BASE_VERSION)
-        sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" Makefile
+
+        # KernelSU-Next moved version calculation from Makefile to Kbuild.
+        # In Bazel/symlinked builds the git-root detection can fail, causing
+        # KSU_VERSION to fall back to 1. Pin the values Kbuild will use.
+        awk -v count="$COMMITS_COUNT" '
+          /^# Calculate version if git version is available$/ {
+            print "# --- version injected by build pipeline ---"
+            print "KSU_GIT_VERSION := " count
+            print "KSU_GIT_TAG := \"v0.0.1\""
+            print "KSU_GIT_VERSION_VALID := 1"
+            print ""
+          }
+          { print }
+        ' Kbuild > Kbuild.tmp && mv Kbuild.tmp Kbuild
 
         if [ -f ksu.c ]; then
           sed -i 's/#if defined(CONFIG_STACKPROTECTOR) && (defined(CONFIG_ARM64) && !defined(CONFIG_STACKPROTECTOR_PER_TASK))/#if 0/' ksu.c
@@ -946,8 +959,22 @@ runs:
         git submodule update --init --recursive
         cd KernelSU/kernel
         BASE_VERSION=30000
-        KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" $BASE_VERSION)
-        sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" Makefile
+        COMMITS_COUNT=$(/usr/bin/git rev-list --count HEAD)
+        KSU_VERSION=$(expr $COMMITS_COUNT "+" $BASE_VERSION)
+
+        # KernelSU moved version calculation from Makefile to Kbuild.
+        # Pin the values Kbuild will use so the driver reports the same version
+        # as the build metadata.
+        awk -v count="$COMMITS_COUNT" '
+          /^# Calculate version if git version is available$/ {
+            print "# --- version injected by build pipeline ---"
+            print "KSU_GIT_VERSION := " count
+            print "KSU_GIT_TAG := \"v0.0.1\""
+            print "KSU_GIT_VERSION_VALID := 1"
+            print ""
+          }
+          { print }
+        ' Kbuild > Kbuild.tmp && mv Kbuild.tmp Kbuild
 
         if [ -f ksu.c ]; then
           sed -i 's/#if defined(CONFIG_STACKPROTECTOR) && (defined(CONFIG_ARM64) && !defined(CONFIG_STACKPROTECTOR_PER_TASK))/#if 0/' ksu.c
