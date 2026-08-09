@@ -416,10 +416,11 @@ jobs:
           mkdir -p release-files
 
           # Artifacts uploaded with `archive: false` land as
-          # release-artifacts/<file-name>/<file-name>; flatten them.
+          # release-artifacts/<artifact-name>/<file-name>. Flatten them,
+          # copying any file that matches a release artifact pattern.
           find release-artifacts -type f \
             \( -name 'AK3_*.zip' -o -name 'kernel_modules_*.zip' \
-               -o -name 'Nethunter-Wireless-Firmware*.zip' -o -name 'Image_*.zip' \) \
+               -o -name 'Nethunter-Wireless-Firmware*.zip' -o -name 'Image' \) \
             -exec cp -n -- {} release-files/ \;
 
           echo "Release files:"
