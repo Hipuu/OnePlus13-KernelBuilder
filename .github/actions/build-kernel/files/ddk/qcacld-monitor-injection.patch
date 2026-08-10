@@ -109,7 +109,7 @@ can never succeed.
 +		hdd_mon_inject_sta_adapter = NULL;
 +	}
 +
-+	if (!wlan_hdd_is_session_type_monitor(mon_adapter->device_mode))
++	if (mon_adapter->device_mode != QDF_MONITOR_MODE)
 +		return false;
 +
 +	mac_addr = wlan_hdd_get_intf_addr(hdd_ctx, QDF_STA_MODE);
@@ -206,7 +206,7 @@ can never succeed.
  	hdd_deinit_adapter(hdd_ctx, adapter, true);
  
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
-+	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
++	if (adapter->device_mode == QDF_MONITOR_MODE) {
 +		netif_tx_stop_all_queues(dev);
 +		netif_carrier_off(dev);
 +		hdd_mon_inject_destroy_hidden_sta(adapter);
