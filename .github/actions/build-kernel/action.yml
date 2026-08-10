@@ -2514,6 +2514,16 @@ runs:
         done
         echo "::endgroup::"
 
+    - name: Stage qcacld DDK module artifact
+      if: ${{ env.OP_DDK == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        KO=$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -type f -name 'qca_cld3_*.ko' -print -quit)
+        [ -n "$KO" ] || { echo "::error::qca_cld3 DDK module not found"; exit 1; }
+        cp -f "$KO" "$ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
+        echo "Staged qcacld DDK module for artifact upload: $ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
+
     - name: Verify Bazel defconfig
       if: ${{ env.OP_DDK == 'true' }}
       shell: bash
@@ -3385,6 +3395,16 @@ runs:
       with:
         name: ${{ env.MODULES_ZIP_NAME }}
         path: ${{ env.ARTIFACTS_FOLDER }}/${{ env.MODULES_ZIP_NAME }}
+        archive: false
+        compression-level: 0
+        retention-days: 90
+
+    - name: Upload qcacld DDK module
+      if: success() && env.OP_DDK == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: qca_cld3_peach_v2
+        path: ${{ env.ARTIFACTS_FOLDER }}/qca_cld3_peach_v2.ko
         archive: false
         compression-level: 0
         retention-days: 90
