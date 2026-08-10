@@ -76,26 +76,33 @@ can never succeed.
 + * STA vdev is created alongside the monitor interface. Injection uses this
 + * STA vdev instead of the monitor vdev.
 + *
-+ * Return: none
++ * Return: true if the hidden STA vdev is ready for injection, false otherwise
 + */
-+static void hdd_mon_inject_create_hidden_sta(struct hdd_adapter *mon_adapter)
++static bool hdd_mon_inject_create_hidden_sta(struct hdd_adapter *mon_adapter)
 +{
 +	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(mon_adapter);
 +	struct hdd_adapter_create_param params = {0};
 +	struct hdd_adapter *sta_adapter;
 +	struct wlan_objmgr_vdev *vdev;
 +	uint8_t *mac_addr;
++	QDF_STATUS status;
 +
-+	if (hdd_mon_inject_sta_adapter)
-+		return;
++	if (hdd_mon_inject_sta_adapter) {
++		sta_adapter = hdd_get_adapter_by_macaddr(hdd_ctx,
++						hdd_mon_inject_sta_adapter->mac_addr.bytes);
++		if (sta_adapter == hdd_mon_inject_sta_adapter)
++			return true;
++		/* Stale pointer left behind after a mode switch. */
++		hdd_mon_inject_sta_adapter = NULL;
++	}
 +
 +	if (!wlan_hdd_is_session_type_monitor(mon_adapter->device_mode))
-+		return;
++		return false;
 +
 +	mac_addr = wlan_hdd_get_intf_addr(hdd_ctx, QDF_STA_MODE);
 +	if (!mac_addr) {
 +		hdd_err("Injection: failed to get STA MAC address");
-+		return;
++		return false;
 +	}
 +
 +	sta_adapter = hdd_open_adapter(hdd_ctx, QDF_STA_MODE, "null",
@@ -104,7 +111,7 @@ can never succeed.
 +	if (!sta_adapter) {
 +		hdd_err("Injection: failed to open hidden STA adapter");
 +		wlan_hdd_release_intf_addr(hdd_ctx, mac_addr);
-+		return;
++		return false;
 +	}
 +
 +	if (hdd_start_adapter(sta_adapter, true)) {
@@ -118,16 +125,23 @@ can never succeed.
 +		goto err_close;
 +	}
 +
-+	mlme_vdev_self_peer_create(vdev);
++	status = mlme_vdev_self_peer_create(vdev);
 +	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
 +
-+	hdd_mon_inject_sta_adapter = sta_adapter;
-+	return;
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: failed to create self peer");
++		goto err_stop;
++	}
 +
-+err_close:
++	hdd_mon_inject_sta_adapter = sta_adapter;
++	return true;
++
++err_stop:
 +	hdd_stop_adapter(hdd_ctx, sta_adapter);
++err_close:
 +	hdd_close_adapter(hdd_ctx, sta_adapter, true);
 +	wlan_hdd_release_intf_addr(hdd_ctx, mac_addr);
++	return false;
 +}
 +
 +/**
@@ -162,13 +176,15 @@ can never succeed.
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
-+		hdd_mon_inject_create_hidden_sta(adapter);
-+		/* Injection needs the network stack to deliver packets to the
-+		 * new ndo_start_xmit. Monitor mode reports no carrier by default,
-+		 * which stops the qdisc, so mark it up and wake the queues.
-+		 */
-+		netif_carrier_on(dev);
-+		netif_tx_wake_all_queues(dev);
++		if (hdd_mon_inject_create_hidden_sta(adapter)) {
++			/* Injection needs the network stack to deliver packets to
++			 * the new ndo_start_xmit. Monitor mode reports no carrier by
++			 * default, which stops the qdisc, so mark it up and wake the
++			 * queues only if the hidden STA vdev is actually ready.
++			 */
++			netif_carrier_on(dev);
++			netif_tx_wake_all_queues(dev);
++		}
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
@@ -289,6 +305,14 @@ can never succeed.
 +		return NETDEV_TX_OK;
 +	}
 +
++	if (hdd_get_adapter_by_macaddr(hdd_ctx,
++				       sta_adapter->mac_addr.bytes) != sta_adapter) {
++		hdd_debug_rl("Hidden STA adapter is stale; dropping");
++		hdd_mon_inject_sta_adapter = NULL;
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
 +	link_info = sta_adapter->deflink;
 +	if (!link_info || wlan_hdd_validate_vdev_id(link_info->vdev_id)) {
 +		hdd_debug_rl("Hidden STA vdev not ready; dropping injected frame");
@@ -305,6 +329,27 @@ can never succeed.
 +		hdd_debug_rl("Malformed radiotap frame; dropping");
 +		kfree_skb(skb);
 +		return NETDEV_TX_OK;
++	}
++
++	/*
++	 * The P2P off-channel TX path needs an existing peer. The hidden
++	 * STA vdev's self peer is matched by source address, so rewrite the
++	 * injected frame's source and BSSID to the hidden STA vdev's MAC.
++	 */
++	{
++		struct hidden_80211_hdr {
++			uint8_t frame_ctrl[2];
++			uint8_t duration[2];
++			uint8_t addr1[6];
++			uint8_t addr2[6];
++			uint8_t addr3[6];
++			uint8_t seq_ctrl[2];
++		} *hdr = (void *)skb->data;
++
++		memcpy(hdr->addr2, sta_adapter->mac_addr.bytes,
++		       QDF_MAC_ADDR_SIZE);
++		memcpy(hdr->addr3, sta_adapter->mac_addr.bytes,
++		       QDF_MAC_ADDR_SIZE);
 +	}
 +
 +	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_ID);
