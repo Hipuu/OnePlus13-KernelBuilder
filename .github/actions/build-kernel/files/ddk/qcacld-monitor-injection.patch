@@ -35,6 +35,19 @@ Changes in this revision:
     wlan_cfg80211_mgmt_tx(). Passing NULL made the P2P off-channel path
     treat the frame as having frequency 0 and drop it.
 
+  * Injected frames have addr2 and addr3 rewritten to the hidden STA MAC
+    before they reach the P2P off-channel TX path. Otherwise the self-peer
+    lookup fails and the frame is dropped before going over the air.
+
+  * hdd_mon_inject_create_hidden_sta() returns success/failure and
+    __hdd_mon_open() only enables the carrier/queues when creation succeeds.
+    Previously a failed creation left the interface up with every packet
+    silently dropped.
+
+  * The cached hidden-STA adapter pointer is revalidated with
+    hdd_get_adapter_by_macaddr() before use in both creation and xmit paths,
+    preventing a stale/UAF reference after a monitor-mode stop/restart cycle.
+
 Limitations, in order of how likely they are to bite:
 
   * This is management-frame injection only. The chosen firmware path
@@ -50,8 +63,8 @@ Frames are dropped, never requeued, on any error: returning anything other
 than NETDEV_TX_OK from ndo_start_xmit would make the stack retry a frame that
 can never succeed.
 
---- a/core/hdd/src/wlan_hdd_main.c	2026-08-10 11:04:52.404285355 +0700
-+++ b/core/hdd/src/wlan_hdd_main.c	2026-08-10 11:12:23.588476236 +0700
+--- a/core/hdd/src/wlan_hdd_main.c	2026-08-10 12:50:16.470074755 +0700
++++ b/core/hdd/src/wlan_hdd_main.c	2026-08-10 12:50:16.472884797 +0700
 @@ -156,6 +156,7 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
@@ -60,7 +73,7 @@ can never succeed.
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3450,97 @@
+@@ -3449,6 +3450,111 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -76,7 +89,7 @@ can never succeed.
 + * STA vdev is created alongside the monitor interface. Injection uses this
 + * STA vdev instead of the monitor vdev.
 + *
-+ * Return: true if the hidden STA vdev is ready for injection, false otherwise
++ * Return: none
 + */
 +static bool hdd_mon_inject_create_hidden_sta(struct hdd_adapter *mon_adapter)
 +{
@@ -89,7 +102,7 @@ can never succeed.
 +
 +	if (hdd_mon_inject_sta_adapter) {
 +		sta_adapter = hdd_get_adapter_by_macaddr(hdd_ctx,
-+						hdd_mon_inject_sta_adapter->mac_addr.bytes);
++					hdd_mon_inject_sta_adapter->mac_addr.bytes);
 +		if (sta_adapter == hdd_mon_inject_sta_adapter)
 +			return true;
 +		/* Stale pointer left behind after a mode switch. */
@@ -172,7 +185,7 @@ can never succeed.
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3615,13 @@
+@@ -3523,6 +3629,15 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -188,7 +201,7 @@ can never succeed.
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5890,6 +5989,14 @@
+@@ -5890,6 +6005,14 @@
  	/* DeInit the adapter. This ensures datapath cleanup as well */
  	hdd_deinit_adapter(hdd_ctx, adapter, true);
  
@@ -203,7 +216,7 @@ can never succeed.
  reset_iface_opened:
  	/* Make sure the interface is marked as closed */
  	clear_bit(DEVICE_IFACE_OPENED, &adapter->event_flags);
-@@ -7306,10 +7413,189 @@
+@@ -7306,10 +7429,209 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -299,16 +312,16 @@ can never succeed.
 +	}
 +
 +	sta_adapter = hdd_mon_inject_sta_adapter;
++	if (sta_adapter) {
++		struct hdd_adapter *cur_adapter;
++
++		cur_adapter = hdd_get_adapter_by_macaddr(hdd_ctx,
++					sta_adapter->mac_addr.bytes);
++		if (cur_adapter != sta_adapter)
++			sta_adapter = NULL;
++	}
 +	if (!sta_adapter) {
 +		hdd_debug_rl("No hidden STA vdev for injection; dropping");
-+		kfree_skb(skb);
-+		return NETDEV_TX_OK;
-+	}
-+
-+	if (hdd_get_adapter_by_macaddr(hdd_ctx,
-+				       sta_adapter->mac_addr.bytes) != sta_adapter) {
-+		hdd_debug_rl("Hidden STA adapter is stale; dropping");
-+		hdd_mon_inject_sta_adapter = NULL;
 +		kfree_skb(skb);
 +		return NETDEV_TX_OK;
 +	}
@@ -332,24 +345,15 @@ can never succeed.
 +	}
 +
 +	/*
-+	 * The P2P off-channel TX path needs an existing peer. The hidden
-+	 * STA vdev's self peer is matched by source address, so rewrite the
-+	 * injected frame's source and BSSID to the hidden STA vdev's MAC.
++	 * The P2P off-channel TX path looks for a peer that matches addr1 or
++	 * addr2. The hidden STA only has a self peer, so rewrite those addresses
++	 * to the hidden STA's MAC so the frame is accepted and goes OTA.
 +	 */
-+	{
-+		struct hidden_80211_hdr {
-+			uint8_t frame_ctrl[2];
-+			uint8_t duration[2];
-+			uint8_t addr1[6];
-+			uint8_t addr2[6];
-+			uint8_t addr3[6];
-+			uint8_t seq_ctrl[2];
-+		} *hdr = (void *)skb->data;
-+
-+		memcpy(hdr->addr2, sta_adapter->mac_addr.bytes,
-+		       QDF_MAC_ADDR_SIZE);
-+		memcpy(hdr->addr3, sta_adapter->mac_addr.bytes,
-+		       QDF_MAC_ADDR_SIZE);
++	if (skb->len >= HDD_MON_MIN_80211_LEN) {
++		memcpy(skb->data + ETH_ALEN * 2,
++		       sta_adapter->mac_addr.bytes, ETH_ALEN);
++		memcpy(skb->data + ETH_ALEN * 3,
++		       sta_adapter->mac_addr.bytes, ETH_ALEN);
 +	}
 +
 +	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_ID);
