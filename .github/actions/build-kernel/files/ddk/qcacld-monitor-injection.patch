@@ -21,18 +21,27 @@ would otherwise fail. Note that __wlan_hdd_mgmt_tx()'s own device_mode
 branches are all skipped for QDF_MONITOR_MODE, which is why this calls
 wlan_cfg80211_mgmt_tx() directly rather than reusing that wrapper.
 
+Changes in this revision:
+
+  * hdd_open_adapter()/close()/deinit() and hdd_start_adapter() for the
+    hidden STA are called with the RTNL-held flag because we are already
+    inside ndo_open/ndo_stop. Avoids a self-deadlock on register_netdev.
+
+  * The monitor netdev is given a carrier and its TX queues are woken after
+    the hidden STA vdev is created. Without this the network stack drops
+    injected packets before ndo_start_xmit is ever called.
+
+  * The monitor vdev's current channel is looked up and passed to
+    wlan_cfg80211_mgmt_tx(). Passing NULL made the P2P off-channel path
+    treat the frame as having frequency 0 and drop it.
+
 Limitations, in order of how likely they are to bite:
 
-  * The hidden STA vdev must be on the same channel as the intended transmit
-    channel.  Because the injection path passes NULL for the channel, the
-    hidden STA vdev's current channel is used.  Userspace is responsible for
-    ensuring the monitor and hidden STA vdevs are tuned to the desired
-    channel.
+  * This is management-frame injection only. The chosen firmware path
+    (wlan_cfg80211_mgmt_tx / P2P off-channel TX) explicitly rejects data
+    and control frames and requires a valid management frame header.
   * Radiotap is parsed only far enough to find where the 802.11 frame begins.
     Requested rate, retries and TX_NOACK are ignored; the firmware chooses.
-  * Data and control frames are handed to the same entry point.
-    wlan_cfg80211_mgmt_tx() is a management-frame API, so those are the most
-    likely to be rejected.
   * The 20 dBm world-regulatory cap and the "no IR" flag on channels 12-14
     still apply; they are enforced by cfg80211 and the firmware, not here.
     See README.md#regulatory-database.
@@ -41,8 +50,8 @@ Frames are dropped, never requeued, on any error: returning anything other
 than NETDEV_TX_OK from ndo_start_xmit would make the stack retry a frame that
 can never succeed.
 
---- a/core/hdd/src/wlan_hdd_main.c
-+++ b/core/hdd/src/wlan_hdd_main.c
+--- a/core/hdd/src/wlan_hdd_main.c	2026-08-10 11:04:52.404285355 +0700
++++ b/core/hdd/src/wlan_hdd_main.c	2026-08-10 11:12:23.588476236 +0700
 @@ -156,6 +156,7 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
@@ -51,7 +60,7 @@ can never succeed.
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3450,97 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3450,97 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -90,7 +99,7 @@ can never succeed.
 +	}
 +
 +	sta_adapter = hdd_open_adapter(hdd_ctx, QDF_STA_MODE, "null",
-+				       mac_addr, NET_NAME_UNKNOWN, false,
++				       mac_addr, NET_NAME_UNKNOWN, true,
 +				       &params);
 +	if (!sta_adapter) {
 +		hdd_err("Injection: failed to open hidden STA adapter");
@@ -98,7 +107,7 @@ can never succeed.
 +		return;
 +	}
 +
-+	if (hdd_start_adapter(sta_adapter, false)) {
++	if (hdd_start_adapter(sta_adapter, true)) {
 +		hdd_err("Injection: failed to start hidden STA adapter");
 +		goto err_close;
 +	}
@@ -117,7 +126,7 @@ can never succeed.
 +
 +err_close:
 +	hdd_stop_adapter(hdd_ctx, sta_adapter);
-+	hdd_close_adapter(hdd_ctx, sta_adapter, false);
++	hdd_close_adapter(hdd_ctx, sta_adapter, true);
 +	wlan_hdd_release_intf_addr(hdd_ctx, mac_addr);
 +}
 +
@@ -140,8 +149,8 @@ can never succeed.
 +
 +	qdf_copy_macaddr(&mac_addr, &sta_adapter->mac_addr);
 +	hdd_stop_adapter(hdd_ctx, sta_adapter);
-+	hdd_deinit_adapter(hdd_ctx, sta_adapter, false);
-+	hdd_close_adapter(hdd_ctx, sta_adapter, false);
++	hdd_deinit_adapter(hdd_ctx, sta_adapter, true);
++	hdd_close_adapter(hdd_ctx, sta_adapter, true);
 +	wlan_hdd_release_intf_addr(hdd_ctx, mac_addr.bytes);
 +}
 +#endif
@@ -149,27 +158,36 @@ can never succeed.
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3525,6 +3617,7 @@ static int __hdd_mon_open(struct net_device *dev)
+@@ -3523,6 +3615,13 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
 +		hdd_mon_inject_create_hidden_sta(adapter);
++		/* Injection needs the network stack to deliver packets to the
++		 * new ndo_start_xmit. Monitor mode reports no carrier by default,
++		 * which stops the qdisc, so mark it up and wake the queues.
++		 */
++		netif_carrier_on(dev);
++		netif_tx_wake_all_queues(dev);
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5890,6 +5983,11 @@ int hdd_stop_no_trans(struct net_device *dev)
+@@ -5890,6 +5989,14 @@
  	/* DeInit the adapter. This ensures datapath cleanup as well */
  	hdd_deinit_adapter(hdd_ctx, adapter, true);
  
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
-+	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
++	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
++		netif_tx_stop_all_queues(dev);
++		netif_carrier_off(dev);
 +		hdd_mon_inject_destroy_hidden_sta(adapter);
++	}
 +#endif
 +
  reset_iface_opened:
  	/* Make sure the interface is marked as closed */
  	clear_bit(DEVICE_IFACE_OPENED, &adapter->event_flags);
-@@ -7306,10 +7404,170 @@ static const struct net_device_ops wlan_drv_ops = {
+@@ -7306,10 +7413,189 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -296,6 +314,25 @@ can never succeed.
 +		return NETDEV_TX_OK;
 +	}
 +
++	/* Use the monitor vdev's current channel. Passing NULL lets the P2P
++	 * path drop the frame when the hidden STA is unconnected.
++	 */
++	{
++		struct wlan_objmgr_vdev *mon_vdev;
++		uint32_t chan_freq = 0;
++
++		mon_vdev = hdd_objmgr_get_vdev_by_user(adapter->deflink,
++						       WLAN_OSIF_ID);
++		if (mon_vdev) {
++			chan_freq = wlan_get_operation_chan_freq(mon_vdev);
++			hdd_objmgr_put_vdev_by_user(mon_vdev, WLAN_OSIF_ID);
++		}
++
++		if (chan_freq)
++			chan = ieee80211_get_channel(adapter->wdev.wiphy,
++						     chan_freq);
++	}
++
 +	/* skb is freed below, so cache the length used for statistics. */
 +	frame_len = skb->len;
 +
@@ -340,3 +377,4 @@ can never succeed.
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
+ 

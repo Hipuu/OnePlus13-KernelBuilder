@@ -420,8 +420,16 @@ jobs:
           # copying any file that matches a release artifact pattern.
           find release-artifacts -type f \
             \( -name 'AK3_*.zip' -o -name 'kernel_modules_*.zip' \
-               -o -name 'Nethunter-Wireless-Firmware*.zip' -o -name 'Image' \) \
+               -o -name 'Nethunter-Wireless-Firmware*.zip' \) \
             -exec cp -n -- {} release-files/ \;
+
+          # Raw Image files all share the same basename. Preserve every one
+          # by renaming to <artifact-name>.Image so they do not overwrite
+          # each other in the flat release-files directory.
+          find release-artifacts -type f -name 'Image' | while read -r img; do
+            artifact_name=$(basename "$(dirname "$img")")
+            cp -n -- "$img" "release-files/${artifact_name}.Image"
+          done
 
           echo "Release files:"
           ls -la release-files/
