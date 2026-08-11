@@ -2187,6 +2187,20 @@ runs:
           echo "::error::patch applied but .ndo_start_xmit hook is missing"
           exit 1
         fi
+
+        # The injection hook lives in the monitor-mode net_device_ops, which are
+        # only compiled when FEATURE_MONITOR_MODE_SUPPORT is enabled.
+        QCA_DEFCONFIG="configs/${{ env.OP_DDK_TARGET }}_gki_${{ env.OP_DDK_CHIPSET }}_defconfig"
+        if [ -f "$QCA_DEFCONFIG" ]; then
+          sed -i '/^# CONFIG_FEATURE_MONITOR_MODE_SUPPORT is not set/d' "$QCA_DEFCONFIG"
+          if ! grep -q '^CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' "$QCA_DEFCONFIG"; then
+            echo 'CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' >> "$QCA_DEFCONFIG"
+          fi
+          echo "✅ Enabled FEATURE_MONITOR_MODE_SUPPORT in $QCA_DEFCONFIG"
+        else
+          echo "::warning::Could not find qcacld defconfig $QCA_DEFCONFIG"
+        fi
+
         echo "✅ Monitor injection patch applied"
         echo "::endgroup::"
 
