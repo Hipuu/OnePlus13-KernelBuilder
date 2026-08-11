@@ -1,85 +1,176 @@
-Frame injection for qcacld-3.0 monitor mode.
-
-Stock wlan_mon_drv_ops has no .ndo_start_xmit -- the upstream comment reads
-"does not Tx and most of operations" -- so a radiotap frame written to the
-monitor netdev is dropped by the network stack before the driver ever sees it.
-This adds a Tx handler that strips the radiotap header and hands the 802.11
-frame to wlan_cfg80211_mgmt_tx(), the same call cfg80211's .mgmt_tx uses to
-reach the firmware.
-
-The QCA firmware silently drops frames submitted on a monitor vdev
-(WMI_VDEV_TYPE_MONITOR), so injection is performed through a hidden STA vdev
-(WMI_VDEV_TYPE_STA) created when the monitor interface is brought up. A self
-peer is created on the hidden STA vdev so the firmware accepts injected
-frames. The hidden vdev is torn down when the monitor interface is stopped or
-when the module is unloaded.
-
-Why this can work at all: __hdd_mon_open() calls hdd_start_adapter() and sets
-SME_SESSION_OPENED, so a monitor-mode adapter owns a real vdev. That makes
-hdd_objmgr_get_vdev_by_user() succeed, which is the precondition monitor mode
-would otherwise fail. Note that __wlan_hdd_mgmt_tx()'s own device_mode
-branches are all skipped for QDF_MONITOR_MODE, which is why this calls
-wlan_cfg80211_mgmt_tx() directly rather than reusing that wrapper.
-
-Changes in this revision:
-
-  * hdd_open_adapter()/close()/deinit() and hdd_start_adapter() for the
-    hidden STA are called with the RTNL-held flag because we are already
-    inside ndo_open/ndo_stop. Avoids a self-deadlock on register_netdev.
-
-  * The monitor netdev is given a carrier and its TX queues are woken after
-    the hidden STA vdev is created. Without this the network stack drops
-    injected packets before ndo_start_xmit is ever called.
-
-  * The monitor vdev's current channel is looked up and passed to
-    wlan_cfg80211_mgmt_tx(). Passing NULL made the P2P off-channel path
-    treat the frame as having frequency 0 and drop it.
-
-  * Injected frames have addr2 and addr3 rewritten to the hidden STA MAC
-    before they reach the P2P off-channel TX path. Otherwise the self-peer
-    lookup fails and the frame is dropped before going over the air.
-
-  * hdd_mon_inject_create_hidden_sta() returns success/failure and
-    __hdd_mon_open() only enables the carrier/queues when creation succeeds.
-    Previously a failed creation left the interface up with every packet
-    silently dropped.
-
-  * The cached hidden-STA adapter pointer is revalidated with
-    hdd_get_adapter_by_macaddr() before use in both creation and xmit paths,
-    preventing a stale/UAF reference after a monitor-mode stop/restart cycle.
-
-Limitations, in order of how likely they are to bite:
-
-  * This is management-frame injection only. The chosen firmware path
-    (wlan_cfg80211_mgmt_tx / P2P off-channel TX) explicitly rejects data
-    and control frames and requires a valid management frame header.
-  * Radiotap is parsed only far enough to find where the 802.11 frame begins.
-    Requested rate, retries and TX_NOACK are ignored; the firmware chooses.
-  * The 20 dBm world-regulatory cap and the "no IR" flag on channels 12-14
-    still apply; they are enforced by cfg80211 and the firmware, not here.
-    See README.md#regulatory-database.
-
-Frames are dropped, never requeued, on any error: returning anything other
-than NETDEV_TX_OK from ndo_start_xmit would make the stack retry a frame that
-can never succeed.
-
---- a/core/hdd/src/wlan_hdd_main.c	2026-08-10 12:50:16.470074755 +0700
-+++ b/core/hdd/src/wlan_hdd_main.c	2026-08-10 12:50:16.472884797 +0700
-@@ -156,6 +156,7 @@
+diff --git a/vendor/qcom/opensource/wlan/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/vendor/qcom/opensource/wlan/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index dcdaf2f6..671fdc2a 100755
+--- a/vendor/qcom/opensource/wlan/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/vendor/qcom/opensource/wlan/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -156,6 +156,10 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
 +#include "wlan_mlme_vdev_mgr_interface.h"
++#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
++#include "wmi_unified_api.h"
++#include <linux/ieee80211.h>
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3450,111 @@
+@@ -3449,6 +3453,252 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +/* Hidden STA vdev used for monitor-mode frame injection. */
 +static struct hdd_adapter *hdd_mon_inject_sta_adapter;
++
++/**
++ * hdd_mon_inject_get_chan_freq() - current monitor channel frequency
++ * @mon_adapter: the monitor-mode adapter
++ *
++ * Return: channel frequency in MHz, or 0 if not set.
++ */
++static uint32_t hdd_mon_inject_get_chan_freq(struct hdd_adapter *mon_adapter)
++{
++	struct wlan_objmgr_vdev *mon_vdev;
++	uint32_t chan_freq = 0;
++
++	mon_vdev = hdd_objmgr_get_vdev_by_user(mon_adapter->deflink,
++					       WLAN_OSIF_ID);
++	if (mon_vdev) {
++		chan_freq = wlan_get_operation_chan_freq(mon_vdev);
++		hdd_objmgr_put_vdev_by_user(mon_vdev, WLAN_OSIF_ID);
++	}
++
++	return chan_freq;
++}
++
++/**
++ * hdd_mon_inject_fill_chan_param() - populate mlme_channel_param from freq
++ * @freq: channel center frequency in MHz
++ * @chan: mlme channel parameters to fill
++ *
++ * Return: none
++ */
++static void hdd_mon_inject_fill_chan_param(uint32_t freq,
++					   struct mlme_channel_param *chan)
++{
++	memset(chan, 0, sizeof(*chan));
++	chan->mhz = freq;
++	chan->cfreq1 = freq;
++
++	if (freq < 4000) {
++		if (freq == 2484)
++			chan->chan_id = 14;
++		else
++			chan->chan_id = ((int)freq - 2412) / 5 + 1;
++		chan->phy_mode = WLAN_PHYMODE_11G;
++	} else {
++		chan->chan_id = ((int)freq - 5000) / 5;
++		chan->phy_mode = WLAN_PHYMODE_11A;
++	}
++
++	chan->allow_ht = true;
++	chan->allow_vht = true;
++	chan->pwr = 20;
++	chan->maxpower = 20;
++}
++
++/**
++ * hdd_mon_inject_start_hidden_vdev() - start hidden STA vdev and create peer
++ * @sta_adapter: the hidden STA adapter
++ * @mon_adapter: the monitor adapter whose channel will be used
++ *
++ * Return: true on success, false on failure
++ */
++static bool hdd_mon_inject_start_hidden_vdev(struct hdd_adapter *sta_adapter,
++					     struct hdd_adapter *mon_adapter)
++{
++	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(sta_adapter);
++	struct wlan_objmgr_vdev *vdev;
++	struct vdev_start_params start_param = {0};
++	struct peer_create_params peer_param = {0};
++	struct mlme_channel_param chan = {0};
++	wmi_unified_t wmi_handle;
++	uint32_t freq;
++	uint8_t vdev_id;
++	QDF_STATUS status;
++
++	freq = hdd_mon_inject_get_chan_freq(mon_adapter);
++	if (!freq) {
++		hdd_err("Injection: monitor channel not set");
++		return false;
++	}
++
++	wmi_handle = get_wmi_unified_hdl_from_psoc(hdd_ctx->psoc);
++	if (!wmi_handle) {
++		hdd_err("Injection: no wmi handle");
++		return false;
++	}
++
++	vdev = hdd_objmgr_get_vdev_by_user(sta_adapter->deflink, WLAN_OSIF_ID);
++	if (!vdev) {
++		hdd_err("Injection: hidden STA vdev not ready");
++		return false;
++	}
++	vdev_id = wlan_vdev_get_id(vdev);
++	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
++
++	hdd_mon_inject_fill_chan_param(freq, &chan);
++
++	start_param.vdev_id = vdev_id;
++	start_param.beacon_interval = 100;
++	start_param.dtim_period = 1;
++	start_param.channel = chan;
++
++	status = wmi_unified_vdev_start_send(wmi_handle, &start_param);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: vdev start failed %d", status);
++		return false;
++	}
++
++	/* Firmware needs a moment to move the vdev into the started state. */
++	qdf_sleep(50);
++
++	peer_param.peer_addr = sta_adapter->mac_addr.bytes;
++	peer_param.vdev_id = vdev_id;
++	peer_param.peer_type = WMI_PEER_TYPE_DEFAULT;
++
++	status = wmi_unified_peer_create_send(wmi_handle, &peer_param);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: peer create failed %d", status);
++		return false;
++	}
++
++	return true;
++}
++
++/**
++ * hdd_mon_inject_stop_hidden_vdev() - stop hidden vdev and delete self peer
++ * @sta_adapter: the hidden STA adapter
++ *
++ * Return: none
++ */
++static void hdd_mon_inject_stop_hidden_vdev(struct hdd_adapter *sta_adapter)
++{
++	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(sta_adapter);
++	struct vdev_stop_params stop_param = {0};
++	struct peer_delete_cmd_params del_param = {0};
++	wmi_unified_t wmi_handle;
++	uint8_t vdev_id;
++
++	wmi_handle = get_wmi_unified_hdl_from_psoc(hdd_ctx->psoc);
++	if (!wmi_handle)
++		return;
++
++	vdev_id = sta_adapter->deflink->vdev_id;
++
++	memset(&del_param, 0, sizeof(del_param));
++	del_param.vdev_id = vdev_id;
++	wmi_unified_peer_delete_send(wmi_handle, sta_adapter->mac_addr.bytes,
++				     &del_param);
++
++	memset(&stop_param, 0, sizeof(stop_param));
++	stop_param.vdev_id = vdev_id;
++	wmi_unified_vdev_stop_send(wmi_handle, &stop_param);
++}
 +
 +/**
 + * hdd_mon_inject_create_hidden_sta() - allocate and start a hidden STA vdev
@@ -89,16 +180,14 @@ can never succeed.
 + * STA vdev is created alongside the monitor interface. Injection uses this
 + * STA vdev instead of the monitor vdev.
 + *
-+ * Return: none
++ * Return: true on success, false on failure
 + */
 +static bool hdd_mon_inject_create_hidden_sta(struct hdd_adapter *mon_adapter)
 +{
 +	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(mon_adapter);
 +	struct hdd_adapter_create_param params = {0};
 +	struct hdd_adapter *sta_adapter;
-+	struct wlan_objmgr_vdev *vdev;
 +	uint8_t *mac_addr;
-+	QDF_STATUS status;
 +
 +	if (hdd_mon_inject_sta_adapter) {
 +		sta_adapter = hdd_get_adapter_by_macaddr(hdd_ctx,
@@ -132,17 +221,8 @@ can never succeed.
 +		goto err_close;
 +	}
 +
-+	vdev = hdd_objmgr_get_vdev_by_user(sta_adapter->deflink, WLAN_OSIF_ID);
-+	if (!vdev) {
-+		hdd_err("Injection: hidden STA vdev not ready");
-+		goto err_close;
-+	}
-+
-+	status = mlme_vdev_self_peer_create(vdev);
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_err("Injection: failed to create self peer");
++	if (!hdd_mon_inject_start_hidden_vdev(sta_adapter, mon_adapter)) {
++		hdd_err("Injection: hidden STA vdev start failed");
 +		goto err_stop;
 +	}
 +
@@ -175,6 +255,7 @@ can never succeed.
 +	hdd_mon_inject_sta_adapter = NULL;
 +
 +	qdf_copy_macaddr(&mac_addr, &sta_adapter->mac_addr);
++	hdd_mon_inject_stop_hidden_vdev(sta_adapter);
 +	hdd_stop_adapter(hdd_ctx, sta_adapter);
 +	hdd_deinit_adapter(hdd_ctx, sta_adapter, true);
 +	hdd_close_adapter(hdd_ctx, sta_adapter, true);
@@ -185,7 +266,7 @@ can never succeed.
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3629,15 @@
+@@ -3523,6 +3773,15 @@ static int __hdd_mon_open(struct net_device *dev)
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -201,7 +282,7 @@ can never succeed.
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5890,6 +6005,14 @@
+@@ -5890,6 +6149,14 @@ int hdd_stop_no_trans(struct net_device *dev)
  	/* DeInit the adapter. This ensures datapath cleanup as well */
  	hdd_deinit_adapter(hdd_ctx, adapter, true);
  
@@ -216,7 +297,7 @@ can never succeed.
  reset_iface_opened:
  	/* Make sure the interface is marked as closed */
  	clear_bit(DEVICE_IFACE_OPENED, &adapter->event_flags);
-@@ -7306,10 +7429,209 @@
+@@ -7306,10 +7573,192 @@ static const struct net_device_ops wlan_drv_ops = {
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -295,10 +376,11 @@ can never succeed.
 +	struct hdd_adapter *sta_adapter;
 +	struct wlan_hdd_link_info *link_info;
 +	struct wlan_objmgr_vdev *vdev;
-+	struct ieee80211_channel *chan = NULL;
-+	uint64_t cookie = 0;
++	struct ieee80211_hdr *hdr;
++	struct wmi_mgmt_params mgmt_param = {0};
 +	uint32_t frame_len;
-+	int errno;
++	uint32_t chan_freq;
++	QDF_STATUS status;
 +
 +	if (!adapter) {
 +		kfree_skb(skb);
@@ -344,17 +426,35 @@ can never succeed.
 +		return NETDEV_TX_OK;
 +	}
 +
-+	/*
-+	 * The P2P off-channel TX path looks for a peer that matches addr1 or
-+	 * addr2. The hidden STA only has a self peer, so rewrite those addresses
-+	 * to the hidden STA's MAC so the frame is accepted and goes OTA.
-+	 */
-+	if (skb->len >= HDD_MON_MIN_80211_LEN) {
-+		memcpy(skb->data + ETH_ALEN * 2,
-+		       sta_adapter->mac_addr.bytes, ETH_ALEN);
-+		memcpy(skb->data + ETH_ALEN * 3,
-+		       sta_adapter->mac_addr.bytes, ETH_ALEN);
++	if (skb->len < HDD_MON_MIN_80211_LEN) {
++		hdd_debug_rl("Injected frame too short; dropping");
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
 +	}
++
++	/*
++	 * Rewrite addr2/addr3 to the hidden STA MAC so the firmware's peer
++	 * table has a matching self peer for the transmission.
++	 */
++	hdr = (struct ieee80211_hdr *)skb->data;
++	memcpy(hdr->addr2, sta_adapter->mac_addr.bytes, ETH_ALEN);
++	memcpy(hdr->addr3, sta_adapter->mac_addr.bytes, ETH_ALEN);
++
++	frame_len = skb->len;
++	chan_freq = hdd_mon_inject_get_chan_freq(adapter);
++	if (!chan_freq) {
++		hdd_debug_rl("Monitor channel not set; dropping injected frame");
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
++	}
++
++	mgmt_param.tx_frame = skb;
++	mgmt_param.pdata = skb->data;
++	mgmt_param.frm_len = frame_len;
++	mgmt_param.vdev_id = link_info->vdev_id;
++	mgmt_param.chanfreq = chan_freq;
++	mgmt_param.qdf_ctx = wlan_psoc_get_qdf_dev(hdd_ctx->psoc);
++	mgmt_param.macaddr = hdr->addr1;
 +
 +	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_ID);
 +	if (!vdev) {
@@ -363,47 +463,11 @@ can never succeed.
 +		return NETDEV_TX_OK;
 +	}
 +
-+	/* Use the monitor vdev's current channel. Passing NULL lets the P2P
-+	 * path drop the frame when the hidden STA is unconnected.
-+	 */
-+	{
-+		struct wlan_objmgr_vdev *mon_vdev;
-+		uint32_t chan_freq = 0;
-+
-+		mon_vdev = hdd_objmgr_get_vdev_by_user(adapter->deflink,
-+						       WLAN_OSIF_ID);
-+		if (mon_vdev) {
-+			chan_freq = wlan_get_operation_chan_freq(mon_vdev);
-+			hdd_objmgr_put_vdev_by_user(mon_vdev, WLAN_OSIF_ID);
-+		}
-+
-+		if (chan_freq)
-+			chan = ieee80211_get_channel(adapter->wdev.wiphy,
-+						     chan_freq);
-+	}
-+
-+	/* skb is freed below, so cache the length used for statistics. */
-+	frame_len = skb->len;
-+
-+	/*
-+	 * Use the hidden STA vdev for transmission. The firmware accepts
-+	 * frames from a STA vdev while it rejects them from a monitor vdev.
-+	 *
-+	 * chan == NULL means "use the vdev's current channel". offchan is
-+	 * false and wait is 0: an injected frame is fire-and-forget, and
-+	 * dont_wait_for_ack keeps a missing ACK from stalling the caller.
-+	 *
-+	 * Note this returns a plain errno, not a QDF_STATUS.
-+	 */
-+	errno = wlan_cfg80211_mgmt_tx(vdev, chan, false, 0,
-+				      skb->data, frame_len,
-+				      false, true, &cookie,
-+				      QDF_STA_MODE);
-+
++	status = wma_mgmt_unified_cmd_send(vdev, skb, 0, &mgmt_param);
 +	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
 +
-+	if (errno) {
-+		hdd_debug_rl("Injection rejected, errno %d", errno);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_debug_rl("Injection rejected, status %d", status);
 +		dev->stats.tx_dropped++;
 +	} else {
 +		dev->stats.tx_packets++;
