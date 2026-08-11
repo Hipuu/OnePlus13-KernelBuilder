@@ -244,10 +244,6 @@ jobs:
             zyc_compiler=$(jq -r '.zyc_compiler' "${{ matrix.config }}")
           fi
 
-          # Extract model name from config path for the Image artifact name
-          MODEL=$(jq -r '.model' "${{ matrix.config }}")
-          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
-
           # The DDK inputs can only turn a variant's DDK build off, never on:
           # only manifests carrying the Kleaf/Bazel projects can build it, and
           # only OP13-6.6.118 does today. Forcing it on elsewhere would fail
@@ -339,20 +335,6 @@ jobs:
           debug: ${{ inputs.debug }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # The AnyKernel3 ZIP and the kernel-modules ZIP are already uploaded by
-      # the composite action. Only the raw Image is left to publish here, and
-      # it is uploaded *archived* on purpose: an `archive: false` upload of an
-      # extensionless file is served as application/octet-stream and browsers
-      # save it as "image.bin".
-      - name: Upload raw kernel Image
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: Image_${{ env.MODEL }}_${{ steps.build.outputs.kernel_version }}
-          path: ${{ steps.build.outputs.image_path }}
-          compression-level: 9
-          retention-days: 90
-
   firmware:
     name: Nethunter Wireless Firmware
     runs-on: ubuntu-latest
@@ -422,14 +404,6 @@ jobs:
             \( -name 'AK3_*.zip' -o -name 'kernel_modules_*.zip' \
                -o -name 'Nethunter-Wireless-Firmware*.zip' \) \
             -exec cp -n -- {} release-files/ \;
-
-          # Raw Image files all share the same basename. Preserve every one
-          # by renaming to <artifact-name>.Image so they do not overwrite
-          # each other in the flat release-files directory.
-          find release-artifacts -type f -name 'Image' | while read -r img; do
-            artifact_name=$(basename "$(dirname "$img")")
-            cp -n -- "$img" "release-files/${artifact_name}.Image"
-          done
 
           echo "Release files:"
           ls -la release-files/
