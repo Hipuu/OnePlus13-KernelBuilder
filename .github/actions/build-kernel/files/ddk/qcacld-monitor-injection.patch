@@ -1,23 +1,8 @@
---- a/core/hdd/inc/wlan_hdd_main.h
-+++ b/core/hdd/inc/wlan_hdd_main.h
-@@ -5001,6 +5001,14 @@
- int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter);
- 
- /**
-+ * hdd_mon_inject_set_channel() - synchronize the injection STA channel
-+ * @adapter: monitor-mode adapter
-+ *
-+ * Return: true when the hidden STA and its firmware peer are ready.
-+ */
-+bool hdd_mon_inject_set_channel(struct hdd_adapter *adapter);
-+
-+/**
-  * wlan_hdd_validate_mon_params() - Validate freq and bw for monitor interface.
-  * @adapter: Handle to adapter
-  * @mon_params: Monitor input parameters
+diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
+index 048b6291..2e8be666 100755
 --- a/core/hdd/src/wlan_hdd_cfg80211.c
 +++ b/core/hdd/src/wlan_hdd_cfg80211.c
-@@ -31465,6 +31465,11 @@
+@@ -31465,6 +31465,11 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
  		return qdf_status_to_os_return(status);
  	}
  
@@ -29,12 +14,15 @@
  	hdd_exit();
  
  	return 0;
+diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
+index dcdaf2f6..9ec90633 100755
 --- a/core/hdd/src/wlan_hdd_main.c
 +++ b/core/hdd/src/wlan_hdd_main.c
-@@ -156,6 +156,11 @@
+@@ -156,6 +156,12 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
++#include "wlan_objmgr_vdev_obj.h"
 +#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
 +#include "wlan_vdev_mgr_tgt_if_tx_api.h"
 +#include "wlan_mgmt_txrx_utils_api.h"
@@ -43,7 +31,7 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -1282,7 +1286,7 @@
+@@ -1282,7 +1288,7 @@ struct notifier_block hdd_netdev_notifier = {
  };
  
  /* variable to hold the insmod parameters */
@@ -52,7 +40,7 @@
  #ifdef FEATURE_WLAN_RESIDENT_DRIVER
  EXPORT_SYMBOL(con_mode);
  #endif
-@@ -3449,6 +3453,403 @@
+@@ -3449,6 +3455,403 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -154,15 +142,15 @@
 +}
 +
 +static bool
-+hdd_mon_inject_wait_for_start(struct wlan_objmgr_vdev *vdev, uint32_t freq)
++hdd_mon_inject_wait_for_start(struct wlan_objmgr_vdev *vdev)
 +{
-+	struct wlan_channel *bss_chan;
 +	uint32_t elapsed;
++	enum wlan_vdev_state state;
 +
 +	for (elapsed = 0; elapsed < HDD_MON_INJECT_START_TIMEOUT_MS;
 +	     elapsed += HDD_MON_INJECT_START_POLL_MS) {
-+		bss_chan = wlan_vdev_mlme_get_bss_chan(vdev);
-+		if (bss_chan && READ_ONCE(bss_chan->ch_freq) == freq)
++		state = wlan_vdev_mlme_get_state(vdev);
++		if (state >= WLAN_VDEV_S_START)
 +			return true;
 +		qdf_sleep(HDD_MON_INJECT_START_POLL_MS);
 +	}
@@ -263,7 +251,7 @@
 +	 * response. This therefore distinguishes acceptance from a response
 +	 * timeout or rejection without racing the asynchronous event handler.
 +	 */
-+	if (!hdd_mon_inject_wait_for_start(vdev, channel->ch_freq)) {
++	if (!hdd_mon_inject_wait_for_start(vdev)) {
 +		hdd_err("Injection: hidden vdev start rejected or timed out on %u MHz",
 +			channel->ch_freq);
 +		goto fail_put_vdev;
@@ -456,7 +444,7 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3520,9 +3922,17 @@
+@@ -3520,9 +3923,17 @@ static int __hdd_mon_open(struct net_device *dev)
  		ret = hdd_enable_monitor_mode(dev);
  
  	if (!ret) {
@@ -474,7 +462,7 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6285,11 @@
+@@ -5875,6 +6286,11 @@ int hdd_stop_no_trans(struct net_device *dev)
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -486,7 +474,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7721,160 @@
+@@ -7306,10 +7722,160 @@ static const struct net_device_ops wlan_drv_ops = {
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -648,7 +636,7 @@
  	.ndo_get_stats = hdd_get_stats,
  };
  
-@@ -11423,7 +11988,14 @@
+@@ -11423,7 +11989,14 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter)
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
