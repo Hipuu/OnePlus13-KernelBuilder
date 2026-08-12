@@ -2200,6 +2200,18 @@ runs:
           exit 1
         fi
 
+        # VDEV_START responses are discarded unless the target layer has
+        # armed its response timer; VDEV_UP then releases the START lock.
+        if ! grep -q 'tgt_vdev_mgr_start_send' core/hdd/src/wlan_hdd_main.c || \
+           ! grep -q 'tgt_vdev_mgr_up_send' core/hdd/src/wlan_hdd_main.c; then
+          echo "::error::managed hidden-vdev start/up lifecycle is missing"
+          exit 1
+        fi
+        if grep -q 'wmi_unified_vdev_start_send(wmi_handle, &start_param)' core/hdd/src/wlan_hdd_main.c; then
+          echo "::error::raw hidden-vdev start bypasses response tracking"
+          exit 1
+        fi
+
         # The injection hook lives in the monitor-mode net_device_ops, which are
         # only compiled when FEATURE_MONITOR_MODE_SUPPORT is enabled.
         # Bazel generates the effective defconfig from the SoC-named base files
