@@ -31,11 +31,12 @@
  	return 0;
 --- a/core/hdd/src/wlan_hdd_main.c
 +++ b/core/hdd/src/wlan_hdd_main.c
-@@ -156,6 +156,10 @@
+@@ -156,6 +156,11 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
 +#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
++#include "wlan_vdev_mgr_tgt_if_tx_api.h"
 +#include "wlan_mgmt_txrx_utils_api.h"
 +#include "wmi_unified_api.h"
 +#include <linux/ieee80211.h>
@@ -51,12 +52,12 @@
  #ifdef FEATURE_WLAN_RESIDENT_DRIVER
  EXPORT_SYMBOL(con_mode);
  #endif
-@@ -3449,6 +3453,374 @@
+@@ -3449,6 +3453,403 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
 +#define HDD_MON_INJECT_IFNAME "null"
-+#define HDD_MON_INJECT_START_TIMEOUT_MS 500
++#define HDD_MON_INJECT_START_TIMEOUT_MS 8500
 +#define HDD_MON_INJECT_START_POLL_MS 10
 +
 +/*
@@ -175,9 +176,11 @@
 +{
 +	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(sta_adapter);
 +	struct wlan_objmgr_vdev *vdev;
++	struct vdev_mlme_obj *mlme_obj;
 +	struct wlan_channel *des_chan;
 +	struct wlan_channel *bss_chan;
 +	struct vdev_start_params start_param = {0};
++	struct vdev_up_params up_param = {0};
 +	struct peer_create_params peer_param = {0};
 +	struct qdf_mac_addr self_peer;
 +	wmi_unified_t wmi_handle;
@@ -199,6 +202,13 @@
 +		hdd_err("Injection: hidden STA self peer is unavailable");
 +		goto fail_put_vdev;
 +	}
++	mlme_obj = wlan_vdev_mlme_get_cmpt_obj(vdev);
++	if (!mlme_obj) {
++		hdd_err("Injection: hidden STA MLME object is unavailable");
++		goto fail_put_vdev;
++	}
++	qdf_mem_copy(mlme_obj->mgmt.generic.bssid, self_peer.bytes,
++		     QDF_MAC_ADDR_SIZE);
 +
 +	des_chan = wlan_vdev_mlme_get_des_chan(vdev);
 +	bss_chan = wlan_vdev_mlme_get_bss_chan(vdev);
@@ -214,28 +224,9 @@
 +	start_param.is_restart = hdd_mon_inject_vdev_started;
 +	hdd_mon_inject_fill_start_params(hdd_ctx, channel, &start_param);
 +
-+	status = wmi_unified_vdev_start_send(wmi_handle, &start_param);
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_err("Injection: hidden vdev %s failed: %d",
-+			start_param.is_restart ? "restart" : "start", status);
-+		goto fail_put_vdev;
-+	}
-+	hdd_mon_inject_vdev_started = true;
-+
-+	/*
-+	 * The response handler copies des_chan to bss_chan only after firmware
-+	 * accepts VDEV_START. Waiting for that transition avoids racing peer
-+	 * creation against an arbitrary sleep.
-+	 */
-+	if (!hdd_mon_inject_wait_for_start(vdev, channel->ch_freq)) {
-+		hdd_err("Injection: hidden vdev start timed out on %u MHz",
-+			channel->ch_freq);
-+		goto fail_put_vdev;
-+	}
-+
 +	if (!hdd_mon_inject_peer_created) {
 +		peer_param.peer_addr = self_peer.bytes;
-+		peer_param.vdev_id = wlan_vdev_get_id(vdev);
++		peer_param.vdev_id = start_param.vdev_id;
 +		peer_param.peer_type = WMI_PEER_TYPE_DEFAULT;
 +		status = wmi_unified_peer_create_send(wmi_handle, &peer_param);
 +		if (QDF_IS_STATUS_ERROR(status)) {
@@ -246,6 +237,45 @@
 +
 +		qdf_copy_macaddr(&hdd_mon_inject_peer_addr, &self_peer);
 +		hdd_mon_inject_peer_created = true;
++	}
++
++	status = wma_vdev_pre_start(start_param.vdev_id,
++				    start_param.is_restart);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: hidden vdev pre-start failed: %d", status);
++		goto fail_put_vdev;
++	}
++
++	/*
++	 * The target interface arms the response timer that the WMI event
++	 * handler requires. A direct WMI send makes that handler reject the
++	 * response before WMA can publish the accepted channel.
++	 */
++	status = tgt_vdev_mgr_start_send(mlme_obj, &start_param);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: hidden vdev %s failed: %d",
++			start_param.is_restart ? "restart" : "start", status);
++		goto fail_put_vdev;
++	}
++
++	/*
++	 * WMA copies des_chan to bss_chan only for a successful firmware
++	 * response. This therefore distinguishes acceptance from a response
++	 * timeout or rejection without racing the asynchronous event handler.
++	 */
++	if (!hdd_mon_inject_wait_for_start(vdev, channel->ch_freq)) {
++		hdd_err("Injection: hidden vdev start rejected or timed out on %u MHz",
++			channel->ch_freq);
++		goto fail_put_vdev;
++	}
++	hdd_mon_inject_vdev_started = true;
++
++	/* VDEV_UP releases the START runtime lock and enables firmware TX. */
++	up_param.vdev_id = start_param.vdev_id;
++	status = tgt_vdev_mgr_up_send(mlme_obj, &up_param);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: hidden vdev up failed: %d", status);
++		goto fail_put_vdev;
 +	}
 +
 +	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
@@ -426,7 +456,7 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3520,9 +3892,17 @@
+@@ -3520,9 +3922,17 @@
  		ret = hdd_enable_monitor_mode(dev);
  
  	if (!ret) {
@@ -444,7 +474,7 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6255,11 @@
+@@ -5875,6 +6285,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -456,7 +486,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7691,160 @@
+@@ -7306,10 +7721,160 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -618,7 +648,7 @@
  	.ndo_get_stats = hdd_get_stats,
  };
  
-@@ -11423,7 +11958,14 @@
+@@ -11423,7 +11988,14 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
