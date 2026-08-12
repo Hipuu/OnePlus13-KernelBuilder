@@ -2188,6 +2188,18 @@ runs:
           exit 1
         fi
 
+        # Management TX must go through the descriptor pool so firmware owns
+        # the DMA mapping until completion. A fixed descriptor ID plus an
+        # immediate skb free caused silent drops followed by firmware recovery.
+        if ! grep -q 'wlan_mgmt_txrx_mgmt_frame_tx' core/hdd/src/wlan_hdd_main.c; then
+          echo "::error::patch applied but descriptor-managed TX is missing"
+          exit 1
+        fi
+        if grep -q 'wma_mgmt_unified_cmd_send(vdev, skb, 0' core/hdd/src/wlan_hdd_main.c; then
+          echo "::error::unsafe fixed-descriptor management TX is present"
+          exit 1
+        fi
+
         # The injection hook lives in the monitor-mode net_device_ops, which are
         # only compiled when FEATURE_MONITOR_MODE_SUPPORT is enabled.
         QCA_DEFCONFIG="configs/${{ env.OP_DDK_TARGET }}_gki_${{ env.OP_DDK_CHIPSET }}_defconfig"
