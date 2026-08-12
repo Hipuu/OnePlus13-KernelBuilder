@@ -2202,16 +2202,20 @@ runs:
 
         # The injection hook lives in the monitor-mode net_device_ops, which are
         # only compiled when FEATURE_MONITOR_MODE_SUPPORT is enabled.
-        QCA_DEFCONFIG="configs/${{ env.OP_DDK_TARGET }}_gki_${{ env.OP_DDK_CHIPSET }}_defconfig"
-        if [ -f "$QCA_DEFCONFIG" ]; then
-          sed -i '/^# CONFIG_FEATURE_MONITOR_MODE_SUPPORT is not set/d' "$QCA_DEFCONFIG"
-          if ! grep -q '^CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' "$QCA_DEFCONFIG"; then
-            echo 'CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' >> "$QCA_DEFCONFIG"
+        # Bazel generates the effective defconfig from the SoC-named base files
+        # (e.g. sun_gki_peach-v2_defconfig, sun_consolidate_peach-v2_defconfig),
+        # not from the DDK target name (sun_perf -> sun_consolidate).
+        for QCA_DEFCONFIG in \
+          "configs/${{ env.OP_SOC }}_gki_${{ env.OP_DDK_CHIPSET }}_defconfig" \
+          "configs/${{ env.OP_SOC }}_consolidate_${{ env.OP_DDK_CHIPSET }}_defconfig"; do
+          if [ -f "$QCA_DEFCONFIG" ]; then
+            sed -i '/^# CONFIG_FEATURE_MONITOR_MODE_SUPPORT is not set/d' "$QCA_DEFCONFIG"
+            if ! grep -q '^CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' "$QCA_DEFCONFIG"; then
+              echo 'CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' >> "$QCA_DEFCONFIG"
+            fi
+            echo "✅ Enabled FEATURE_MONITOR_MODE_SUPPORT in $QCA_DEFCONFIG"
           fi
-          echo "✅ Enabled FEATURE_MONITOR_MODE_SUPPORT in $QCA_DEFCONFIG"
-        else
-          echo "::warning::Could not find qcacld defconfig $QCA_DEFCONFIG"
-        fi
+        done
 
         echo "✅ Monitor injection patch applied"
         echo "::endgroup::"
