@@ -1,8 +1,7 @@
 diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 index dcdaf2f6..671fdc2a 100755
 --- a/core/hdd/src/wlan_hdd_main.c
-+++ b/core/hdd/src/wlan_hdd_main.c
-@@ -156,6 +156,10 @@
++++ b/core/hdd/src/wlan_hdd_main.c@@ -156,6 +156,10 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
@@ -13,6 +12,15 @@ index dcdaf2f6..671fdc2a 100755
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
+@@ -1282,7 +1282,7 @@ struct notifier_block hdd_netdev_notifier = {
+ };
+ 
+ /* variable to hold the insmod parameters */
+-int con_mode;
++int con_mode = QDF_GLOBAL_MONITOR_MODE;
+ #ifdef FEATURE_WLAN_RESIDENT_DRIVER
+ EXPORT_SYMBOL(con_mode);
+ #endif
 @@ -3449,6 +3453,252 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
@@ -491,13 +499,3 @@ index dcdaf2f6..671fdc2a 100755
  	.ndo_get_stats = hdd_get_stats,
  };
  
-
-@@ -1282,7 +1282,7 @@ struct notifier_block hdd_netdev_notifier = {
- };
- 
- /* variable to hold the insmod parameters */
--int con_mode;
-+int con_mode = QDF_GLOBAL_MONITOR_MODE;
- #ifdef FEATURE_WLAN_RESIDENT_DRIVER
- EXPORT_SYMBOL(con_mode);
- #endif
