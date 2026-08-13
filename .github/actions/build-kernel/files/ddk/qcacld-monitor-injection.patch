@@ -653,12 +653,9 @@ index dcdaf2f6..9ec90633 100755
  #endif
  
 diff --git a/core/hdd/inc/wlan_hdd_main.h b/core/hdd/inc/wlan_hdd_main.h
-index 0000000..0000000 100644
 --- a/core/hdd/inc/wlan_hdd_main.h
 +++ b/core/hdd/inc/wlan_hdd_main.h
-@@ -5392,3 +5392,6 @@
- QDF_STATUS hdd_monitor_mode_qdf_create_event(struct hdd_adapter *adapter,
-                                              uint8_t session_type);
+@@ -5394,1 +5394,4 @@
 +
 +bool hdd_mon_inject_set_channel(struct hdd_adapter *adapter);
 +
