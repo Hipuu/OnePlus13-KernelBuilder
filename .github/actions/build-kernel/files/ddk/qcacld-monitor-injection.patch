@@ -1,37 +1,17 @@
-diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
-index 048b6291..2e8be666 100755
---- a/core/hdd/src/wlan_hdd_cfg80211.c
-+++ b/core/hdd/src/wlan_hdd_cfg80211.c
-@@ -31465,6 +31465,11 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
- 		return qdf_status_to_os_return(status);
- 	}
- 
-+	if (!hdd_mon_inject_set_channel(adapter)) {
-+		hdd_err("Failed to synchronize monitor injection channel");
-+		return -EIO;
-+	}
-+
- 	hdd_exit();
- 
- 	return 0;
 diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
-index dcdaf2f6..9ec90633 100755
+index dcdaf2f6..d591b227 100755
 --- a/core/hdd/src/wlan_hdd_main.c
 +++ b/core/hdd/src/wlan_hdd_main.c
-@@ -156,6 +156,12 @@
+@@ -156,6 +156,8 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
-+#include "wlan_objmgr_vdev_obj.h"
-+#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
-+#include "wlan_vdev_mgr_tgt_if_tx_api.h"
-+#include "wlan_mgmt_txrx_utils_api.h"
-+#include "wmi_unified_api.h"
++#include "wma_frame_inject.h"
 +#include <linux/ieee80211.h>
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -1282,7 +1288,7 @@ struct notifier_block hdd_netdev_notifier = {
+@@ -1282,7 +1284,7 @@ struct notifier_block hdd_netdev_notifier = {
  };
  
  /* variable to hold the insmod parameters */
@@ -40,29 +20,46 @@ index dcdaf2f6..9ec90633 100755
  #ifdef FEATURE_WLAN_RESIDENT_DRIVER
  EXPORT_SYMBOL(con_mode);
  #endif
-@@ -3449,6 +3455,403 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3451,96 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
-+#define HDD_MON_INJECT_IFNAME "null"
-+#define HDD_MON_INJECT_START_TIMEOUT_MS 8500
-+#define HDD_MON_INJECT_START_POLL_MS 10
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +
-+/*
-+ * Monitor vdevs are receive-only in the peach firmware. Keep one internal
-+ * STA vdev started on the monitor channel and use its self peer for injected
-+ * management frames.
-+ */
-+static struct hdd_adapter *hdd_mon_inject_sta_adapter;
-+static struct qdf_mac_addr hdd_mon_inject_peer_addr;
++#define HDD_MON_MIN_80211_LEN 24
++
++struct hdd_mon_radiotap_hdr {
++	uint8_t it_version;
++	uint8_t it_pad;
++	uint16_t it_len;
++	uint32_t it_present;
++} __packed;
++
 +static uint32_t hdd_mon_inject_chan_freq;
-+static bool hdd_mon_inject_vdev_started;
-+static bool hdd_mon_inject_peer_created;
-+static bool hdd_mon_inject_ready;
 +
-+static bool
-+hdd_mon_inject_get_channel(struct hdd_adapter *mon_adapter,
-+			   struct wlan_channel *channel)
++static int hdd_mon_inject_strip_radiotap(struct sk_buff *skb)
++{
++	struct hdd_mon_radiotap_hdr *rthdr;
++	uint16_t rtap_len;
++
++	if (skb->len < sizeof(*rthdr))
++		return -EINVAL;
++
++	rthdr = (struct hdd_mon_radiotap_hdr *)skb->data;
++	if (rthdr->it_version != 0)
++		return -EINVAL;
++
++	rtap_len = le16_to_cpu(rthdr->it_len);
++	if (rtap_len < sizeof(*rthdr) || rtap_len > skb->len ||
++	    skb->len - rtap_len < HDD_MON_MIN_80211_LEN)
++		return -EINVAL;
++
++	skb_pull(skb, rtap_len);
++	return 0;
++}
++
++static bool hdd_mon_inject_get_channel(struct hdd_adapter *mon_adapter,
++				       struct wlan_channel *channel)
 +{
 +	struct wlan_objmgr_vdev *vdev;
 +	struct wlan_channel *source;
@@ -85,479 +82,85 @@ index dcdaf2f6..9ec90633 100755
 +	return valid;
 +}
 +
-+static bool
-+hdd_mon_inject_get_self_peer(struct wlan_objmgr_vdev *vdev,
-+			     struct qdf_mac_addr *peer_addr)
++static bool hdd_mon_inject_set_channel(struct hdd_adapter *adapter)
 +{
-+	const uint8_t *addr;
-+
-+	addr = wlan_vdev_mlme_get_mldaddr(vdev);
-+	if (!addr || qdf_is_macaddr_zero((struct qdf_mac_addr *)addr))
-+		addr = wlan_vdev_mlme_get_macaddr(vdev);
-+	if (!addr)
-+		return false;
-+
-+	qdf_mem_copy(peer_addr->bytes, addr, QDF_MAC_ADDR_SIZE);
-+	return !qdf_is_macaddr_zero(peer_addr);
-+}
-+
-+static void
-+hdd_mon_inject_fill_start_params(struct hdd_context *hdd_ctx,
-+				 struct wlan_channel *channel,
-+				 struct vdev_start_params *params)
-+{
-+	int8_t power = channel->ch_maxpower;
-+
-+	if (power <= 0)
-+		power = 20;
-+
-+	params->beacon_interval = 100;
-+	params->dtim_period = 1;
-+	params->channel.chan_id = channel->ch_ieee;
-+	if (!params->channel.chan_id)
-+		params->channel.chan_id =
-+			wlan_reg_freq_to_chan(hdd_ctx->pdev, channel->ch_freq);
-+	params->channel.pwr = power;
-+	params->channel.mhz = channel->ch_freq;
-+	params->channel.is_chan_passive =
-+		wlan_reg_is_dfs_for_freq(hdd_ctx->pdev, channel->ch_freq);
-+	params->channel.allow_ht = true;
-+	params->channel.allow_vht = true;
-+	params->channel.phy_mode = channel->ch_phymode;
-+	if (!params->channel.phy_mode) {
-+		if (WLAN_REG_IS_24GHZ_CH_FREQ(channel->ch_freq))
-+			params->channel.phy_mode = WLAN_PHYMODE_11G;
-+		else
-+			params->channel.phy_mode = WLAN_PHYMODE_11A;
-+	}
-+	params->channel.cfreq1 = channel->ch_cfreq1;
-+	if (!params->channel.cfreq1)
-+		params->channel.cfreq1 = channel->ch_freq;
-+	params->channel.cfreq2 = channel->ch_cfreq2;
-+	params->channel.maxpower = power;
-+	params->channel.maxregpower = power;
-+#ifdef WLAN_FEATURE_11BE
-+	params->channel.puncture_bitmap = channel->puncture_bitmap;
-+#endif
-+}
-+
-+static bool
-+hdd_mon_inject_wait_for_start(struct wlan_objmgr_vdev *vdev)
-+{
-+	uint32_t elapsed;
-+	enum wlan_vdev_state state;
-+
-+	for (elapsed = 0; elapsed < HDD_MON_INJECT_START_TIMEOUT_MS;
-+	     elapsed += HDD_MON_INJECT_START_POLL_MS) {
-+		state = wlan_vdev_mlme_get_state(vdev);
-+		if (state >= WLAN_VDEV_S_START)
-+			return true;
-+		qdf_sleep(HDD_MON_INJECT_START_POLL_MS);
-+	}
-+
-+	return false;
-+}
-+
-+static bool
-+hdd_mon_inject_start_hidden_vdev(struct hdd_adapter *sta_adapter,
-+				 struct wlan_channel *channel)
-+{
-+	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(sta_adapter);
-+	struct wlan_objmgr_vdev *vdev;
-+	struct vdev_mlme_obj *mlme_obj;
-+	struct wlan_channel *des_chan;
-+	struct wlan_channel *bss_chan;
-+	struct vdev_start_params start_param = {0};
-+	struct vdev_up_params up_param = {0};
-+	struct peer_create_params peer_param = {0};
-+	struct qdf_mac_addr self_peer;
-+	wmi_unified_t wmi_handle;
-+	QDF_STATUS status;
-+
-+	wmi_handle = get_wmi_unified_hdl_from_psoc(hdd_ctx->psoc);
-+	if (!wmi_handle) {
-+		hdd_err("Injection: WMI handle is unavailable");
-+		return false;
-+	}
-+
-+	vdev = hdd_objmgr_get_vdev_by_user(sta_adapter->deflink, WLAN_OSIF_ID);
-+	if (!vdev) {
-+		hdd_err("Injection: hidden STA vdev is unavailable");
-+		return false;
-+	}
-+
-+	if (!hdd_mon_inject_get_self_peer(vdev, &self_peer)) {
-+		hdd_err("Injection: hidden STA self peer is unavailable");
-+		goto fail_put_vdev;
-+	}
-+	mlme_obj = wlan_vdev_mlme_get_cmpt_obj(vdev);
-+	if (!mlme_obj) {
-+		hdd_err("Injection: hidden STA MLME object is unavailable");
-+		goto fail_put_vdev;
-+	}
-+	qdf_mem_copy(mlme_obj->mgmt.generic.bssid, self_peer.bytes,
-+		     QDF_MAC_ADDR_SIZE);
-+
-+	des_chan = wlan_vdev_mlme_get_des_chan(vdev);
-+	bss_chan = wlan_vdev_mlme_get_bss_chan(vdev);
-+	if (!des_chan || !bss_chan) {
-+		hdd_err("Injection: hidden STA channel state is unavailable");
-+		goto fail_put_vdev;
-+	}
-+
-+	qdf_mem_copy(des_chan, channel, sizeof(*des_chan));
-+	qdf_mem_zero(bss_chan, sizeof(*bss_chan));
-+
-+	start_param.vdev_id = wlan_vdev_get_id(vdev);
-+	start_param.is_restart = hdd_mon_inject_vdev_started;
-+	hdd_mon_inject_fill_start_params(hdd_ctx, channel, &start_param);
-+
-+	if (!hdd_mon_inject_peer_created) {
-+		peer_param.peer_addr = self_peer.bytes;
-+		peer_param.vdev_id = start_param.vdev_id;
-+		peer_param.peer_type = WMI_PEER_TYPE_DEFAULT;
-+		status = wmi_unified_peer_create_send(wmi_handle, &peer_param);
-+		if (QDF_IS_STATUS_ERROR(status)) {
-+			hdd_err("Injection: firmware self-peer create failed: %d",
-+				status);
-+			goto fail_put_vdev;
-+		}
-+
-+		qdf_copy_macaddr(&hdd_mon_inject_peer_addr, &self_peer);
-+		hdd_mon_inject_peer_created = true;
-+	}
-+
-+	status = wma_vdev_pre_start(start_param.vdev_id,
-+				    start_param.is_restart);
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_err("Injection: hidden vdev pre-start failed: %d", status);
-+		goto fail_put_vdev;
-+	}
-+
-+	/*
-+	 * The target interface arms the response timer that the WMI event
-+	 * handler requires. A direct WMI send makes that handler reject the
-+	 * response before WMA can publish the accepted channel.
-+	 */
-+	status = tgt_vdev_mgr_start_send(mlme_obj, &start_param);
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_err("Injection: hidden vdev %s failed: %d",
-+			start_param.is_restart ? "restart" : "start", status);
-+		goto fail_put_vdev;
-+	}
-+
-+	/*
-+	 * WMA copies des_chan to bss_chan only for a successful firmware
-+	 * response. This therefore distinguishes acceptance from a response
-+	 * timeout or rejection without racing the asynchronous event handler.
-+	 */
-+	if (!hdd_mon_inject_wait_for_start(vdev)) {
-+		hdd_err("Injection: hidden vdev start rejected or timed out on %u MHz",
-+			channel->ch_freq);
-+		goto fail_put_vdev;
-+	}
-+	hdd_mon_inject_vdev_started = true;
-+
-+	/* VDEV_UP releases the START runtime lock and enables firmware TX. */
-+	up_param.vdev_id = start_param.vdev_id;
-+	status = tgt_vdev_mgr_up_send(mlme_obj, &up_param);
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_err("Injection: hidden vdev up failed: %d", status);
-+		goto fail_put_vdev;
-+	}
-+
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+	return true;
-+
-+fail_put_vdev:
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+	return false;
-+}
-+
-+static void
-+hdd_mon_inject_stop_hidden_vdev(struct hdd_adapter *sta_adapter)
-+{
-+	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(sta_adapter);
-+	struct wlan_objmgr_vdev *vdev;
-+	struct peer_delete_cmd_params del_param = {0};
-+	struct vdev_stop_params stop_param = {0};
-+	wmi_unified_t wmi_handle;
-+	bool command_sent = false;
-+	uint8_t vdev_id;
-+
-+	hdd_mon_inject_ready = false;
-+	hdd_mon_inject_chan_freq = 0;
-+
-+	wmi_handle = get_wmi_unified_hdl_from_psoc(hdd_ctx->psoc);
-+	vdev = hdd_objmgr_get_vdev_by_user(sta_adapter->deflink, WLAN_OSIF_ID);
-+	if (!vdev)
-+		goto clear_state;
-+	if (!wmi_handle) {
-+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+		goto clear_state;
-+	}
-+
-+	vdev_id = wlan_vdev_get_id(vdev);
-+	if (hdd_mon_inject_peer_created) {
-+		del_param.vdev_id = vdev_id;
-+		wmi_unified_peer_delete_send(wmi_handle,
-+					     hdd_mon_inject_peer_addr.bytes,
-+					     &del_param);
-+		command_sent = true;
-+	}
-+
-+	if (hdd_mon_inject_vdev_started) {
-+		stop_param.vdev_id = vdev_id;
-+		wmi_unified_vdev_stop_send(wmi_handle, &stop_param);
-+		command_sent = true;
-+	}
-+
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+
-+clear_state:
-+	hdd_mon_inject_peer_created = false;
-+	hdd_mon_inject_vdev_started = false;
-+	qdf_mem_zero(&hdd_mon_inject_peer_addr,
-+		     sizeof(hdd_mon_inject_peer_addr));
-+
-+	/* Keep peer-delete/stop ahead of the normal vdev-delete teardown. */
-+	if (command_sent)
-+		qdf_sleep(20);
-+}
-+
-+static bool
-+hdd_mon_inject_create_hidden_sta(struct hdd_adapter *mon_adapter)
-+{
-+	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(mon_adapter);
-+	struct hdd_adapter_create_param params = {0};
-+	struct hdd_adapter *sta_adapter;
-+	struct wlan_objmgr_vdev *vdev;
-+	uint8_t *mac_addr;
-+
-+	sta_adapter = hdd_get_adapter_by_iface_name(hdd_ctx,
-+						    HDD_MON_INJECT_IFNAME);
-+	if (sta_adapter) {
-+		if (sta_adapter->device_mode != QDF_STA_MODE) {
-+			hdd_err("Injection: %s exists with the wrong mode",
-+				HDD_MON_INJECT_IFNAME);
-+			return false;
-+		}
-+		hdd_mon_inject_sta_adapter = sta_adapter;
-+		return true;
-+	}
-+
-+	if (mon_adapter->device_mode != QDF_MONITOR_MODE)
-+		return false;
-+
-+	mac_addr = wlan_hdd_get_intf_addr(hdd_ctx, QDF_STA_MODE);
-+	if (!mac_addr) {
-+		hdd_err("Injection: failed to allocate a hidden STA address");
-+		return false;
-+	}
-+
-+	sta_adapter = hdd_open_adapter(hdd_ctx, QDF_STA_MODE,
-+				       HDD_MON_INJECT_IFNAME, mac_addr,
-+				       NET_NAME_UNKNOWN, true, &params);
-+	if (!sta_adapter) {
-+		hdd_err("Injection: failed to open hidden STA adapter");
-+		wlan_hdd_release_intf_addr(hdd_ctx, mac_addr);
-+		return false;
-+	}
-+
-+	if (hdd_start_adapter(sta_adapter, true)) {
-+		hdd_err("Injection: failed to create hidden STA vdev");
-+		goto err_close;
-+	}
-+
-+	vdev = hdd_objmgr_get_vdev_by_user(sta_adapter->deflink, WLAN_OSIF_ID);
-+	if (!vdev) {
-+		hdd_err("Injection: hidden STA vdev did not become ready");
-+		goto err_stop;
-+	}
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+
-+	hdd_mon_inject_sta_adapter = sta_adapter;
-+	hdd_mon_inject_vdev_started = false;
-+	hdd_mon_inject_peer_created = false;
-+	hdd_mon_inject_ready = false;
-+	hdd_mon_inject_chan_freq = 0;
-+	return true;
-+
-+err_stop:
-+	hdd_stop_adapter(hdd_ctx, sta_adapter);
-+err_close:
-+	hdd_close_adapter(hdd_ctx, sta_adapter, true);
-+	wlan_hdd_release_intf_addr(hdd_ctx, mac_addr);
-+	return false;
-+}
-+
-+bool hdd_mon_inject_set_channel(struct hdd_adapter *mon_adapter)
-+{
-+	struct hdd_adapter *sta_adapter = hdd_mon_inject_sta_adapter;
 +	struct wlan_channel channel = {0};
 +
-+	if (!sta_adapter || !mon_adapter || !mon_adapter->dev)
++	if (!adapter || !adapter->deflink)
 +		return false;
 +
-+	if (!hdd_mon_inject_get_channel(mon_adapter, &channel)) {
++	if (!hdd_mon_inject_get_channel(adapter, &channel)) {
 +		hdd_err("Injection: monitor channel is not ready");
 +		return false;
 +	}
 +
-+	WRITE_ONCE(hdd_mon_inject_ready, false);
-+	netif_carrier_off(mon_adapter->dev);
-+	netif_tx_disable(mon_adapter->dev);
-+
-+	if (!hdd_mon_inject_start_hidden_vdev(sta_adapter, &channel))
++	if (wma_mon_inject_setup(adapter->deflink->vdev_id,
++				 channel.ch_freq) != 0) {
++		hdd_err("Injection: failed to start helper vdev on %u MHz",
++			channel.ch_freq);
 +		return false;
++	}
 +
 +	hdd_mon_inject_chan_freq = channel.ch_freq;
-+	WRITE_ONCE(hdd_mon_inject_ready, true);
-+	netif_carrier_on(mon_adapter->dev);
-+	netif_tx_wake_all_queues(mon_adapter->dev);
-+	hdd_info("Injection: hidden STA ready on %u MHz", channel.ch_freq);
++	hdd_info("Injection: helper ready on %u MHz", channel.ch_freq);
 +	return true;
 +}
 +
-+static void
-+hdd_mon_inject_destroy_hidden_sta(struct hdd_adapter *mon_adapter)
++static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
-+	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(mon_adapter);
-+	struct hdd_adapter *sta_adapter;
-+	struct qdf_mac_addr mac_addr;
-+
-+	WRITE_ONCE(hdd_mon_inject_ready, false);
-+	sta_adapter = hdd_get_adapter_by_iface_name(hdd_ctx,
-+						    HDD_MON_INJECT_IFNAME);
-+	hdd_mon_inject_sta_adapter = NULL;
-+	if (!sta_adapter)
-+		return;
-+
-+	qdf_copy_macaddr(&mac_addr, &sta_adapter->mac_addr);
-+	hdd_mon_inject_stop_hidden_vdev(sta_adapter);
-+	hdd_stop_adapter(hdd_ctx, sta_adapter);
-+	hdd_deinit_adapter(hdd_ctx, sta_adapter, true);
-+	hdd_close_adapter(hdd_ctx, sta_adapter, true);
-+	wlan_hdd_release_intf_addr(hdd_ctx, mac_addr.bytes);
++	wma_mon_inject_teardown();
++	hdd_mon_inject_chan_freq = 0;
 +}
++
++#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3520,9 +3923,17 @@ static int __hdd_mon_open(struct net_device *dev)
- 		ret = hdd_enable_monitor_mode(dev);
- 
- 	if (!ret) {
-+		struct wlan_channel channel = {0};
-+
+@@ -3523,6 +3615,8 @@ static int __hdd_mon_open(struct net_device *dev)
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
-+		if (!hdd_mon_inject_create_hidden_sta(adapter)) {
-+			hdd_err("Injection: hidden STA creation failed");
-+		} else if (hdd_mon_inject_get_channel(adapter, &channel) &&
-+			   !hdd_mon_inject_set_channel(adapter)) {
-+			hdd_err("Injection: initial channel synchronization failed");
-+		}
++		if (!hdd_mon_inject_set_channel(adapter))
++			hdd_err("Injection: initial channel setup failed");
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6286,11 @@ int hdd_stop_no_trans(struct net_device *dev)
+@@ -5875,6 +5969,11 @@ int hdd_stop_no_trans(struct net_device *dev)
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
-+		hdd_mon_inject_destroy_hidden_sta(adapter);
++		hdd_mon_inject_stop(adapter);
 +#endif
 +
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7722,160 @@ static const struct net_device_ops wlan_drv_ops = {
+@@ -7306,10 +7405,51 @@ static const struct net_device_ops wlan_drv_ops = {
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 -/* Monitor mode net_device_ops, does not Tx and most of operations. */
-+struct hdd_mon_radiotap_hdr {
-+	uint8_t it_version;
-+	uint8_t it_pad;
-+	uint16_t it_len;
-+	uint32_t it_present;
-+} __packed;
-+
-+#define HDD_MON_RADIOTAP_VERSION 0
-+#define HDD_MON_MIN_80211_LEN 24
-+
-+static int hdd_mon_strip_radiotap(struct sk_buff *skb)
-+{
-+	struct hdd_mon_radiotap_hdr *rthdr;
-+	uint16_t rtap_len;
-+
-+	if (skb->len < sizeof(*rthdr))
-+		return -EINVAL;
-+
-+	rthdr = (struct hdd_mon_radiotap_hdr *)skb->data;
-+	if (rthdr->it_version != HDD_MON_RADIOTAP_VERSION)
-+		return -EINVAL;
-+
-+	rtap_len = le16_to_cpu(rthdr->it_len);
-+	if (rtap_len < sizeof(*rthdr) || rtap_len > skb->len ||
-+	    skb->len - rtap_len < HDD_MON_MIN_80211_LEN)
-+		return -EINVAL;
-+
-+	skb_pull(skb, rtap_len);
-+	return 0;
-+}
-+
-+static QDF_STATUS
-+hdd_mon_inject_tx_complete(void *context, qdf_nbuf_t buf, bool free)
-+{
-+	(void)context;
-+	(void)free;
-+	qdf_nbuf_free(buf);
-+	return QDF_STATUS_SUCCESS;
-+}
 +
 +static netdev_tx_t hdd_mon_hard_start_xmit(struct sk_buff *skb,
 +					   struct net_device *dev)
 +{
 +	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
-+	struct hdd_adapter *sta_adapter;
-+	struct hdd_context *hdd_ctx;
-+	struct wlan_hdd_link_info *link_info;
-+	struct wlan_objmgr_vdev *vdev;
-+	struct wlan_objmgr_pdev *pdev;
-+	struct wlan_objmgr_peer *peer;
 +	struct ieee80211_hdr *hdr;
-+	struct wmi_mgmt_params mgmt_param = {0};
-+	uint32_t frame_len;
-+	uint8_t pdev_id;
-+	QDF_STATUS status;
 +
 +	if (!adapter) {
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
-+	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
-+	if (wlan_hdd_validate_context(hdd_ctx))
-+		goto drop;
-+
-+	if (!READ_ONCE(hdd_mon_inject_ready)) {
-+		hdd_debug_rl("Injection: hidden STA is not ready");
-+		goto drop;
++	if (wlan_hdd_validate_context(WLAN_HDD_GET_CTX(adapter))) {
++		qdf_nbuf_free(skb);
++		return NETDEV_TX_OK;
 +	}
 +
-+	sta_adapter = READ_ONCE(hdd_mon_inject_sta_adapter);
-+	if (!sta_adapter)
-+		goto drop;
-+
-+	link_info = sta_adapter->deflink;
-+	if (!link_info || wlan_hdd_validate_vdev_id(link_info->vdev_id))
-+		goto drop;
-+
-+	if (skb_linearize(skb) || hdd_mon_strip_radiotap(skb)) {
++	if (skb_linearize(skb) || hdd_mon_inject_strip_radiotap(skb)) {
 +		hdd_debug_rl("Injection: malformed radiotap frame");
 +		goto drop;
 +	}
@@ -568,59 +171,11 @@ index dcdaf2f6..9ec90633 100755
 +		goto drop;
 +	}
 +
-+	/* Match the host and firmware self-peer used by the hidden STA. */
-+	qdf_mem_copy(hdr->addr2, hdd_mon_inject_peer_addr.bytes, ETH_ALEN);
-+	qdf_mem_copy(hdr->addr3, hdd_mon_inject_peer_addr.bytes, ETH_ALEN);
-+	frame_len = skb->len;
-+
-+	vdev = hdd_objmgr_get_vdev_by_user(link_info, WLAN_OSIF_ID);
-+	if (!vdev)
-+		goto drop;
-+
-+	pdev = wlan_vdev_get_pdev(vdev);
-+	if (!pdev) {
-+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+		goto drop;
++	if (wma_mon_inject_tx(skb, hdd_mon_inject_chan_freq) == 0) {
++		dev->stats.tx_packets++;
++		dev->stats.tx_bytes += skb->len;
++		return NETDEV_TX_OK;
 +	}
-+
-+	pdev_id = wlan_objmgr_pdev_get_pdev_id(pdev);
-+	peer = wlan_objmgr_get_peer(hdd_ctx->psoc, pdev_id,
-+					hdd_mon_inject_peer_addr.bytes,
-+					WLAN_OSIF_ID);
-+	if (!peer) {
-+		hdd_debug_rl("Injection: hidden STA host peer is missing");
-+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+		goto drop;
-+	}
-+
-+	mgmt_param.tx_frame = skb;
-+	mgmt_param.pdata = skb->data;
-+	mgmt_param.frm_len = frame_len;
-+	mgmt_param.vdev_id = link_info->vdev_id;
-+	mgmt_param.chanfreq = READ_ONCE(hdd_mon_inject_chan_freq);
-+	mgmt_param.qdf_ctx = wlan_psoc_get_qdf_dev(hdd_ctx->psoc);
-+	mgmt_param.macaddr = hdr->addr1;
-+
-+	/*
-+	 * This API allocates a unique descriptor and retains skb until firmware
-+	 * completion. Directly calling wma_mgmt_unified_cmd_send() with desc_id
-+	 * zero and freeing skb here causes descriptor collisions and DMA UAF.
-+	 */
-+	status = wlan_mgmt_txrx_mgmt_frame_tx(
-+		peer, NULL, skb, hdd_mon_inject_tx_complete, NULL,
-+		WLAN_UMAC_COMP_MLME, &mgmt_param);
-+
-+	wlan_objmgr_peer_release_ref(peer, WLAN_OSIF_ID);
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		hdd_debug_rl("Injection: management TX rejected: %d", status);
-+		goto drop;
-+	}
-+
-+	dev->stats.tx_packets++;
-+	dev->stats.tx_bytes += frame_len;
-+	return NETDEV_TX_OK;
 +
 +drop:
 +	dev->stats.tx_dropped++;
@@ -636,7 +191,7 @@ index dcdaf2f6..9ec90633 100755
  	.ndo_get_stats = hdd_get_stats,
  };
  
-@@ -11423,7 +11989,14 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter)
+@@ -11423,7 +11563,14 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter)
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -652,11 +207,321 @@ index dcdaf2f6..9ec90633 100755
  }
  #endif
  
-diff --git a/core/hdd/inc/wlan_hdd_main.h b/core/hdd/inc/wlan_hdd_main.h
---- a/core/hdd/inc/wlan_hdd_main.h
-+++ b/core/hdd/inc/wlan_hdd_main.h
-@@ -5394,1 +5394,4 @@
+diff --git a/core/wma/inc/wma_frame_inject.h b/core/wma/inc/wma_frame_inject.h
+new file mode 100644
+index 00000000..b1bfcf8e
+--- /dev/null
++++ b/core/wma/inc/wma_frame_inject.h
+@@ -0,0 +1,65 @@
++/*
++ * Copyright (c) 2024 The Linux Foundation. All rights reserved.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
 +
-+bool hdd_mon_inject_set_channel(struct hdd_adapter *adapter);
++#ifndef WMA_FRAME_INJECT_H
++#define WMA_FRAME_INJECT_H
 +
- #else
++#include <qdf_types.h>
++#include <qdf_nbuf.h>
++
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
++
++/**
++ * wma_mon_inject_setup() - create a firmware-only helper vdev for injection
++ * @mon_vdev_id: monitor vdev id (used to avoid collision)
++ * @chanfreq: channel frequency in MHz
++ *
++ * Creates (or re-creates on channel change) a lightweight STA vdev in
++ * firmware and a self-peer on the requested channel. The host does not
++ * register an objmgr vdev, so firmware responses for this helper are
++ * dropped; msleep() delays separate the asynchronous commands.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int wma_mon_inject_setup(uint8_t mon_vdev_id, uint32_t chanfreq);
++
++/**
++ * wma_mon_inject_teardown() - destroy the helper vdev
++ *
++ * Sends PEER_DELETE -> VDEV_STOP -> VDEV_DELETE with msleep() gaps.
++ */
++void wma_mon_inject_teardown(void);
++
++/**
++ * wma_mon_inject_tx() - transmit a management frame through the helper vdev
++ * @skb: 802.11 management frame (radiotap already stripped)
++ * @chanfreq: channel frequency in MHz
++ *
++ * Consumes @skb on success. On failure the caller retains ownership.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int wma_mon_inject_tx(struct sk_buff *skb, uint32_t chanfreq);
++
++#else /* FEATURE_MONITOR_MODE_SUPPORT */
++
++static inline int wma_mon_inject_setup(uint8_t mon_vdev_id, uint32_t chanfreq)
++{
++	return -EINVAL;
++}
++
++static inline void wma_mon_inject_teardown(void)
++{
++}
++
++static inline int wma_mon_inject_tx(struct sk_buff *skb, uint32_t chanfreq)
++{
++	return -EINVAL;
++}
++
++#endif /* FEATURE_MONITOR_MODE_SUPPORT */
++
++#endif /* WMA_FRAME_INJECT_H */
+diff --git a/core/wma/src/wma_frame_inject.c b/core/wma/src/wma_frame_inject.c
+new file mode 100644
+index 00000000..edbc9c96
+--- /dev/null
++++ b/core/wma/src/wma_frame_inject.c
+@@ -0,0 +1,229 @@
++/*
++ * Copyright (c) 2024 The Linux Foundation. All rights reserved.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#include "wma_frame_inject.h"
++#include "wma.h"
++#include "wma_api.h"
++#include "wma_internal.h"
++#include "wmi_unified_api.h"
++#include "wmi_unified.h"
++#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
++#include "qdf_mem.h"
++#include "qdf_time.h"
++#include "qdf_module.h"
++#include "cds_api.h"
++
++/* Firmware needs time between asynchronous VDEV/peer commands */
++#define WMA_MON_INJECT_CMD_DELAY_MS 150
++#define WMA_MON_INJECT_PEER_DELAY_MS 100
++#define WMA_MON_INJECT_MAX_VDEV (CFG_TGT_NUM_VDEV - 2)
++
++struct wma_mon_inject_ctx {
++	bool created;
++	uint8_t vdev_id;
++	uint8_t mon_vdev_id;
++	uint32_t chanfreq;
++	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
++};
++
++static struct wma_mon_inject_ctx g_inj;
++
++static QDF_STATUS wma_mon_inject_find_vdev_id(uint8_t mon_vdev_id,
++					      uint8_t *out_vid)
++{
++	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++	int i, fw_max;
++
++	if (!wma)
++		return QDF_STATUS_E_FAILURE;
++
++	fw_max = WMA_MON_INJECT_MAX_VDEV;
++	if (fw_max >= (int)wma->max_bssid)
++		fw_max = (int)wma->max_bssid - 1;
++
++	for (i = fw_max; i >= 0; i--) {
++		if ((uint8_t)i == mon_vdev_id)
++			continue;
++		if (!wma->interfaces[i].vdev) {
++			*out_vid = (uint8_t)i;
++			return QDF_STATUS_SUCCESS;
++		}
++	}
++
++	return QDF_STATUS_E_RESOURCES;
++}
++
++static void wma_mon_inject_build_mac(uint8_t *dst, uint8_t *monitor_mac)
++{
++	qdf_mem_copy(dst, monitor_mac, QDF_MAC_ADDR_SIZE);
++	dst[0] |= 0x02; /* locally administered */
++}
++
++int wma_mon_inject_setup(uint8_t mon_vdev_id, uint32_t chanfreq)
++{
++	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++	struct vdev_create_params vcreate = {0};
++	struct vdev_start_params vstart = {0};
++	struct peer_create_params pcreate = {0};
++	uint8_t *monitor_mac;
++	QDF_STATUS status;
++	uint8_t vdev_id;
++
++	if (!wma || !wma->wmi_handle)
++		return -EINVAL;
++
++	if (g_inj.created) {
++		if (g_inj.chanfreq == chanfreq)
++			return 0;
++		wma_mon_inject_teardown();
++	}
++
++	status = wma_mon_inject_find_vdev_id(mon_vdev_id, &vdev_id);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: no free vdev slot");
++		return -EBUSY;
++	}
++
++	monitor_mac = wlan_vdev_mlme_get_macaddr(wma->interfaces[mon_vdev_id].vdev);
++	if (!monitor_mac) {
++		wma_err("Injection: cannot read monitor vdev MAC");
++		return -EINVAL;
++	}
++
++	wma_mon_inject_build_mac(g_inj.mac_addr, monitor_mac);
++
++	/* 1. VDEV CREATE (STA type) */
++	vcreate.vdev_id = vdev_id;
++	vcreate.type = WMI_VDEV_TYPE_STA;
++	vcreate.subtype = 0;
++	vcreate.nss_2g = 1;
++	vcreate.nss_5g = 1;
++	vcreate.pdev_id = 0;
++
++	status = wmi_unified_vdev_create_send(wma->wmi_handle,
++					      g_inj.mac_addr, &vcreate);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: vdev create failed: %d", status);
++		return -EIO;
++	}
++	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++
++	/* 2. VDEV START (basic 20 MHz) */
++	vstart.vdev_id = vdev_id;
++	vstart.channel.mhz = chanfreq;
++	vstart.channel.cfreq1 = chanfreq;
++	vstart.channel.cfreq2 = 0;
++	vstart.channel.phy_mode = (chanfreq < 4000) ? WLAN_PHYMODE_11G
++							  : WLAN_PHYMODE_11A;
++	vstart.channel.maxregpower = 20;
++	vstart.channel.maxpower = 20;
++	vstart.channel.pwr = 20;
++	vstart.beacon_interval = 0;
++	vstart.dtim_period = 0;
++
++	status = wmi_unified_vdev_start_send(wma->wmi_handle, &vstart);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: vdev start failed: %d", status);
++		goto err_delete;
++	}
++	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++
++	/* 3. PEER CREATE (self-peer) */
++	pcreate.peer_addr = g_inj.mac_addr;
++	pcreate.peer_type = WMI_PEER_TYPE_DEFAULT;
++	pcreate.vdev_id = vdev_id;
++
++	status = wmi_unified_peer_create_send(wma->wmi_handle, &pcreate);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: peer create failed: %d", status);
++		goto err_stop;
++	}
++	msleep(WMA_MON_INJECT_PEER_DELAY_MS);
++
++	g_inj.created = true;
++	g_inj.vdev_id = vdev_id;
++	g_inj.mon_vdev_id = mon_vdev_id;
++	g_inj.chanfreq = chanfreq;
++
++	wma_info("Injection: helper vdev %u on %u MHz", vdev_id, chanfreq);
++	return 0;
++
++err_stop:
++	wmi_unified_vdev_stop_send(wma->wmi_handle, &(struct vdev_stop_params){.vdev_id = vdev_id});
++err_delete:
++	wmi_unified_vdev_delete_send(wma->wmi_handle, vdev_id);
++	return -EIO;
++}
++
++void wma_mon_inject_teardown(void)
++{
++	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++	struct peer_delete_cmd_params pdel = {0};
++	struct vdev_stop_params vstop = {0};
++	uint8_t vdev_id;
++
++	if (!g_inj.created || !wma || !wma->wmi_handle)
++		goto clear;
++
++	vdev_id = g_inj.vdev_id;
++
++	pdel.vdev_id = vdev_id;
++	wmi_unified_peer_delete_send(wma->wmi_handle, g_inj.mac_addr, &pdel);
++	msleep(WMA_MON_INJECT_PEER_DELAY_MS);
++
++	vstop.vdev_id = vdev_id;
++	wmi_unified_vdev_stop_send(wma->wmi_handle, &vstop);
++	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++
++	wmi_unified_vdev_delete_send(wma->wmi_handle, vdev_id);
++	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++
++clear:
++	qdf_mem_zero(&g_inj, sizeof(g_inj));
++}
++
++int wma_mon_inject_tx(struct sk_buff *skb, uint32_t chanfreq)
++{
++	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++	void *qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
++	struct wmi_mgmt_params mgmt = {0};
++	qdf_nbuf_t wmi_buf;
++	uint8_t *frame_data;
++
++	if (!wma || !wma->wmi_handle || !skb)
++		return -EINVAL;
++
++	if (!g_inj.created)
++		return -ENODEV;
++
++	wmi_buf = qdf_nbuf_alloc(NULL, skb->len, 0, 0, false);
++	if (!wmi_buf)
++		return -ENOMEM;
++
++	frame_data = qdf_nbuf_put_tail(wmi_buf, skb->len);
++	if (!frame_data) {
++		qdf_nbuf_free(wmi_buf);
++		return -ENOMEM;
++	}
++	qdf_mem_copy(frame_data, skb->data, skb->len);
++
++	mgmt.tx_frame = wmi_buf;
++	mgmt.pdata = frame_data;
++	mgmt.frm_len = skb->len;
++	mgmt.vdev_id = g_inj.vdev_id;
++	mgmt.tx_type = GENERIC_NODOWLOAD_ACK_COMP_INDEX;
++	mgmt.chanfreq = (uint16_t)chanfreq;
++	mgmt.desc_id = 0;
++	mgmt.macaddr = NULL;
++	mgmt.qdf_ctx = qdf_ctx;
++
++	if (QDF_IS_STATUS_ERROR(wmi_mgmt_unified_cmd_send(wma->wmi_handle, &mgmt))) {
++		qdf_nbuf_free(wmi_buf);
++		return -EIO;
++	}
++
++	return 0;
++}
+diff --git a/wlan_qcacld3_modules.bzl b/wlan_qcacld3_modules.bzl
+index c8378812..258079e6 100755
+--- a/wlan_qcacld3_modules.bzl
++++ b/wlan_qcacld3_modules.bzl
+@@ -680,6 +680,7 @@ _fixed_srcs = [
+     "core/wma/src/wma_data.c",
+     "core/wma/src/wma_dev_if.c",
+     "core/wma/src/wma_features.c",
++    "core/wma/src/wma_frame_inject.c",
+     "core/wma/src/wma_main.c",
+     "core/wma/src/wma_mgmt.c",
+     "core/wma/src/wma_power.c",
