@@ -2187,6 +2187,11 @@ runs:
           echo "::error::patch applied but .ndo_start_xmit hook is missing"
           exit 1
         fi
+        if ! grep -q 'bool hdd_mon_inject_set_channel(struct hdd_adapter \*adapter);' \
+          core/hdd/inc/wlan_hdd_main.h; then
+          echo "::error::patch applied but monitor channel declaration is missing"
+          exit 1
+        fi
 
         # Management TX must go through the descriptor pool so firmware owns
         # the DMA mapping until completion. A fixed descriptor ID plus an
