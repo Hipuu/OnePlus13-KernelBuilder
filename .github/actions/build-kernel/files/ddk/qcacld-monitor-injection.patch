@@ -210,10 +210,10 @@ index dcdaf2f6..39f85ca1 100755
  
 diff --git a/core/wma/inc/wma_frame_inject.h b/core/wma/inc/wma_frame_inject.h
 new file mode 100644
-index 00000000..b1bfcf8e
+index 00000000..1c66c157
 --- /dev/null
 +++ b/core/wma/inc/wma_frame_inject.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,125 @@
 +/*
 + * Copyright (c) 2024 The Linux Foundation. All rights reserved.
 + *
@@ -228,15 +228,18 @@ index 00000000..b1bfcf8e
 +
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +
++QDF_STATUS wma_mon_inject_init(void);
++void wma_mon_inject_deinit(void);
++
 +/**
 + * wma_mon_inject_setup() - create a firmware-only helper vdev for injection
 + * @mon_vdev_id: monitor vdev id (used to avoid collision)
 + * @chanfreq: channel frequency in MHz
 + *
 + * Creates (or re-creates on channel change) a lightweight STA vdev in
-+ * firmware and a self-peer on the requested channel. The host does not
-+ * register an objmgr vdev, so firmware responses for this helper are
-+ * dropped; msleep() delays separate the asynchronous commands.
++ * firmware and a self-peer on the requested channel. Firmware vdev and peer
++ * responses are intercepted before normal host-object lookup because the
++ * helper intentionally has no host vdev or peer.
 + *
 + * Return: 0 on success, negative errno on failure.
 + */
@@ -245,7 +248,8 @@ index 00000000..b1bfcf8e
 +/**
 + * wma_mon_inject_teardown() - destroy the helper vdev
 + *
-+ * Sends PEER_DELETE -> VDEV_STOP -> VDEV_DELETE with msleep() gaps.
++ * Stops new TX, drains completions, then sends PEER_DELETE -> VDEV_STOP ->
++ * VDEV_DELETE and waits for their firmware responses.
 + */
 +void wma_mon_inject_teardown(void);
 +
@@ -254,13 +258,32 @@ index 00000000..b1bfcf8e
 + * @skb: 802.11 management frame (radiotap already stripped)
 + * @chanfreq: channel frequency in MHz
 + *
-+ * Consumes @skb on success. On failure the caller retains ownership.
++ * The caller retains ownership of @skb on both success and failure.
 + *
 + * Return: 0 on success, negative errno on failure.
 + */
 +int wma_mon_inject_tx(struct sk_buff *skb, uint32_t chanfreq);
 +
++bool wma_mon_inject_vdev_start_response(uint8_t vdev_id, uint32_t status);
++bool wma_mon_inject_vdev_stop_response(uint8_t vdev_id);
++bool wma_mon_inject_vdev_delete_response(uint8_t vdev_id);
++bool wma_mon_inject_peer_create_response(uint8_t vdev_id,
++					 const uint8_t *peer_mac,
++					 uint32_t status);
++bool wma_mon_inject_peer_delete_response(uint8_t vdev_id,
++					 const uint8_t *peer_mac);
++bool wma_mon_inject_tx_complete(uint32_t desc_id, uint32_t status);
++
 +#else /* FEATURE_MONITOR_MODE_SUPPORT */
++
++static inline QDF_STATUS wma_mon_inject_init(void)
++{
++	return QDF_STATUS_SUCCESS;
++}
++
++static inline void wma_mon_inject_deinit(void)
++{
++}
 +
 +static inline int wma_mon_inject_setup(uint8_t mon_vdev_id, uint32_t chanfreq)
 +{
@@ -276,20 +299,92 @@ index 00000000..b1bfcf8e
 +	return -EINVAL;
 +}
 +
++static inline bool
++wma_mon_inject_vdev_start_response(uint8_t vdev_id, uint32_t status)
++{
++	return false;
++}
++
++static inline bool wma_mon_inject_vdev_stop_response(uint8_t vdev_id)
++{
++	return false;
++}
++
++static inline bool wma_mon_inject_vdev_delete_response(uint8_t vdev_id)
++{
++	return false;
++}
++
++static inline bool
++wma_mon_inject_peer_create_response(uint8_t vdev_id,
++				    const uint8_t *peer_mac,
++				    uint32_t status)
++{
++	return false;
++}
++
++static inline bool
++wma_mon_inject_peer_delete_response(uint8_t vdev_id,
++				    const uint8_t *peer_mac)
++{
++	return false;
++}
++
++static inline bool
++wma_mon_inject_tx_complete(uint32_t desc_id, uint32_t status)
++{
++	return false;
++}
++
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
 +#endif /* WMA_FRAME_INJECT_H */
+diff --git a/core/wma/src/wma_dev_if.c b/core/wma/src/wma_dev_if.c
+index 5b765626..a9bd1778 100644
+--- a/core/wma/src/wma_dev_if.c
++++ b/core/wma/src/wma_dev_if.c
+@@ -54,6 +54,7 @@
+ #include "csr_api.h"
+ 
+ #include "wma_internal.h"
++#include "wma_frame_inject.h"
+ 
+ #include "wma_ocb.h"
+ #include "cdp_txrx_cfg.h"
+@@ -3700,6 +3701,11 @@ int wma_peer_create_confirm_handler(void *handle, uint8_t *evt_param_info,
+ 
+ 	wma_debug("vdev:%d Peer create confirm for bssid: " QDF_MAC_ADDR_FMT,
+ 		  peer_create_rsp->vdev_id, QDF_MAC_ADDR_REF(peer_mac.bytes));
++	if (wma_mon_inject_peer_create_response(peer_create_rsp->vdev_id,
++						peer_mac.bytes,
++						peer_create_rsp->status))
++		return 0;
++
+ 	req_msg = wma_find_remove_req_msgtype(wma, peer_create_rsp->vdev_id,
+ 					      NULL,
+ 					      WMA_PEER_CREATE_REQ);
+@@ -3850,6 +3856,8 @@ int wma_peer_delete_handler(void *handle, uint8_t *cmd_param_info,
+ 			    DEBUG_INVALID_PEER_ID, macaddr, NULL, 0, 0);
+ 
+ 	qdf_mem_copy(peer_mac.bytes, macaddr, QDF_MAC_ADDR_SIZE);
++	if (wma_mon_inject_peer_delete_response(event->vdev_id, macaddr))
++		return 0;
+ 
+ 	req_msg = wma_find_remove_req_msgtype(wma, event->vdev_id, &peer_mac,
+ 					      WMA_DELETE_STA_REQ);
 diff --git a/core/wma/src/wma_frame_inject.c b/core/wma/src/wma_frame_inject.c
 new file mode 100644
-index 00000000..f468a2ee
+index 00000000..e15575c5
 --- /dev/null
 +++ b/core/wma/src/wma_frame_inject.c
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,853 @@
 +/*
 + * Copyright (c) 2024 The Linux Foundation. All rights reserved.
 + *
 + * SPDX-License-Identifier: BSD-3-Clause
 + */
++
++#include <linux/delay.h>
 +
 +#include "wma_frame_inject.h"
 +#include "wma.h"
@@ -298,67 +393,99 @@ index 00000000..f468a2ee
 +#include "wmi_unified_api.h"
 +#include "wmi_unified.h"
 +#include "wlan_vdev_mgr_tgt_if_tx_defs.h"
-+#include "qdf_mem.h"
-+#include "qdf_time.h"
-+#include "qdf_module.h"
-+#include "qdf_delayed_work.h"
++#include "qdf_event.h"
 +#include "qdf_lock.h"
++#include "qdf_mem.h"
++#include "qdf_module.h"
 +#include "cds_api.h"
 +
-+/* Firmware needs time between asynchronous VDEV/peer commands */
-+#define WMA_MON_INJECT_CMD_DELAY_MS 150
-+#define WMA_MON_INJECT_PEER_DELAY_MS 100
 +#define WMA_MON_INJECT_MAX_VDEV (CFG_TGT_NUM_VDEV - 2)
-+
-+/* In-flight TX buffers are freed after this timeout if no completion arrives */
-+#define WMA_MON_INJECT_NBUF_TIMEOUT_US 2000000ULL
-+#define WMA_MON_INJECT_REAP_INTERVAL_MS 3000
 +#define WMA_MON_INJECT_MAX_INFLIGHT 16
 +#define WMA_MON_INJECT_DESC_ID_BASE 0x8000
 +#define WMA_MON_INJECT_DESC_ID_MASK 0x0FFF
++#define WMA_MON_INJECT_START_TIMEOUT_MS 2000
++#define WMA_MON_INJECT_PEER_TIMEOUT_MS 2000
++#define WMA_MON_INJECT_STOP_TIMEOUT_MS 1500
++#define WMA_MON_INJECT_DELETE_TIMEOUT_MS 1500
++#define WMA_MON_INJECT_TX_DRAIN_TIMEOUT_MS 2000
++#define WMA_MON_INJECT_TX_DRAIN_POLL_MS 20
++
++enum wma_mon_inject_state {
++	WMA_MON_INJECT_DOWN,
++	WMA_MON_INJECT_STARTING,
++	WMA_MON_INJECT_UP,
++	WMA_MON_INJECT_STOPPING,
++};
 +
 +struct wma_mon_inject_nbuf {
 +	qdf_nbuf_t nbuf;
 +	uint16_t desc_id;
-+	uint64_t submit_ts;
 +	bool valid;
 +};
 +
 +struct wma_mon_inject_ctx {
-+	bool created;
++	bool initialized;
++	bool vdev_claimed;
++	bool vdev_created;
++	bool start_sent;
++	bool peer_created;
++	enum wma_mon_inject_state state;
 +	uint8_t vdev_id;
 +	uint8_t mon_vdev_id;
 +	uint32_t chanfreq;
++	uint32_t start_status;
++	uint32_t peer_create_status;
 +	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
-+	qdf_spinlock_t lock;
-+	struct qdf_delayed_work reaper;
++	qdf_mutex_t lifecycle_lock;
++	qdf_spinlock_t state_lock;
++	qdf_event_t start_event;
++	qdf_event_t peer_create_event;
++	qdf_event_t peer_delete_event;
++	qdf_event_t stop_event;
++	qdf_event_t delete_event;
 +	struct wma_mon_inject_nbuf inflight[WMA_MON_INJECT_MAX_INFLIGHT];
 +	uint16_t next_desc_id;
-+	bool reaper_running;
++	uint16_t active_submitters;
 +};
 +
 +static struct wma_mon_inject_ctx g_inj;
-+static bool g_inj_lock_inited;
 +
-+static void wma_mon_inject_lock_init(void)
++static bool wma_mon_inject_is_desc_id(uint32_t desc_id)
 +{
-+	if (g_inj_lock_inited)
-+		return;
-+	qdf_spinlock_create(&g_inj.lock);
-+	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
-+	g_inj_lock_inited = true;
++	return desc_id >= WMA_MON_INJECT_DESC_ID_BASE &&
++	       desc_id <= (WMA_MON_INJECT_DESC_ID_BASE +
++			   WMA_MON_INJECT_DESC_ID_MASK);
 +}
 +
-+static uint16_t wma_mon_inject_desc_id_alloc(void)
++static bool wma_mon_inject_desc_id_alloc_locked(uint16_t *desc_id)
 +{
-+	uint16_t id;
++	uint16_t candidate;
++	bool in_use;
++	int attempt;
++	int i;
 +
-+	id = g_inj.next_desc_id;
-+	if ((++g_inj.next_desc_id & ~WMA_MON_INJECT_DESC_ID_MASK) !=
-+	    WMA_MON_INJECT_DESC_ID_BASE)
-+		g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
++	for (attempt = 0; attempt <= WMA_MON_INJECT_DESC_ID_MASK; attempt++) {
++		candidate = g_inj.next_desc_id;
++		if ((++g_inj.next_desc_id & ~WMA_MON_INJECT_DESC_ID_MASK) !=
++		    WMA_MON_INJECT_DESC_ID_BASE)
++			g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
 +
-+	return id;
++		in_use = false;
++		for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
++			if (g_inj.inflight[i].valid &&
++			    g_inj.inflight[i].desc_id == candidate) {
++				in_use = true;
++				break;
++			}
++		}
++
++		if (!in_use) {
++			*desc_id = candidate;
++			return true;
++		}
++	}
++
++	return false;
 +}
 +
 +static void wma_mon_inject_nbuf_unmap_free(qdf_nbuf_t nbuf)
@@ -374,79 +501,135 @@ index 00000000..f468a2ee
 +	qdf_nbuf_free(nbuf);
 +}
 +
-+static void wma_mon_inject_reaper_cb(void *arg)
++static unsigned int wma_mon_inject_pending_tx_locked(void)
 +{
-+	uint64_t now = qdf_get_log_timestamp();
++	unsigned int pending = g_inj.active_submitters;
 +	int i;
 +
-+	if (!g_inj.reaper_running)
-+		return;
-+
-+	qdf_spin_lock_bh(&g_inj.lock);
 +	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
-+		struct wma_mon_inject_nbuf *e = &g_inj.inflight[i];
-+		uint64_t age_us;
-+
-+		if (!e->valid || !e->nbuf)
-+			continue;
-+
-+		age_us = qdf_log_timestamp_to_usecs(now - e->submit_ts);
-+		if (age_us < WMA_MON_INJECT_NBUF_TIMEOUT_US)
-+			continue;
-+
-+		wma_warn("Injection: reap stale desc_id=%u age=%llu us",
-+			 e->desc_id, age_us);
-+		wma_mon_inject_nbuf_unmap_free(e->nbuf);
-+		e->nbuf = NULL;
-+		e->valid = false;
++		if (g_inj.inflight[i].valid)
++			pending++;
 +	}
-+	qdf_spin_unlock_bh(&g_inj.lock);
 +
-+	qdf_delayed_work_start(&g_inj.reaper, WMA_MON_INJECT_REAP_INTERVAL_MS);
++	return pending;
 +}
 +
-+static void wma_mon_inject_reaper_init(void)
++static bool wma_mon_inject_wait_for_tx_drain(void)
++{
++	unsigned int elapsed = 0;
++	unsigned int pending;
++
++	while (elapsed < WMA_MON_INJECT_TX_DRAIN_TIMEOUT_MS) {
++		qdf_spin_lock_bh(&g_inj.state_lock);
++		pending = wma_mon_inject_pending_tx_locked();
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		if (!pending)
++			return true;
++
++		msleep(WMA_MON_INJECT_TX_DRAIN_POLL_MS);
++		elapsed += WMA_MON_INJECT_TX_DRAIN_POLL_MS;
++	}
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	pending = wma_mon_inject_pending_tx_locked();
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++	wma_warn("Injection: %u TX buffers did not complete before teardown",
++		 pending);
++	return false;
++}
++
++static void wma_mon_inject_flush_inflight(void)
++{
++	qdf_nbuf_t pending[WMA_MON_INJECT_MAX_INFLIGHT] = {0};
++	int count = 0;
++	int i;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
++		if (!g_inj.inflight[i].valid)
++			continue;
++
++		pending[count++] = g_inj.inflight[i].nbuf;
++		g_inj.inflight[i].nbuf = NULL;
++		g_inj.inflight[i].valid = false;
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	for (i = 0; i < count; i++)
++		wma_mon_inject_nbuf_unmap_free(pending[i]);
++}
++
++static bool wma_mon_inject_submitters_idle(void)
++{
++	bool idle;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	idle = !g_inj.active_submitters;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	return idle;
++}
++
++QDF_STATUS wma_mon_inject_init(void)
 +{
 +	QDF_STATUS status;
 +
-+	if (g_inj.reaper_running)
-+		return;
++	if (g_inj.initialized)
++		return QDF_STATUS_SUCCESS;
 +
-+	status = qdf_delayed_work_create(&g_inj.reaper, wma_mon_inject_reaper_cb, NULL);
-+	if (QDF_IS_STATUS_ERROR(status)) {
-+		wma_err("Injection: failed to create reaper");
-+		return;
-+	}
-+	g_inj.reaper_running = true;
-+	qdf_delayed_work_start(&g_inj.reaper, WMA_MON_INJECT_REAP_INTERVAL_MS);
++	qdf_mem_zero(&g_inj, sizeof(g_inj));
++	status = qdf_mutex_create(&g_inj.lifecycle_lock);
++	if (QDF_IS_STATUS_ERROR(status))
++		return status;
++
++	qdf_spinlock_create(&g_inj.state_lock);
++
++	status = qdf_event_create(&g_inj.start_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_spinlock;
++
++	status = qdf_event_create(&g_inj.peer_create_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_start_event;
++
++	status = qdf_event_create(&g_inj.peer_delete_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_peer_create_event;
++
++	status = qdf_event_create(&g_inj.stop_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_peer_delete_event;
++
++	status = qdf_event_create(&g_inj.delete_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_stop_event;
++
++	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
++	g_inj.state = WMA_MON_INJECT_DOWN;
++	g_inj.initialized = true;
++	return QDF_STATUS_SUCCESS;
++
++fail_stop_event:
++	qdf_event_destroy(&g_inj.stop_event);
++fail_peer_delete_event:
++	qdf_event_destroy(&g_inj.peer_delete_event);
++fail_peer_create_event:
++	qdf_event_destroy(&g_inj.peer_create_event);
++fail_start_event:
++	qdf_event_destroy(&g_inj.start_event);
++fail_spinlock:
++	qdf_spinlock_destroy(&g_inj.state_lock);
++	qdf_mutex_destroy(&g_inj.lifecycle_lock);
++	qdf_mem_zero(&g_inj, sizeof(g_inj));
++	return status;
 +}
 +
-+static void wma_mon_inject_reaper_deinit(void)
++static QDF_STATUS
++wma_mon_inject_find_vdev_id(tp_wma_handle wma, uint8_t mon_vdev_id,
++			    uint8_t *out_vid)
 +{
 +	int i;
-+
-+	if (!g_inj.reaper_running)
-+		return;
-+
-+	qdf_delayed_work_stop_sync(&g_inj.reaper);
-+	qdf_delayed_work_destroy(&g_inj.reaper);
-+	g_inj.reaper_running = false;
-+
-+	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
-+		if (g_inj.inflight[i].valid && g_inj.inflight[i].nbuf)
-+			wma_mon_inject_nbuf_unmap_free(g_inj.inflight[i].nbuf);
-+	}
-+	qdf_mem_zero(g_inj.inflight, sizeof(g_inj.inflight));
-+}
-+
-+static QDF_STATUS wma_mon_inject_find_vdev_id(uint8_t mon_vdev_id,
-+					      uint8_t *out_vid)
-+{
-+	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
-+	int i, fw_max;
-+
-+	if (!wma)
-+		return QDF_STATUS_E_FAILURE;
++	int fw_max;
 +
 +	fw_max = WMA_MON_INJECT_MAX_VDEV;
 +	if (fw_max >= (int)wma->max_bssid)
@@ -464,12 +647,276 @@ index 00000000..f468a2ee
 +	return QDF_STATUS_E_RESOURCES;
 +}
 +
-+static void wma_mon_inject_build_mac(uint8_t *dst, uint8_t *monitor_mac)
++static void wma_mon_inject_build_mac(uint8_t *dst, const uint8_t *monitor_mac)
 +{
 +	qdf_mem_copy(dst, monitor_mac, QDF_MAC_ADDR_SIZE);
-+	/* Locally administered and guaranteed different from monitor MAC */
 +	dst[0] |= 0x02;
 +	dst[5] ^= 0x01;
++}
++
++bool wma_mon_inject_vdev_start_response(uint8_t vdev_id, uint32_t status)
++{
++	bool signal = false;
++	bool handled = false;
++
++	if (!g_inj.initialized)
++		return false;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.vdev_claimed && g_inj.vdev_id == vdev_id) {
++		handled = true;
++		if (g_inj.state == WMA_MON_INJECT_STARTING) {
++			g_inj.start_status = status;
++			signal = true;
++		}
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (signal)
++		qdf_event_set(&g_inj.start_event);
++
++	return handled;
++}
++
++bool wma_mon_inject_vdev_stop_response(uint8_t vdev_id)
++{
++	bool signal = false;
++	bool handled = false;
++
++	if (!g_inj.initialized)
++		return false;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.vdev_claimed && g_inj.vdev_id == vdev_id) {
++		handled = true;
++		if (g_inj.state == WMA_MON_INJECT_STOPPING)
++			signal = true;
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (signal)
++		qdf_event_set(&g_inj.stop_event);
++
++	return handled;
++}
++
++bool wma_mon_inject_vdev_delete_response(uint8_t vdev_id)
++{
++	bool signal = false;
++	bool handled = false;
++
++	if (!g_inj.initialized)
++		return false;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.vdev_claimed && g_inj.vdev_id == vdev_id) {
++		handled = true;
++		if (g_inj.state == WMA_MON_INJECT_STOPPING)
++			signal = true;
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (signal)
++		qdf_event_set(&g_inj.delete_event);
++
++	return handled;
++}
++
++bool wma_mon_inject_peer_create_response(uint8_t vdev_id,
++					 const uint8_t *peer_mac,
++					 uint32_t status)
++{
++	bool signal = false;
++	bool handled = false;
++
++	if (!g_inj.initialized || !peer_mac)
++		return false;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.vdev_claimed && g_inj.vdev_id == vdev_id &&
++	    !qdf_mem_cmp(g_inj.mac_addr, peer_mac, QDF_MAC_ADDR_SIZE)) {
++		handled = true;
++		if (g_inj.state == WMA_MON_INJECT_STARTING) {
++			g_inj.peer_create_status = status;
++			signal = true;
++		}
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (signal)
++		qdf_event_set(&g_inj.peer_create_event);
++
++	return handled;
++}
++
++bool wma_mon_inject_peer_delete_response(uint8_t vdev_id,
++					 const uint8_t *peer_mac)
++{
++	bool signal = false;
++	bool handled = false;
++
++	if (!g_inj.initialized || !peer_mac)
++		return false;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.vdev_claimed && g_inj.vdev_id == vdev_id &&
++	    !qdf_mem_cmp(g_inj.mac_addr, peer_mac, QDF_MAC_ADDR_SIZE)) {
++		handled = true;
++		if (g_inj.state == WMA_MON_INJECT_STOPPING)
++			signal = true;
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (signal)
++		qdf_event_set(&g_inj.peer_delete_event);
++
++	return handled;
++}
++
++bool wma_mon_inject_tx_complete(uint32_t desc_id, uint32_t status)
++{
++	qdf_nbuf_t nbuf = NULL;
++	int i;
++
++	if (!wma_mon_inject_is_desc_id(desc_id))
++		return false;
++
++	if (!g_inj.initialized)
++		return true;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
++		if (!g_inj.inflight[i].valid ||
++		    g_inj.inflight[i].desc_id != desc_id)
++			continue;
++
++		nbuf = g_inj.inflight[i].nbuf;
++		g_inj.inflight[i].nbuf = NULL;
++		g_inj.inflight[i].valid = false;
++		break;
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (nbuf)
++		wma_mon_inject_nbuf_unmap_free(nbuf);
++	else
++		wma_warn("Injection: completion for unknown desc_id=%u", desc_id);
++
++	if (status)
++		wma_warn("Injection: desc_id=%u completed with status=%u",
++			 desc_id, status);
++
++	return true;
++}
++
++static void wma_mon_inject_mark_down(void)
++{
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.state = WMA_MON_INJECT_DOWN;
++	g_inj.vdev_claimed = false;
++	g_inj.vdev_created = false;
++	g_inj.start_sent = false;
++	g_inj.peer_created = false;
++	g_inj.vdev_id = 0;
++	g_inj.mon_vdev_id = 0;
++	g_inj.chanfreq = 0;
++	g_inj.start_status = QDF_STATUS_E_FAILURE;
++	g_inj.peer_create_status = QDF_STATUS_E_FAILURE;
++	qdf_mem_zero(g_inj.mac_addr, sizeof(g_inj.mac_addr));
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++}
++
++static void wma_mon_inject_teardown_locked(tp_wma_handle wma)
++{
++	struct peer_delete_cmd_params pdel = {0};
++	struct vdev_stop_params vstop = {0};
++	QDF_STATUS status;
++	uint8_t mac_addr[QDF_MAC_ADDR_SIZE];
++	uint8_t vdev_id;
++	bool peer_created;
++	bool start_sent;
++	bool vdev_created;
++	bool delete_acked = false;
++	bool submitters_idle;
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (!g_inj.vdev_claimed) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		return;
++	}
++
++	g_inj.state = WMA_MON_INJECT_STOPPING;
++	vdev_id = g_inj.vdev_id;
++	peer_created = g_inj.peer_created;
++	start_sent = g_inj.start_sent;
++	vdev_created = g_inj.vdev_created;
++	qdf_mem_copy(mac_addr, g_inj.mac_addr, sizeof(mac_addr));
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	wma_mon_inject_wait_for_tx_drain();
++
++	if (wma && wma->wmi_handle && peer_created) {
++		qdf_event_reset(&g_inj.peer_delete_event);
++		pdel.vdev_id = vdev_id;
++		status = wmi_unified_peer_delete_send(wma->wmi_handle,
++						      mac_addr, &pdel);
++		if (QDF_IS_STATUS_ERROR(status)) {
++			wma_warn("Injection: peer delete failed: %d", status);
++		} else {
++			status = qdf_wait_for_event_completion(
++						&g_inj.peer_delete_event,
++						WMA_MON_INJECT_PEER_TIMEOUT_MS);
++			if (QDF_IS_STATUS_ERROR(status))
++				wma_warn("Injection: peer delete response timed out");
++		}
++	}
++
++	if (wma && wma->wmi_handle && start_sent) {
++		qdf_event_reset(&g_inj.stop_event);
++		vstop.vdev_id = vdev_id;
++		status = wmi_unified_vdev_stop_send(wma->wmi_handle, &vstop);
++		if (QDF_IS_STATUS_ERROR(status)) {
++			wma_warn("Injection: vdev stop failed: %d", status);
++		} else {
++			status = qdf_wait_for_event_completion(
++						&g_inj.stop_event,
++						WMA_MON_INJECT_STOP_TIMEOUT_MS);
++			if (QDF_IS_STATUS_ERROR(status))
++				wma_warn("Injection: vdev stop response timed out");
++		}
++	}
++
++	if (wma && wma->wmi_handle && vdev_created) {
++		qdf_event_reset(&g_inj.delete_event);
++		status = wmi_unified_vdev_delete_send(wma->wmi_handle, vdev_id);
++		if (QDF_IS_STATUS_ERROR(status)) {
++			wma_warn("Injection: vdev delete failed: %d", status);
++		} else {
++			status = qdf_wait_for_event_completion(
++						&g_inj.delete_event,
++						WMA_MON_INJECT_DELETE_TIMEOUT_MS);
++			if (QDF_IS_STATUS_ERROR(status)) {
++				wma_warn("Injection: vdev delete response timed out");
++			} else {
++				delete_acked = true;
++			}
++		}
++	}
++
++	/*
++	 * A delete response guarantees firmware no longer owns the vdev's DMA
++	 * buffers. If delete times out, leave them mapped for a late completion;
++	 * force-freeing them would turn a firmware stall into a use-after-DMA.
++	 */
++	submitters_idle = wma_mon_inject_submitters_idle();
++	if ((!vdev_created || delete_acked) && submitters_idle) {
++		wma_mon_inject_flush_inflight();
++	} else if (!submitters_idle) {
++		wma_warn("Injection: retaining TX buffers while a submitter is active");
++	} else {
++		wma_warn("Injection: retaining uncompleted TX buffers after delete timeout");
++	}
++	wma_mon_inject_mark_down();
 +}
 +
 +int wma_mon_inject_setup(uint8_t mon_vdev_id, uint32_t chanfreq)
@@ -478,39 +925,74 @@ index 00000000..f468a2ee
 +	struct vdev_create_params vcreate = {0};
 +	struct vdev_start_params vstart = {0};
 +	struct peer_create_params pcreate = {0};
++	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
 +	uint8_t *monitor_mac;
 +	QDF_STATUS status;
++	uint32_t peer_status;
 +	uint8_t vdev_id;
++	bool peer_conf_supported;
++	int ret = -EIO;
 +
-+	if (!wma || !wma->wmi_handle)
++	if (!g_inj.initialized || !wma || !wma->wmi_handle || !chanfreq)
 +		return -EINVAL;
 +
-+	wma_mon_inject_lock_init();
-+
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	if (g_inj.created) {
-+		bool same = (g_inj.chanfreq == chanfreq);
-+		qdf_spin_unlock_bh(&g_inj.lock);
-+		return same ? 0 : -EBUSY;
-+	}
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+
-+	status = wma_mon_inject_find_vdev_id(mon_vdev_id, &vdev_id);
++	status = qdf_mutex_acquire(&g_inj.lifecycle_lock);
 +	if (QDF_IS_STATUS_ERROR(status))
-+		return -EBUSY;
++		return -EAGAIN;
 +
-+	monitor_mac = wlan_vdev_mlme_get_macaddr(wma->interfaces[mon_vdev_id].vdev);
-+	if (!monitor_mac)
-+		return -EINVAL;
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.state == WMA_MON_INJECT_UP &&
++	    g_inj.chanfreq == chanfreq) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		ret = 0;
++		goto out_unlock;
++	}
 +
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	wma_mon_inject_build_mac(g_inj.mac_addr, monitor_mac);
++	if (g_inj.state == WMA_MON_INJECT_UP) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		wma_mon_inject_teardown_locked(wma);
++	} else if (g_inj.state != WMA_MON_INJECT_DOWN) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		ret = -EBUSY;
++		goto out_unlock;
++	} else {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++	}
++
++	if (mon_vdev_id >= wma->max_bssid ||
++	    !wma->interfaces[mon_vdev_id].vdev) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
++	status = wma_mon_inject_find_vdev_id(wma, mon_vdev_id, &vdev_id);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	monitor_mac =
++		wlan_vdev_mlme_get_macaddr(wma->interfaces[mon_vdev_id].vdev);
++	if (!monitor_mac) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++	wma_mon_inject_build_mac(helper_mac, monitor_mac);
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.state = WMA_MON_INJECT_STARTING;
++	g_inj.vdev_claimed = true;
++	g_inj.vdev_created = false;
++	g_inj.start_sent = false;
++	g_inj.peer_created = false;
 +	g_inj.vdev_id = vdev_id;
 +	g_inj.mon_vdev_id = mon_vdev_id;
 +	g_inj.chanfreq = chanfreq;
-+	qdf_spin_unlock_bh(&g_inj.lock);
++	g_inj.start_status = QDF_STATUS_E_FAILURE;
++	g_inj.peer_create_status = QDF_STATUS_E_FAILURE;
++	qdf_mem_copy(g_inj.mac_addr, helper_mac, sizeof(helper_mac));
++	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
-+	/* 1. VDEV CREATE (STA type) */
 +	vcreate.vdev_id = vdev_id;
 +	vcreate.type = WMI_VDEV_TYPE_STA;
 +	vcreate.subtype = 0;
@@ -519,14 +1001,20 @@ index 00000000..f468a2ee
 +	vcreate.pdev_id = 0;
 +
 +	status = wmi_unified_vdev_create_send(wma->wmi_handle,
-+					      g_inj.mac_addr, &vcreate);
++					      helper_mac, &vcreate);
 +	if (QDF_IS_STATUS_ERROR(status)) {
 +		wma_err("Injection: vdev create failed: %d", status);
-+		goto fail_clear;
++		goto fail_teardown;
 +	}
-+	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
 +
-+	/* 2. VDEV START (basic 20 MHz) */
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.vdev_created = true;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	status = qdf_event_reset(&g_inj.start_event);
++	if (QDF_IS_STATUS_ERROR(status))
++		goto fail_teardown;
++
 +	vstart.vdev_id = vdev_id;
 +	vstart.channel.mhz = chanfreq;
 +	vstart.channel.cfreq1 = chanfreq;
@@ -542,81 +1030,117 @@ index 00000000..f468a2ee
 +	status = wmi_unified_vdev_start_send(wma->wmi_handle, &vstart);
 +	if (QDF_IS_STATUS_ERROR(status)) {
 +		wma_err("Injection: vdev start failed: %d", status);
-+		goto fail_delete;
++		goto fail_teardown;
 +	}
-+	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
 +
-+	/* 3. PEER CREATE (self-peer) */
-+	pcreate.peer_addr = g_inj.mac_addr;
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.start_sent = true;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	status = qdf_wait_for_event_completion(
++					&g_inj.start_event,
++					WMA_MON_INJECT_START_TIMEOUT_MS);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: vdev start response timed out");
++		goto fail_teardown;
++	}
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	status = g_inj.start_status;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: firmware rejected vdev start: %d", status);
++		goto fail_teardown;
++	}
++
++	pcreate.peer_addr = helper_mac;
 +	pcreate.peer_type = WMI_PEER_TYPE_DEFAULT;
 +	pcreate.vdev_id = vdev_id;
++	peer_conf_supported = wmi_service_enabled(
++					wma->wmi_handle,
++					wmi_service_peer_create_conf);
++	if (peer_conf_supported) {
++		status = qdf_event_reset(&g_inj.peer_create_event);
++		if (QDF_IS_STATUS_ERROR(status))
++			goto fail_teardown;
++	}
 +
 +	status = wmi_unified_peer_create_send(wma->wmi_handle, &pcreate);
 +	if (QDF_IS_STATUS_ERROR(status)) {
 +		wma_err("Injection: peer create failed: %d", status);
-+		goto fail_stop;
++		goto fail_teardown;
 +	}
-+	msleep(WMA_MON_INJECT_PEER_DELAY_MS);
 +
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	g_inj.created = true;
-+	qdf_spin_unlock_bh(&g_inj.lock);
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.peer_created = true;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
-+	wma_info("Injection: helper vdev %u on %u MHz", vdev_id, chanfreq);
-+	wma_mon_inject_reaper_init();
-+	return 0;
++	if (peer_conf_supported) {
++		status = qdf_wait_for_event_completion(
++						&g_inj.peer_create_event,
++						WMA_MON_INJECT_PEER_TIMEOUT_MS);
++		if (QDF_IS_STATUS_ERROR(status)) {
++			wma_err("Injection: peer create response timed out");
++			goto fail_teardown;
++		}
 +
-+fail_stop:
-+	wmi_unified_vdev_stop_send(wma->wmi_handle,
-+				   &(struct vdev_stop_params){.vdev_id = vdev_id});
-+fail_delete:
-+	wmi_unified_vdev_delete_send(wma->wmi_handle, vdev_id);
-+fail_clear:
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	qdf_mem_zero(g_inj.mac_addr, sizeof(g_inj.mac_addr));
-+	g_inj.vdev_id = 0;
-+	g_inj.chanfreq = 0;
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+	return -EIO;
++		qdf_spin_lock_bh(&g_inj.state_lock);
++		peer_status = g_inj.peer_create_status;
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		if (peer_status) {
++			wma_err("Injection: firmware rejected peer create: %u",
++				peer_status);
++			goto fail_teardown;
++		}
++	}
++
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	g_inj.state = WMA_MON_INJECT_UP;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	wma_info("Injection: helper vdev %u ready on %u MHz",
++		 vdev_id, chanfreq);
++	ret = 0;
++	goto out_unlock;
++
++fail_teardown:
++	wma_mon_inject_teardown_locked(wma);
++out_unlock:
++	qdf_mutex_release(&g_inj.lifecycle_lock);
++	return ret;
 +}
 +
 +void wma_mon_inject_teardown(void)
 +{
-+	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
-+	struct peer_delete_cmd_params pdel = {0};
-+	struct vdev_stop_params vstop = {0};
-+	uint8_t vdev_id;
++	tp_wma_handle wma;
++	QDF_STATUS status;
 +
-+	wma_mon_inject_lock_init();
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	if (!g_inj.created) {
-+		qdf_spin_unlock_bh(&g_inj.lock);
-+		return;
-+	}
-+	vdev_id = g_inj.vdev_id;
-+	g_inj.created = false;
-+	g_inj.chanfreq = 0;
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+
-+	wma_mon_inject_reaper_deinit();
-+
-+	if (!wma || !wma->wmi_handle)
++	if (!g_inj.initialized)
 +		return;
 +
-+	pdel.vdev_id = vdev_id;
-+	wmi_unified_peer_delete_send(wma->wmi_handle, g_inj.mac_addr, &pdel);
-+	msleep(WMA_MON_INJECT_PEER_DELAY_MS);
++	status = qdf_mutex_acquire(&g_inj.lifecycle_lock);
++	if (QDF_IS_STATUS_ERROR(status))
++		return;
 +
-+	vstop.vdev_id = vdev_id;
-+	wmi_unified_vdev_stop_send(wma->wmi_handle, &vstop);
-+	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++	wma = cds_get_context(QDF_MODULE_ID_WMA);
++	wma_mon_inject_teardown_locked(wma);
++	qdf_mutex_release(&g_inj.lifecycle_lock);
++}
 +
-+	wmi_unified_vdev_delete_send(wma->wmi_handle, vdev_id);
-+	msleep(WMA_MON_INJECT_CMD_DELAY_MS);
++void wma_mon_inject_deinit(void)
++{
++	if (!g_inj.initialized)
++		return;
 +
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	qdf_mem_zero(g_inj.mac_addr, sizeof(g_inj.mac_addr));
-+	qdf_spin_unlock_bh(&g_inj.lock);
++	wma_mon_inject_teardown();
++	qdf_event_destroy(&g_inj.delete_event);
++	qdf_event_destroy(&g_inj.stop_event);
++	qdf_event_destroy(&g_inj.peer_delete_event);
++	qdf_event_destroy(&g_inj.peer_create_event);
++	qdf_event_destroy(&g_inj.start_event);
++	qdf_spinlock_destroy(&g_inj.state_lock);
++	qdf_mutex_destroy(&g_inj.lifecycle_lock);
++	qdf_mem_zero(&g_inj, sizeof(g_inj));
 +}
 +
 +int wma_mon_inject_tx(struct sk_buff *skb, uint32_t chanfreq)
@@ -627,18 +1151,14 @@ index 00000000..f468a2ee
 +	qdf_nbuf_t wmi_buf;
 +	uint8_t *frame_data;
 +	uint16_t desc_id;
++	uint8_t vdev_id;
++	QDF_STATUS status;
 +	int slot = -1;
 +	int i;
 +
-+	if (!wma || !wma->wmi_handle || !skb)
++	if (!g_inj.initialized || !wma || !wma->wmi_handle ||
++	    !qdf_ctx || !skb)
 +		return -EINVAL;
-+
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	if (!g_inj.created) {
-+		qdf_spin_unlock_bh(&g_inj.lock);
-+		return -ENODEV;
-+	}
-+	qdf_spin_unlock_bh(&g_inj.lock);
 +
 +	wmi_buf = qdf_nbuf_alloc(NULL, skb->len, 0, 0, false);
 +	if (!wmi_buf)
@@ -651,49 +1171,136 @@ index 00000000..f468a2ee
 +	}
 +	qdf_mem_copy(frame_data, skb->data, skb->len);
 +
-+	desc_id = wma_mon_inject_desc_id_alloc();
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.state != WMA_MON_INJECT_UP ||
++	    g_inj.chanfreq != chanfreq) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		qdf_nbuf_free(wmi_buf);
++		return -ENODEV;
++	}
++
++	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
++		if (!g_inj.inflight[i].valid) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot < 0) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		wma_warn("Injection: in-flight buffer table full");
++		qdf_nbuf_free(wmi_buf);
++		return -EBUSY;
++	}
++
++	if (!wma_mon_inject_desc_id_alloc_locked(&desc_id)) {
++		qdf_spin_unlock_bh(&g_inj.state_lock);
++		qdf_nbuf_free(wmi_buf);
++		return -EBUSY;
++	}
++	vdev_id = g_inj.vdev_id;
++	g_inj.active_submitters++;
++	g_inj.inflight[slot].valid = true;
++	g_inj.inflight[slot].nbuf = wmi_buf;
++	g_inj.inflight[slot].desc_id = desc_id;
++	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
 +	mgmt.tx_frame = wmi_buf;
 +	mgmt.pdata = frame_data;
 +	mgmt.frm_len = skb->len;
-+	mgmt.vdev_id = g_inj.vdev_id;
++	mgmt.vdev_id = vdev_id;
 +	mgmt.tx_type = GENERIC_NODOWLOAD_ACK_COMP_INDEX;
 +	mgmt.chanfreq = (uint16_t)chanfreq;
 +	mgmt.desc_id = desc_id;
 +	mgmt.macaddr = NULL;
 +	mgmt.qdf_ctx = qdf_ctx;
 +
-+	/* Track the buffer before the send so the reaper can clean it up. */
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	for (i = 0; i < WMA_MON_INJECT_MAX_INFLIGHT; i++) {
-+		if (!g_inj.inflight[i].valid) {
-+			slot = i;
-+			g_inj.inflight[i].valid = true;
-+			g_inj.inflight[i].nbuf = wmi_buf;
-+			g_inj.inflight[i].desc_id = desc_id;
-+			g_inj.inflight[i].submit_ts = qdf_get_log_timestamp();
-+			break;
-+		}
-+	}
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+
-+	if (slot < 0) {
-+		wma_warn("Injection: in-flight buffer table full");
-+		qdf_nbuf_free(wmi_buf);
-+		return -EBUSY;
-+	}
-+
-+	if (QDF_IS_STATUS_ERROR(wmi_mgmt_unified_cmd_send(wma->wmi_handle, &mgmt))) {
-+		qdf_spin_lock_bh(&g_inj.lock);
++	status = wmi_mgmt_unified_cmd_send(wma->wmi_handle, &mgmt);
++	qdf_spin_lock_bh(&g_inj.state_lock);
++	if (g_inj.active_submitters)
++		g_inj.active_submitters--;
++	if (QDF_IS_STATUS_ERROR(status)) {
 +		g_inj.inflight[slot].valid = false;
 +		g_inj.inflight[slot].nbuf = NULL;
-+		qdf_spin_unlock_bh(&g_inj.lock);
++	}
++	qdf_spin_unlock_bh(&g_inj.state_lock);
++
++	if (QDF_IS_STATUS_ERROR(status)) {
 +		qdf_nbuf_free(wmi_buf);
 +		return -EIO;
 +	}
 +
 +	return 0;
 +}
+diff --git a/core/wma/src/wma_main.c b/core/wma/src/wma_main.c
+index f10747eb..a36ed58a 100755
+--- a/core/wma/src/wma_main.c
++++ b/core/wma/src/wma_main.c
+@@ -103,6 +103,7 @@
+ #include "nan_ucfg_api.h"
+ #include "wma_coex.h"
+ #include "wma_twt.h"
++#include "wma_frame_inject.h"
+ #include "target_if_vdev_mgr_rx_ops.h"
+ #include "wlan_tdls_cfg_api.h"
+ #include "wlan_policy_mgr_i.h"
+@@ -4128,6 +4129,10 @@ QDF_STATUS wma_open(struct wlan_objmgr_psoc *psoc,
+ 	wma_set_exclude_selftx_from_cca_busy_time(
+ 			cds_cfg->exclude_selftx_from_cca_busy,
+ 			wma_handle);
++	qdf_status = wma_mon_inject_init();
++	if (QDF_IS_STATUS_ERROR(qdf_status))
++		wma_err("Failed to initialize monitor injection: %d",
++			qdf_status);
+ 	return QDF_STATUS_SUCCESS;
+ 
+ err_dbglog_init:
+@@ -4972,6 +4977,10 @@ QDF_STATUS wma_stop(void)
+ 		qdf_status = QDF_STATUS_E_INVAL;
+ 		goto end;
+ 	}
++
++	/* Drain injection TX while management completions are still attached. */
++	wma_mon_inject_teardown();
++
+ 	mac = cds_get_context(QDF_MODULE_ID_PE);
+ 	if (!mac) {
+ 		goto end;
+@@ -5128,6 +5137,8 @@ QDF_STATUS wma_close(void)
+ 	if (wmi_validate_handle(wmi_handle))
+ 		return QDF_STATUS_E_INVAL;
+ 
++	wma_mon_inject_deinit();
++
+ 	if (!wlan_pmo_no_op_on_page_fault(wma_handle->psoc))
+ 		wma_deinit_pagefault_wakeup_history(wma_handle);
+ 
+diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
+index 2cd2f660..17ddb15e 100644
+--- a/core/wma/src/wma_mgmt.c
++++ b/core/wma/src/wma_mgmt.c
+@@ -73,6 +73,7 @@
+ #include "wma_eht.h"
+ #include <qdf_crypto.h>
+ #include "wma_twt.h"
++#include "wma_frame_inject.h"
+ #include "wlan_p2p_cfg_api.h"
+ #include "cfg_ucfg_api.h"
+ #include "cfg_mlme_sta.h"
+@@ -3165,6 +3166,14 @@ static int wma_process_mgmt_tx_completion(tp_wma_handle wma_handle,
+ 	if (wma_validate_handle(wma_handle))
+ 		return -EINVAL;
+ 
++	/*
++	 * Injection descriptors live outside the normal mgmt_txrx pool. Consume
++	 * their completions before any pool lookup so the DMA buffer is unmapped
++	 * exactly when firmware is done with it.
++	 */
++	if (wma_mon_inject_tx_complete(desc_id, status))
++		return 0;
++
+ 	wma_debug("status: %s wmi_desc_id: %d",
+ 		  wma_get_status_str(status), desc_id);
+ 
 diff --git a/wlan_qcacld3_modules.bzl b/wlan_qcacld3_modules.bzl
 index c8378812..258079e6 100755
 --- a/wlan_qcacld3_modules.bzl

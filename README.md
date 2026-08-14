@@ -78,20 +78,24 @@ drivers. The build fails if the shipped modules' `vermagic` does not match the
 ### Monitor-mode injection
 
 `ddk_injection` patches `wlan_mon_drv_ops` with a `.ndo_start_xmit` handler
-that strips the radiotap header and calls `wlan_cfg80211_mgmt_tx()`. Upstream
-omits Tx from monitor mode entirely — the comment reads *"does not Tx and most
-of operations"* — so without this a radiotap frame written to the monitor
-interface is dropped by the network stack before the driver sees it.
+that strips the radiotap header, accepts management frames, and transmits them
+through a firmware-only STA helper vdev on the monitor channel. The helper
+waits for the real firmware `VDEV_START` and advertised `PEER_CREATE`
+responses; its vdev and peer responses bypass the normal object-manager path
+because it intentionally has no host objects. WMI management-TX completions
+own the DMA buffer lifetime. Upstream omits Tx from monitor mode entirely —
+the comment reads *"does not Tx and most of operations"* — so without this a
+radiotap frame written to the monitor interface is dropped before the driver
+sees it.
 
 > [!WARNING]
 > Monitor mode itself is confirmed working on a OnePlus 13 — see
-> [internal Wi-Fi monitor mode](#internal-wi-fi-monitor-mode-conmode). **The
-> injection path is not.** The firmware decides whether to accept a frame on a
-> monitor vdev and may drop anything that is not a management frame, or drop
-> everything, in which case the handler is dead code. Radiotap Tx flags (rate,
+> [internal Wi-Fi monitor mode](#internal-wi-fi-monitor-mode-conmode). The
+> repaired injection path still needs on-device validation against the shipped
+> firmware. Only management frames are accepted. Radiotap Tx flags (rate,
 > retries, `TX_NOACK`) are parsed only far enough to locate the 802.11 frame and
-> are otherwise ignored. The 20 dBm world regulatory cap and the `no IR` flag on
-> channels 12–14 still apply.
+> are otherwise ignored. The 20 dBm world regulatory cap and the `no IR` flag
+> on channels 12–14 still apply.
 
 
 ## Supported variants

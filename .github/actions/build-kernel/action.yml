@@ -2166,37 +2166,63 @@ runs:
         echo "::group::Apply qcacld monitor injection patch"
 
         QCACLD="$CONFIG_FOLDER/vendor/qcom/opensource/wlan/qcacld-3.0"
-        PATCH="$GITHUB_ACTION_PATH/files/ddk/qcacld-monitor-injection.patch"
+        HOST_CMN="$CONFIG_FOLDER/vendor/qcom/opensource/wlan/qca-wifi-host-cmn"
+        QCACLD_PATCH="$GITHUB_ACTION_PATH/files/ddk/qcacld-monitor-injection.patch"
+        HOST_CMN_PATCH="$GITHUB_ACTION_PATH/files/ddk/qca-wifi-host-cmn-monitor-injection.patch"
 
         if [ ! -d "$QCACLD" ]; then
           echo "::error::qcacld-3.0 not found at $QCACLD"
           exit 1
         fi
-
-        cd "$QCACLD"
-        if ! patch -p1 --dry-run < "$PATCH" >/dev/null 2>&1; then
-          echo "::error::monitor injection patch does not apply to this qcacld revision"
-          patch -p1 --dry-run < "$PATCH" 2>&1 | head -30 || true
+        if [ ! -d "$HOST_CMN" ]; then
+          echo "::error::qca-wifi-host-cmn not found at $HOST_CMN"
           exit 1
         fi
-        patch -p1 < "$PATCH"
+
+        cd "$QCACLD"
+        if ! patch -p1 --dry-run < "$QCACLD_PATCH" >/dev/null 2>&1; then
+          echo "::error::monitor injection patch does not apply to this qcacld revision"
+          patch -p1 --dry-run < "$QCACLD_PATCH" 2>&1 | head -30 || true
+          exit 1
+        fi
+        patch -p1 < "$QCACLD_PATCH"
+
+        cd "$HOST_CMN"
+        if ! patch -p1 --dry-run < "$HOST_CMN_PATCH" >/dev/null 2>&1; then
+          echo "::error::monitor injection response patch does not apply to this host-cmn revision"
+          patch -p1 --dry-run < "$HOST_CMN_PATCH" 2>&1 | head -30 || true
+          exit 1
+        fi
+        patch -p1 < "$HOST_CMN_PATCH"
 
         # Fail loudly if the Tx hook is not actually in place: a silently
         # unpatched driver looks identical until injection is tried on-device.
-        if ! grep -q 'ndo_start_xmit = hdd_mon_hard_start_xmit' core/hdd/src/wlan_hdd_main.c; then
+        if ! grep -q 'ndo_start_xmit = hdd_mon_hard_start_xmit' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
           echo "::error::patch applied but .ndo_start_xmit hook is missing"
           exit 1
         fi
-        if ! grep -q 'wma_mon_inject_setup' core/wma/src/wma_frame_inject.c; then
+        if ! grep -q 'wma_mon_inject_setup' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
           echo "::error::patch applied but WMA injection helper is missing"
           exit 1
         fi
-        if ! grep -q 'wmi_unified_vdev_start_send' core/wma/src/wma_frame_inject.c; then
+        if ! grep -q 'wmi_unified_vdev_start_send' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
           echo "::error::patch applied but firmware-only vdev start is missing"
           exit 1
         fi
-        if ! grep -q 'wmi_mgmt_unified_cmd_send' core/wma/src/wma_frame_inject.c; then
+        if ! grep -q 'wmi_mgmt_unified_cmd_send' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
           echo "::error::patch applied but WMI management TX path is missing"
+          exit 1
+        fi
+        if ! grep -q 'wma_mon_inject_tx_complete(desc_id, status)' "$QCACLD/core/wma/src/wma_mgmt.c"; then
+          echo "::error::patch applied but injection TX completion hook is missing"
+          exit 1
+        fi
+        if ! grep -q 'wma_mon_inject_peer_create_response' "$QCACLD/core/wma/src/wma_dev_if.c"; then
+          echo "::error::patch applied but helper-peer response hook is missing"
+          exit 1
+        fi
+        if ! grep -q 'wma_mon_inject_vdev_start_response' "$HOST_CMN/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c"; then
+          echo "::error::patch applied but helper-vdev response hook is missing"
           exit 1
         fi
 
@@ -2208,10 +2234,10 @@ runs:
         for QCA_DEFCONFIG in \
           "configs/${{ env.OP_SOC }}_gki_${{ env.OP_DDK_CHIPSET }}_defconfig" \
           "configs/${{ env.OP_SOC }}_consolidate_${{ env.OP_DDK_CHIPSET }}_defconfig"; do
-          if [ -f "$QCA_DEFCONFIG" ]; then
-            sed -i '/^# CONFIG_FEATURE_MONITOR_MODE_SUPPORT is not set/d' "$QCA_DEFCONFIG"
-            if ! grep -q '^CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' "$QCA_DEFCONFIG"; then
-              echo 'CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' >> "$QCA_DEFCONFIG"
+          if [ -f "$QCACLD/$QCA_DEFCONFIG" ]; then
+            sed -i '/^# CONFIG_FEATURE_MONITOR_MODE_SUPPORT is not set/d' "$QCACLD/$QCA_DEFCONFIG"
+            if ! grep -q '^CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' "$QCACLD/$QCA_DEFCONFIG"; then
+              echo 'CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y' >> "$QCACLD/$QCA_DEFCONFIG"
             fi
             echo "✅ Enabled FEATURE_MONITOR_MODE_SUPPORT in $QCA_DEFCONFIG"
           fi
