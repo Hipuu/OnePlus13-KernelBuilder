@@ -2398,6 +2398,14 @@ runs:
         echo "BUILD_TIME=$((BUILD_END - BUILD_START))" >> "$GITHUB_ENV"
         echo "::endgroup::"
 
+    - name: Upload build.log on failure
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log-${{ env.OP_MODEL }}
+        path: ${{ env.COMMON_KERNEL_FOLDER }}/build.log
+        if-no-files-found: ignore
+
     - name: Stage Bazel outputs
       if: ${{ env.OP_DDK == 'true' }}
       shell: bash
