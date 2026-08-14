@@ -43,3 +43,4 @@ AnyKernel3/
 *.key
 secrets/
 .env
+.tmp_research/

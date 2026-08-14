@@ -2374,11 +2374,15 @@ runs:
         # in_tree_modules include the cfg80211/mac80211 that the DDK module
         # links against, and the staging step needs them in a depmod-shaped
         # tree to resolve the dependency closure for the modules ZIP.
-        ./tools/bazel build \
+        if ! ./tools/bazel build \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
           "$DDK_MODULE_TARGET" \
-          2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"
+          2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"; then
+          echo "::error::Bazel build failed; tail of build.log:"
+          tail -n 300 "$COMMON_KERNEL_FOLDER/build.log" || true
+          exit 1
+        fi
 
         # The vendor kernel's archive is named modules_staging_dir_self.tar.gz:
         # Kleaf declares the "_self" variant for any target with a base_kernel,
