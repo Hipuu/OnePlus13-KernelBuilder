@@ -302,7 +302,7 @@ index 00000000..f468a2ee
 +#include "qdf_time.h"
 +#include "qdf_module.h"
 +#include "qdf_delayed_work.h"
-+#include "qdf_spinlock.h"
++#include "qdf_lock.h"
 +#include "cds_api.h"
 +
 +/* Firmware needs time between asynchronous VDEV/peer commands */
@@ -345,6 +345,7 @@ index 00000000..f468a2ee
 +	if (g_inj_lock_inited)
 +		return;
 +	qdf_spinlock_create(&g_inj.lock);
++	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
 +	g_inj_lock_inited = true;
 +}
 +
@@ -406,10 +407,16 @@ index 00000000..f468a2ee
 +
 +static void wma_mon_inject_reaper_init(void)
 +{
++	QDF_STATUS status;
++
 +	if (g_inj.reaper_running)
 +		return;
 +
-+	qdf_delayed_work_create(&g_inj.reaper, wma_mon_inject_reaper_cb, NULL);
++	status = qdf_delayed_work_create(&g_inj.reaper, wma_mon_inject_reaper_cb, NULL);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		wma_err("Injection: failed to create reaper");
++		return;
++	}
 +	g_inj.reaper_running = true;
 +	qdf_delayed_work_start(&g_inj.reaper, WMA_MON_INJECT_REAP_INTERVAL_MS);
 +}
@@ -580,6 +587,7 @@ index 00000000..f468a2ee
 +	struct vdev_stop_params vstop = {0};
 +	uint8_t vdev_id;
 +
++	wma_mon_inject_lock_init();
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	if (!g_inj.created) {
 +		qdf_spin_unlock_bh(&g_inj.lock);
