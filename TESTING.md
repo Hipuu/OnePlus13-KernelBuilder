@@ -11,6 +11,7 @@ Before publishing workflow changes, run the bundled validator:
 It checks that:
 
 - Every workflow and composite `action.yml` parses as YAML, and all six device configs / six manifests parse as JSON / XML.
+- Every DDK unified-diff hunk contains exactly the old/new line counts declared by its header, including blank added lines.
 - `actionlint` reports no problems (skipped with a notice if not installed). One rule is suppressed: actionlint through 1.7.7 still enforces a 10-input cap on `workflow_dispatch`, but GitHub's documented limit is 25 top-level inputs, and this workflow's 16 dispatch fine.
 - The workflow has a `workflow_dispatch` trigger and every action declares `name`, `description`, and `runs`.
 - All nested local composite-action references resolve to a real `action.yml`.

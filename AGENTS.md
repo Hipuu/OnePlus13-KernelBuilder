@@ -66,6 +66,7 @@ validate_workflow.sh                   # Local static validation script
 
 Checks performed:
 - YAML/JSON/XML parseability
+- DDK patch hunk counts match their actual old/new line counts
 - `actionlint` linting (if installed; a stale 10-input cap rule is suppressed)
 - Workflow has a `workflow_dispatch` trigger and every composite action has `name`, `description`, and `runs`
 - All local `uses: ./...` references resolve to a real `action.yml`

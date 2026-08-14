@@ -34,6 +34,8 @@ MANIFESTS=(
 )
 
 mapfile -t ACTIONS < <(find .github/actions -name action.yml | sort)
+mapfile -t DDK_PATCHES < <(find .github/actions/build-kernel/files/ddk \
+    -maxdepth 1 -type f -name '*.patch' | sort)
 
 echo "== YAML / JSON / XML parse =="
 if command -v python3 >/dev/null 2>&1; then
@@ -56,6 +58,81 @@ for path in sys.argv[1:]:
 PY
 else
     skip "python3 not found; YAML/JSON/XML parse not verified"
+fi
+
+echo
+echo "== DDK patch integrity =="
+if [ ${#DDK_PATCHES[@]} -eq 0 ]; then
+    fail "no DDK patch files found"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHONUTF8=1 python3 - "${DDK_PATCHES[@]}" <<'PY' || FAILED=1
+import pathlib
+import re
+import sys
+
+hunk_re = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+)
+
+for name in sys.argv[1:]:
+    path = pathlib.Path(name)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    hunk_count = 0
+    errors = []
+    index = 0
+
+    while index < len(lines):
+        match = hunk_re.match(lines[index])
+        if not match:
+            index += 1
+            continue
+
+        hunk_count += 1
+        declared_old = int(match.group(2) or 1)
+        declared_new = int(match.group(4) or 1)
+        seen_old = 0
+        seen_new = 0
+        header_line = index + 1
+        index += 1
+
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith("@@ ") or line.startswith("diff --git "):
+                break
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            if line.startswith(" "):
+                seen_old += 1
+                seen_new += 1
+            elif line.startswith("-"):
+                seen_old += 1
+            elif line.startswith("+"):
+                seen_new += 1
+            else:
+                errors.append(
+                    f"line {index + 1}: invalid unprefixed line inside hunk"
+                )
+            index += 1
+
+        if (seen_old, seen_new) != (declared_old, declared_new):
+            errors.append(
+                f"line {header_line}: declares {declared_old}/{declared_new} "
+                f"old/new lines but contains {seen_old}/{seen_new}"
+            )
+
+    if not hunk_count:
+        errors.append("contains no unified-diff hunks")
+
+    if errors:
+        for error in errors:
+            print(f"  FAIL  {name}: {error}")
+        raise SystemExit(1)
+
+    print(f"  ok    {name}: {hunk_count} hunks")
+PY
+else
+    skip "python3 not found; DDK patch integrity not verified"
 fi
 
 echo
