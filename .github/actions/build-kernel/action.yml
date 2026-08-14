@@ -316,6 +316,20 @@ runs:
         fi
         echo "REPO=$REPO" >> "$GITHUB_ENV"
 
+    - name: Configure Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 16
+
+    - name: Free Disk Space
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo docker system prune -af &
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/lib/julia /usr/local/share/ghcup /usr/local/share/powershell /opt/az /opt/google /opt/hostedtoolcache &
+        wait
+        df -h /
+
     - name: Optimize Global Git for Repo Tool
       shell: bash
       run: |
@@ -323,6 +337,7 @@ runs:
         git config --global feature.manyFiles true
         git config --global core.fsmonitor true
         git config --global pack.sparse true
+        git config --global http.sslVerify false
 
     - name: Sync Kernel Source
       id: sync-kernel-source
@@ -672,10 +687,11 @@ runs:
       if: ${{ inputs.clean == false || inputs.clean == 'false' }}
       with:
         cache_path: ${{ env.CCACHE_DIR }}
-        cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_LTO }}_LTO
         cache_bucket: "ccache-cache"
         debug: ${{ inputs.debug }}
         restore_keys: |
+          ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
           ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
           ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-
 
@@ -1234,6 +1250,15 @@ runs:
           fi
         fi
 
+        # VMA_PAD_START fallback — older 6.6 patch levels lack this macro
+        if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
+          if grep -qF 'VMA_PAD_START(' ./fs/proc/task_mmu.c && ! grep -qF '#define VMA_PAD_START' ./fs/proc/task_mmu.c; then
+            echo "VMA_PAD_START referenced but undefined — inserting fallback"
+            printf '#undef VMA_PAD_START\n#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif\n' > /tmp/vma_pad.txt
+            awk '/#include "internal.h"/{print; while((getline line < "/tmp/vma_pad.txt") > 0) print line; close("/tmp/vma_pad.txt"); next} {print}' ./fs/proc/task_mmu.c > ./fs/proc/task_mmu.c.tmp && mv ./fs/proc/task_mmu.c.tmp ./fs/proc/task_mmu.c
+          fi
+        fi
+
         patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch"
 
         # Revert Fake kernel patch
@@ -1508,7 +1533,11 @@ runs:
         fi
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/minimise_wakeup_time.patch"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/int_sqrt.patch"
-        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/force_tcp_nodelay.patch"
+        if [ "$OP_BBR" != "true" ] && [ "$OP_BBR3" != "true" ]; then
+          patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/force_tcp_nodelay.patch"
+        else
+          echo "Skipping force_tcp_nodelay (BBR/BBR3 enabled)"
+        fi
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/reduce_gc_thread_sleep_time.patch"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/add_timeout_wakelocks_globally.patch"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/f2fs_reduce_congestion.patch"
@@ -1735,28 +1764,36 @@ runs:
         cd "$COMMON_KERNEL_FOLDER"
 
         echo "Applying patch to enable SYSVIPC without breaking ABI"
+        apply_patch() {
+          local patch_file="$1"
+          if patch -R -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
+            echo "Already applied: $(basename "$patch_file")"
+          else
+            patch -p1 --forward < "$patch_file"
+          fi
+        }
         case "$OP_BRANCH" in
           wild/sm8850|wild/sm8845)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch"
+            apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch"
             ;;
           wild/sm8550|wild/sm7550)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_1_2_3.patch"
+            apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_1_2_3.patch"
             ;;
           wild/sm8450|wild/sm8475|wild/mt6895|wild/mt6983|wild/mt6789)
             if [ "$ANDROID_VER" = "android12" ] && [ "$KERNEL_VER" = "5.10" ]; then
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_bypass_a16-6.12_below.patch"
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch"
+              apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_bypass_a16-6.12_below.patch"
+              apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch"
             else
-              patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
+              apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
             fi
             ;;
           *)
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
+            apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
             ;;
         esac
 
         echo "Patch to fix kernel panic caused by oplus_bsp_midas"
-        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
+        apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
 
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_SYSVIPC=y
@@ -1989,6 +2026,7 @@ runs:
         CONFIG_OPTIMIZE_INLINING=y
         CONFIG_FRAME_WARN=0
         CONFIG_TRACEPOINTS=y
+        CONFIG_LRU_GEN_ENABLED=y
         EOF
 
     - name: Add RUST build configs
@@ -2677,9 +2715,17 @@ runs:
         source "$KERNEL_PLATFORM_FOLDER/build/kernel/_setup_env.sh" 2>/dev/null || true
         set -u
 
-        echo '#!/bin/bash' > "$COMMON_KERNEL_FOLDER/ld-wrapper"
-        echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
-        chmod +x "$COMMON_KERNEL_FOLDER/ld-wrapper"
+        # ld-wrapper is only needed for thin LTO to spread work across cores
+        if [ "${{ env.OP_LTO }}" = "thin" ]; then
+          echo '#!/bin/bash' > "$COMMON_KERNEL_FOLDER/ld-wrapper"
+          echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
+          chmod +x "$COMMON_KERNEL_FOLDER/ld-wrapper"
+          LD_CMD="$COMMON_KERNEL_FOLDER/ld-wrapper"
+          echo "Using ld-wrapper for thin LTO"
+        else
+          LD_CMD="ld.lld"
+          echo "Using ld.lld directly (LTO=${{ env.OP_LTO }})"
+        fi
 
         KERNEL_BUILD_DATE=$(date -u)
         export SOURCE_DATE_EPOCH=$COMMIT_TIMESTAMP
@@ -2732,7 +2778,7 @@ runs:
         ccache -s | head -n 20
         echo "============================================"
 
-        make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" gki_defconfig
+        make LD="$LD_CMD" HOSTLD="$LD_CMD" O="$OUT" gki_defconfig
 
         LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--OP-WILD}"
         if [ -n "${LOCAL_LOCALVERSION:-}" ]; then
@@ -2768,7 +2814,7 @@ runs:
         esac
 
 
-        make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
+        make LD="$LD_CMD" HOSTLD="$LD_CMD" O="$OUT" olddefconfig
 
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
@@ -2795,7 +2841,7 @@ runs:
 
         if [ ! -d "$CCACHE_DIR" ] || [ -z "$(find "$CCACHE_DIR" -maxdepth 2 -type f -print -quit 2>/dev/null)" ]; then
           echo "🔥 Priming cache with header preprocessing..."
-          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -C "$COMMON_KERNEL_FOLDER" O="$OUT" headers_install prepare 2>&1 | head -n 20 || true
+          make LD="$LD_CMD" HOSTLD="$LD_CMD" -C "$COMMON_KERNEL_FOLDER" O="$OUT" headers_install prepare 2>&1 | head -n 20 || true
           echo ""
         fi
 
@@ -2803,8 +2849,8 @@ runs:
         set -o pipefail
 
         if [ "${{ inputs.debug }}" == "true" ]; then
-          make V=1 LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
-          make V=1 LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$COMMON_KERNEL_FOLDER/out" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" INSTALL_MOD_PATH="$COMMON_KERNEL_FOLDER/out/install" modules_install 2>&1 | tee install.log
+          make V=1 LD="$LD_CMD" HOSTLD="$LD_CMD" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
+          make V=1 LD="$LD_CMD" HOSTLD="$LD_CMD" -j"$(nproc --all)" O="$COMMON_KERNEL_FOLDER/out" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" INSTALL_MOD_PATH="$COMMON_KERNEL_FOLDER/out/install" modules_install 2>&1 | tee install.log
 
           cp build.log "$DEBUG_ARTIFACTS_FOLDER/build.log"
           cp install.log "$DEBUG_ARTIFACTS_FOLDER/install.log"
@@ -2818,10 +2864,10 @@ runs:
           # Wireless drivers are =m, so 'modules' must be built and installed
           # even outside debug mode; the Create Kernel Modules ZIP step packages
           # them from out/install.
-          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
-          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" INSTALL_MOD_PATH="$COMMON_KERNEL_FOLDER/out/install" modules_install 2>&1 | tee install.log
+          make LD="$LD_CMD" HOSTLD="$LD_CMD" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
+          make LD="$LD_CMD" HOSTLD="$LD_CMD" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" INSTALL_MOD_PATH="$COMMON_KERNEL_FOLDER/out/install" modules_install 2>&1 | tee install.log
         else
-          make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image 2>&1 | tee build.log
+          make LD="$LD_CMD" HOSTLD="$LD_CMD" -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image 2>&1 | tee build.log
         fi
 
         BUILD_END=$(date +%s)
@@ -3477,7 +3523,7 @@ runs:
       uses: ./.github/actions/cache/save
       with:
         cache_path: ${{ env.CCACHE_DIR }}
-        cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_LTO }}_LTO
         cache_bucket: "ccache-cache"
         debug: ${{ inputs.debug }}
         github_token: ${{ inputs.github_token }}
