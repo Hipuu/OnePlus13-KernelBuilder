@@ -44,3 +44,4 @@ AnyKernel3/
 secrets/
 .env
 .tmp_research/
+build_artifacts/
