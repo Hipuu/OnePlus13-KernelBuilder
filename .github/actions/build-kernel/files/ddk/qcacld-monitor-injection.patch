@@ -11,7 +11,7 @@ index dcdaf2f6..5e2a1b44 100755
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3451,111 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3451,137 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -114,16 +114,42 @@ index dcdaf2f6..5e2a1b44 100755
 +
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
++	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
++	hdd_mon_inject_tx_enable_adapter = NULL;
 +	wma_mon_inject_teardown();
 +	hdd_mon_inject_chan_freq = 0;
 +}
++
++/* Delayed work: enable carrier + TX queues after hdd_start_adapter finishes */
++static void hdd_mon_inject_tx_enable_work(struct work_struct *work)
++{
++	struct delayed_work *dw = to_delayed_work(work);
++	struct hdd_adapter *adapter;
++	struct net_device *dev;
++
++	/* Recover adapter from the global we stashed in __hdd_mon_open */
++	adapter = hdd_mon_inject_tx_enable_adapter;
++	if (!adapter)
++		return;
++	dev = adapter->dev;
++	if (!dev)
++		return;
++
++	netif_carrier_on(dev);
++	netif_tx_wake_all_queues(dev);
++	hdd_info("Injection: carrier on + TX queues woken (deferred)");
++}
++
++static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
++			    hdd_mon_inject_tx_enable_work);
++static struct hdd_adapter *hdd_mon_inject_tx_enable_adapter;
 +
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3623,17 @@ static int __hdd_mon_open(struct net_device *dev)
+@@ -3523,6 +3623,19 @@ static int __hdd_mon_open(struct net_device *dev)
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -131,12 +157,14 @@ index dcdaf2f6..5e2a1b44 100755
 +			hdd_err("Injection: initial channel setup failed");
 +
 +		/*
-+		 * Enable carrier and TX queues so frames can reach
-+		 * ndo_start_xmit.  qcacld leaves all adapters in
-+		 * carrier-off / queues-stopped after hdd_start_adapter().
++		 * Defer carrier-on and queue wake: hdd_start_adapter() calls
++		 * netif_carrier_off() and netif_tx_stop_all_queues() after
++		 * ndo_open returns, so enabling them here is futile.  Use a
++		 * delayed work to re-enable after adapter init completes.
 +		 */
-+		netif_carrier_on(dev);
-+		netif_tx_wake_all_queues(dev);
++		hdd_mon_inject_tx_enable_adapter = adapter;
++		schedule_delayed_work(&hdd_mon_inject_tx_enable_dw,
++				      msecs_to_jiffies(500));
 +
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
