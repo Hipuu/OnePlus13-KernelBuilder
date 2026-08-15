@@ -191,7 +191,7 @@ index dcdaf2f6..5e2a1b44 100755
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7413,55 @@ static const struct net_device_ops wlan_drv_ops = {
+@@ -7306,10 +7413,63 @@ static const struct net_device_ops wlan_drv_ops = {
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -202,38 +202,46 @@ index dcdaf2f6..5e2a1b44 100755
 +{
 +	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 +	struct ieee80211_hdr *hdr;
++	int ctx_ret;
 +
 +	pr_info("Injection: hdd_mon_hard_start_xmit called, len=%u\n",
 +		skb ? skb->len : 0);
 +
 +	if (!adapter) {
++		pr_err("Injection: NULL adapter, dropping\n");
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
-+	if (wlan_hdd_validate_context(WLAN_HDD_GET_CTX(adapter))) {
++	ctx_ret = wlan_hdd_validate_context(WLAN_HDD_GET_CTX(adapter));
++	if (ctx_ret) {
++		pr_err("Injection: HDD context invalid (%d), dropping\n", ctx_ret);
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
 +	if (skb_linearize(skb) || hdd_mon_inject_strip_radiotap(skb)) {
-+		hdd_debug_rl("Injection: malformed radiotap frame");
++		pr_err("Injection: malformed radiotap frame, dropping\n");
 +		goto drop;
 +	}
 +
 +	hdr = (struct ieee80211_hdr *)skb->data;
 +	if (!ieee80211_is_mgmt(hdr->frame_control)) {
-+		hdd_debug_rl("Injection: only management frames are supported");
++		pr_err("Injection: non-mgmt frame (fc=0x%04x), dropping\n",
++		       hdr->frame_control);
 +		goto drop;
 +	}
 +
-+	if (wma_mon_inject_tx(skb, hdd_mon_inject_chan_freq) == 0) {
++	ctx_ret = wma_mon_inject_tx(skb, hdd_mon_inject_chan_freq);
++	if (ctx_ret == 0) {
 +		dev->stats.tx_packets++;
 +		dev->stats.tx_bytes += skb->len;
 +		qdf_nbuf_free(skb);
++		pr_info("Injection: frame submitted to WMI successfully\n");
 +		return NETDEV_TX_OK;
 +	}
 +
++	pr_err("Injection: wma_mon_inject_tx failed (%d)\n", ctx_ret);
 +drop:
 +	dev->stats.tx_dropped++;
 +	qdf_nbuf_free(skb);
