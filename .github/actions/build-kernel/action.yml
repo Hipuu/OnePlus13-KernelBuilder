@@ -2253,20 +2253,16 @@ runs:
           echo "::error::patch applied but .ndo_start_xmit hook is missing"
           exit 1
         fi
-        if ! grep -q 'wma_mon_inject_setup' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
-          echo "::error::patch applied but WMA injection helper is missing"
+        if ! grep -q 'wlan_mgmt_txrx_mgmt_frame_tx' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but stock mgmt TX pipeline call is missing"
           exit 1
         fi
-        if ! grep -q 'wmi_unified_vdev_start_send' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
-          echo "::error::patch applied but firmware-only vdev start is missing"
+        if ! grep -q 'wlan_objmgr_get_peer_by_mac_from_vdev' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but monitor self-peer lookup is missing"
           exit 1
         fi
-        if ! grep -q 'wmi_mgmt_unified_cmd_send' "$QCACLD/core/wma/src/wma_frame_inject.c"; then
-          echo "::error::patch applied but WMI management TX path is missing"
-          exit 1
-        fi
-        if ! grep -q 'wma_mon_inject_tx_complete(desc_id, status)' "$QCACLD/core/wma/src/wma_mgmt.c"; then
-          echo "::error::patch applied but injection TX completion hook is missing"
+        if ! grep -q 'wlan_mgmt_txrx_utils_api.h' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but wlan_mgmt_txrx_utils_api.h include is missing"
           exit 1
         fi
 
