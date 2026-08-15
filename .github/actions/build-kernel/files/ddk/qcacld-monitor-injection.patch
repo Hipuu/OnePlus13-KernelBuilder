@@ -153,7 +153,7 @@ index dcdaf2f6..5e2a1b44 100755
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7413,52 @@ static const struct net_device_ops wlan_drv_ops = {
+@@ -7306,10 +7413,55 @@ static const struct net_device_ops wlan_drv_ops = {
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -164,6 +164,9 @@ index dcdaf2f6..5e2a1b44 100755
 +{
 +	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 +	struct ieee80211_hdr *hdr;
++
++	pr_info("Injection: hdd_mon_hard_start_xmit called, len=%u\n",
++		skb ? skb->len : 0);
 +
 +	if (!adapter) {
 +		qdf_nbuf_free(skb);
