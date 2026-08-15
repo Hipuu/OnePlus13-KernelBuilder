@@ -149,13 +149,14 @@ index dcdaf2f6..5e2a1b44 100755
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3623,19 @@ static int __hdd_mon_open(struct net_device *dev)
+@@ -3523,6 +3623,21 @@ static int __hdd_mon_open(struct net_device *dev)
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
 +		if (!hdd_mon_inject_set_channel(adapter, 2412))
 +			hdd_err("Injection: initial channel setup failed");
 +
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +		/*
 +		 * Defer carrier-on and queue wake: hdd_start_adapter() calls
 +		 * netif_carrier_off() and netif_tx_stop_all_queues() after
@@ -165,6 +166,7 @@ index dcdaf2f6..5e2a1b44 100755
 +		hdd_mon_inject_tx_enable_adapter = adapter;
 +		schedule_delayed_work(&hdd_mon_inject_tx_enable_dw,
 +				      msecs_to_jiffies(500));
++#endif
 +
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
