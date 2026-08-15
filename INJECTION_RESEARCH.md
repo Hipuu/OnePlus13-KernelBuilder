@@ -5,7 +5,9 @@
 >
 > Researched: 2026-08-15
 >
-> Builder commit: `b5462a2ad71943277c54ff8321f68b539af82abc`
+> Research baseline: `b5462a2ad71943277c54ff8321f68b539af82abc`
+>
+> Later branch commit reviewed: `6993945d51f5e2699e17982deabab5264d024b30`
 >
 > OnePlus source commit: `d50b305f7da9e14715a25120a4ac7b1a4b8b97c3`
 
@@ -69,6 +71,13 @@ Evidence labels used here:
 The WLAN firmware is proprietary. A successful `wmi_unified_*_send()` return
 only proves that the host accepted/queued a command. It does not prove the
 firmware completed the state transition or transmitted a frame.
+
+During the final research pass, the branch advanced to `6993945`. Its driver
+delta calls `netif_carrier_on()` and `netif_tx_wake_all_queues()` after monitor
+open. That can remove a host-netdev gate before `ndo_start_xmit`, but it does
+not change the hidden-vdev lifecycle, descriptor allocation, DMA ownership,
+peer/address, channel, or firmware-completion findings below. Treat it as a
+prerequisite transport fix, not evidence that injection works.
 
 ## 3. What is known from the device
 
