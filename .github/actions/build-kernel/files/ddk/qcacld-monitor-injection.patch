@@ -11,7 +11,7 @@ index dcdaf2f6..5e2a1b44 100755
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3451,146 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3451,145 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -131,7 +131,6 @@ index dcdaf2f6..5e2a1b44 100755
 +/* Delayed work: enable carrier + TX queues after hdd_start_adapter finishes */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work)
 +{
-+	struct delayed_work *dw = to_delayed_work(work);
 +	struct hdd_adapter *adapter;
 +	struct net_device *dev;
 +
