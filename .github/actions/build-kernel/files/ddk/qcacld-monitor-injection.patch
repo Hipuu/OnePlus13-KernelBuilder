@@ -11,10 +11,18 @@ index dcdaf2f6..5e2a1b44 100755
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3451,137 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3451,146 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
++/* Forward declarations — always visible (referenced outside #ifdef). */
++static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
++
++/* Always declare: referenced from suspend/resume paths and injection functions. */
++static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
++			    hdd_mon_inject_tx_enable_work);
++static struct hdd_adapter *hdd_mon_inject_tx_enable_adapter;
++
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +
 +#define HDD_MON_MIN_80211_LEN 24
@@ -140,9 +148,10 @@ index dcdaf2f6..5e2a1b44 100755
 +	hdd_info("Injection: carrier on + TX queues woken (deferred)");
 +}
 +
-+static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
-+			    hdd_mon_inject_tx_enable_work);
-+static struct hdd_adapter *hdd_mon_inject_tx_enable_adapter;
++#else /* !FEATURE_MONITOR_MODE_SUPPORT */
++
++/* Stub: forward-declared above; defined here for the !FEATURE case. */
++static void hdd_mon_inject_tx_enable_work(struct work_struct *work) {}
 +
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
