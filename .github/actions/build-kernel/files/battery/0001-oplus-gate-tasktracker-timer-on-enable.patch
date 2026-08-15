@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OnePlus13-KernelBuilder <builder@kernel>
+Date: Fri, 15 Aug 2026 08:00:00 +0000
+Subject: [PATCH] oplus: gate task-tracker hrtimer on tasktrack_enable
+
+The shipped oplus_bsp_schedinfo.ko unconditionally starts a periodic
+hrtimer in tasktrack_init() even though tasktrack_enable defaults to
+zero (unless JANK_DEBUG is set).  The handler fires ~7.5 times per
+second, immediately returns when the flag is zero, and re-arms.
+The proc write handler already starts the timer on enable and cancels
+it on disable, so gating the initial start preserves runtime behavior.
+
+Only start the timer if tasktrack_enable is nonzero at init time.
+
+Research: BATTERY_OPTIMIZATION_RESEARCH.md candidate A1.
+
+diff --git a/cpu/sched/sched_info/osi_tasktrack.c b/cpu/sched/sched_info/osi_tasktrack.c
+--- a/cpu/sched/sched_info/osi_tasktrack.c
++++ b/cpu/sched/sched_info/osi_tasktrack.c
+@@ -771,7 +771,9 @@ void tasktrack_init(void)
+ 	tasktrack_timer.function = tasktrack_timer_handler;
+ 
+ 	jank_update_task_status = jankinfo_update_task_status_cb;
+-
++#ifdef JANK_DEBUG
+ 	tasktrack_timer_start();
++#endif
+ 
+ 	return;
+ 
