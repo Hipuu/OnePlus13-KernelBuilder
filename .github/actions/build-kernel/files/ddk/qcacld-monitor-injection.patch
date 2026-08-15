@@ -1,6 +1,6 @@
 --- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
-+++ b/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:50:31.069449352 +0700
-@@ -156,6 +156,8 @@
++++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 03:15:00.000000000 +0700
+@@ -156,6 +156,10 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
@@ -11,11 +11,11 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3451,102 @@
+@@ -3449,6 +3453,102 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
- 
-+/* Forward declarations â always visible (referenced outside #ifdef). */
+
++/* Forward declarations — always visible (referenced outside #ifdef). */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
 +
 +/* Always declare: referenced from suspend/resume paths and injection functions. */
@@ -114,7 +114,7 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3621,19 @@
+@@ -3523,6 +3623,19 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -134,10 +134,10 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +5986,11 @@
+@@ -5875,6 +5988,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
- 
+
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
 +		hdd_mon_inject_stop(adapter);
@@ -146,9 +146,9 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7422,123 @@
+@@ -7306,10 +7424,125 @@
  };
- 
+
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 -/* Monitor mode net_device_ops, does not Tx and most of operations. */
 +
@@ -272,4 +272,4 @@
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
- 
+
