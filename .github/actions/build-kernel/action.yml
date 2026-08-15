@@ -2264,7 +2264,7 @@ runs:
           echo "::error::patch applied but stock mgmt TX pipeline call is missing"
           exit 1
         fi
-        if ! grep -q 'wlan_objmgr_get_peer_by_mac_from_vdev' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+        if ! grep -q 'wlan_objmgr_vdev_find_peer_by_mac' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
           echo "::error::patch applied but monitor self-peer lookup is missing"
           exit 1
         fi
