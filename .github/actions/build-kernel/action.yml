@@ -1577,6 +1577,35 @@ runs:
         echo "✅ Optimisation Patches applied"
         echo "::endgroup::"
 
+    - name: Apply battery optimization patches
+      shell: bash
+      if: success()
+      run: |
+        set -euo pipefail
+        echo "::group::Apply battery optimization patches"
+        BATTERY_PATCHES="$GITHUB_ACTION_PATH/files/battery"
+
+        # A2: upstream hrtimer redundant-reprogram fix (stable ece8be21d8c93)
+        cd "$COMMON_KERNEL_FOLDER"
+        echo "Patching 0001-hrtimer-avoid-pointless-reprogramming.patch"
+        patch -p1 --forward < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
+          echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
+        }
+
+        # A1: gate task-tracker hrtimer on tasktrack_enable (vendor module)
+        if [ -d "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info" ]; then
+          cd "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info"
+          echo "Patching 0001-oplus-gate-tasktracker-timer-on-enable.patch"
+          patch -p1 --forward < "$BATTERY_PATCHES/0001-oplus-gate-tasktracker-timer-on-enable.patch" || {
+            echo "::warning::tasktrack timer gate patch did not apply; source may differ"
+          }
+        else
+          echo "::warning::tasktrack source directory not found; skipping A1 patch"
+        fi
+
+        echo "✅ Battery optimization patches applied"
+        echo "::endgroup::"
+
     - name: Apply NTSync Patch
       shell: bash
       if: ${{ env.OP_NTSYNC == 'true' }}
