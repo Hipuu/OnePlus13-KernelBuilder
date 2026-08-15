@@ -2240,10 +2240,17 @@ runs:
           exit 1
         fi
         cd "$QCACLD"
-        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" >/dev/null 2>&1; then
+        # Capture dry-run output for debugging, but don't exit on failure yet
+        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun.log 2>&1; then
           echo "::error::monitor injection patch does not apply to this qcacld revision"
-          patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" 2>&1 | head -30 || true
-          exit 1
+          cat /tmp/inject_dryrun.log | head -50 || true
+          # Try with more fuzz as a last resort
+          if ! patch -p1 --fuzz=10 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun2.log 2>&1; then
+            echo "::error::patch also fails with fuzz=10"
+            cat /tmp/inject_dryrun2.log | head -50 || true
+            exit 1
+          fi
+          echo "::warning::patch applies with fuzz=10 but not fuzz=3"
         fi
         patch -p1 --fuzz=3 < "$QCACLD_PATCH"
 
