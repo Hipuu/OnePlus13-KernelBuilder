@@ -1,521 +1,855 @@
-# SM8750 (OnePlus 13) 802.11 Frame Injection — Deep Research
+# OnePlus 13 `qcacld-3.0` management-frame injection: engineering handoff
 
-> Branch: `fix/hidden-vdev-state`  
-> Date: 2026-08-14  
-> Author: ratman4080  
+> Research-only handoff. No driver, build, workflow, config, or manifest change is
+> part of this document.
+>
+> Researched: 2026-08-15
+>
+> Builder commit: `b5462a2ad71943277c54ff8321f68b539af82abc`
+>
+> OnePlus source commit: `d50b305f7da9e14715a25120a4ac7b1a4b8b97c3`
 
----
+## 1. Decision summary
 
-## 1. Executive Summary
+The current hidden-STA implementation is **not fixed and should not be used for
+stress testing**. It contains independent lifecycle, descriptor, and DMA
+ownership bugs that can explain the missing over-the-air frames and can also
+cause a firmware/SMMU failure.
 
-The OnePlus 13 uses Qualcomm's Kiwi (SM8750) SoC with the qcacld-3.0 WLAN driver.
-The firmware **rejects management TX on MONITOR-type vdevs** — it falls to a
-beacon-only path and discards the frame. The only working injection path
-requires creating a hidden STA vdev that the firmware accepts as a TX endpoint.
+The next agent should not begin by adding another delay or by extending the
+stale-buffer reaper. The recommended order is:
 
-Our current patch (`qcacld-monitor-injection.patch`, 983 lines) implements this
-hidden-helper-STA approach. It **compiles and loads**, but has several critical
-gaps compared to the reference implementation (Loukious `wma_frame_inject.c`,
-2118 lines) and fundamental issues with the WMI TX path on SM8750 that need
-resolution.
+1. Replace the current TX experiment with a one-frame proof using the **existing
+   real monitor vdev, its real self-peer, and the stock management-TX pipeline**.
+   This path already owns vdev IDs, WMI response timers, DP state, descriptors,
+   DMA mappings, completions, and recovery.
+2. Record firmware completion status and independently capture the frame on a
+   second radio. The open-source host code does **not** prove the proprietary
+   OnePlus firmware rejects management TX on a monitor vdev.
+3. Only if the monitor-vdev proof returns a reproducible firmware rejection,
+   prototype a **real host-managed P2P-device helper vdev**. It has a normal
+   object-manager ID and a normal self-peer. Test its create/start/stop/delete
+   lifecycle before sending a frame.
+4. Keep a firmware-only or “ghost” STA helper as the last resort. It can only be
+   made defensible with real response interception, collision-free ID
+   reservation, strict TX quiescence, and quarantining of any DMA buffer whose
+   completion is missing. A timeout is not permission to unmap and free it.
 
-**Three WMI injection paths exist in the SM8750 firmware API:**
+Scope the first working version to **on-channel, unprotected 802.11 management
+frames on 2.4/5 GHz at 20 MHz**. Data/control-frame injection, 6 GHz, wide
+channels, arbitrary rate control, protected frames, and bit-exact sequence/FCS
+preservation are separate projects.
 
-| Path | WMI Command ID | Frame Types | DMA Map | Completion Event |
-|---|---|---|---|---|
-| Management TX | `WMI_MGMT_TX_SEND_CMDID` | 802.11 management only | ✅ `qdf_nbuf_map_single` | `WMI_MGMT_TX_COMPLETION_EVENTID` |
-| Off-channel Data TX | `WMI_OFFCHAN_DATA_TX_SEND_CMDID` | RAW data frames | ✅ `qdf_nbuf_map_single` | `WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID` |
-| PDEV Frame Inject | `WMI_PDEV_FRAME_INJECT_CMDID` | Periodic: QoS NULL, CTS-to-self, or host buffer | N/A (template) | N/A (periodic) |
-| QoS NULL TX | `WMI_QOS_NULL_FRAME_TX_SEND_CMDID` | QoS Null frames | ✅ DMA paddr | `WMI_QOS_NULL_FRAME_TX_COMPLETION_EVENTID` |
+## 2. Exact target and evidence level
 
-**Key finding**: `WMI_OFFCHAN_DATA_TX_SEND_CMDID` can transmit **raw data frames**
-on an off-channel, which opens the door to data-frame injection beyond
-management-only. The firmware comment says: *"it will be always be RAW frame,
-as it will be tx'ed on non-pause tid"*.
+The relevant build is `configs/OP13-6.6.118.json`:
 
----
+- `ddk: true`
+- `ddk_target: sun_perf`
+- `ddk_chipset: peach-v2`
+- `ddk_injection: true`
+- output module: `qca_cld3_peach_v2.ko`
 
-## 2. Architecture: Why Hidden Helper STA Vdev
+`manifests/a16/oneplus_13_6.6.118_w.xml` pins the OnePlus modules repository to
+`d50b305f7da9e14715a25120a4ac7b1a4b8b97c3`. A remote check on 2026-08-15
+showed that this was also the head of OnePlus's
+`oneplus/sm8750_b_16.0.0_oneplus_13` branch. All source conclusions below are
+from that exact revision, not from an older qcacld tree.
 
-### 2.1 Firmware rejects MONITOR vdev mgmt TX
+Evidence labels used here:
 
-The firmware function `_wlan_send_mgmt_to_host` (or its modern equivalent in
-Kiwi firmware) checks the vdev type. MONITOR vdevs fall into a beacon-TX-only
-code path. Management frames submitted on a MONITOR vdev are silently discarded.
+- **Confirmed in source**: directly follows from the pinned host-driver code.
+- **Confirmed in current patch**: directly follows from the patch in this repo.
+- **Observed on device**: supplied runtime result from the OnePlus 13.
+- **Inference**: likely, but needs a completion status, firmware log, or OTA
+  capture.
+- **Unproven claim**: appears in a third-party patch/comment but cannot be
+  established from the open-source host code.
 
-### 2.2 pkt_capture is CAPTURE ONLY — dead end
+The WLAN firmware is proprietary. A successful `wmi_unified_*_send()` return
+only proves that the host accepted/queued a command. It does not prove the
+firmware completed the state transition or transmitted a frame.
 
-I read the entire `wlan_pkt_capture_data_txrx.c` from the SM8750 OSS repo.
-- `pkt_capture_rx_data_cb` processes RX frames
-- `pkt_capture_tx_data_cb` processes TX completion callbacks for frames the
-  firmware **already transmitted** through normal paths
+## 3. What is known from the device
 
-There is **zero injection capability**. The vendor command
-`QCA_NL80211_VENDOR_SUBCMD_SET_MONITOR_MODE` activates capture mode only.
+Observed:
 
-The SM8750 defconfig (`sun_gki_kiwi-v2_defconfig`) enables:
-- `CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y`
-- `CONFIG_WLAN_FEATURE_PKT_CAPTURE=y`
-- `CONFIG_WLAN_FEATURE_PKT_CAPTURE_V2=y`
-- `CONFIG_QCA_MONITOR_PKT_SUPPORT=y`
-- `CONFIG_WLAN_DP_LOCAL_PKT_CAPTURE=y`
+- `con_mode=4` loads and produces an operational radiotap monitor netdev.
+- Earlier versions also exposed a `null` STA netdev. The current patch does not
+  create that netdev; it creates only a firmware-side helper vdev.
+- The earlier channel synchronization code timed out after
+  `WMI_VDEV_START`, because it polled `bss_chan->ch_freq` for a vdev that had no
+  host `wlan_objmgr_vdev`.
+- The current patch replaced response waiting with fixed sleeps and can queue
+  frames host-side, but no `INJECT_TEST` beacon was captured by an independent
+  radio.
+- Repeated sends eventually changed to `ENXIO`/“No such device or address” in
+  one test. That is consistent with interface teardown or recovery, but it is
+  not by itself proof of a firmware crash. Driver/CNSS logs are required.
 
-All of these are **RX/capture** features. None provide TX injection.
+The historical `bss_chan` timeout is explained by the stock response path:
+`wma_vdev_start_resp_handler()` copies `des_chan` to `bss_chan` only after it
+finds a real host vdev. A ghost vdev has no object to update. The correct signal
+for such a vdev is the extracted VDEV_START response and its status, not polling
+`bss_chan`.
 
-### 2.3 P2P path is management-only with peer lookup
+## 4. Current patch architecture
 
-The P2P off-channel TX path (`wlan_p2p_off_chan_tx.c`) explicitly rejects
-non-management frames (`if (type != P2P_FRAME_MGMT) return E_FAILURE`). It
-also requires an `wlan_objmgr_get_peer` match — spoofed frames with
-non-matching MAC addresses are asynchronously dropped. The P2P path is
-unsuitable for general injection.
+Current file:
+`.github/actions/build-kernel/files/ddk/qcacld-monitor-injection.patch`
 
-### 2.4 Hidden STA vdev is the only viable path
+The patch currently does this:
 
-A hidden STA vdev with a self-peer on the monitor channel is the minimum
-viable injection endpoint because:
-1. Firmware accepts management TX on STA vdevs
-2. Self-peer satisfies firmware peer-lookup for the MAC address
-3. No beacon-TX-offload (unlike AP vdevs, which crash the firmware)
-4. VDEV_UP is skipped — firmware asserts for STA without a BSS peer
-
----
-
-## 3. Current Patch Analysis
-
-### 3.1 Architecture overview
-
-```
-wlan_hdd_main.c (HDD layer)
-  ├─ hdd_mon_hard_start_xmit()     — ndo_start_xmit for monitor interface
-  │   ├─ hdd_mon_inject_strip_radiotap()  — strip radiotap header
-  │   ├─ ieee80211_is_mgmt() check        — management-only filter
-  │   └─ wma_mon_inject_tx(skb, chanfreq) — pass to WMA
-  ├─ hdd_mon_inject_set_channel()  — create/reconfigure helper vdev
-  └─ hdd_mon_inject_stop()         — teardown helper vdev
-
-wma_frame_inject.c (WMA layer — new file)
-  ├─ wma_mon_inject_init/deinit()  — global state lifecycle
-  ├─ wma_mon_inject_setup()        — VDEV_CREATE → VDEV_START → PEER_CREATE
-  ├─ wma_mon_inject_teardown()     — PEER_DELETE → VDEV_STOP → VDEV_DELETE
-  ├─ wma_mon_inject_tx()           — allocate WMI buf, copy frame, send
-  ├─ wma_mon_inject_tx_complete()  — intercept in wma_mgmt.c completion path
-  └─ wma_mon_inject_reaper_cb()    — periodic stale-nbuf cleanup
-
-wma_mgmt.c (hooked completion)
-  └─ wma_process_mgmt_tx_completion() — calls wma_mon_inject_tx_complete() first
-```
-
-### 3.2 What works
-
-1. **Compilation and module load** — the patch compiles against SM8750 qcacld-3.0
-   and the kernel module loads successfully.
-
-2. **Helper vdev creation** — `wma_mon_inject_setup()` sends WMI
-   VDEV_CREATE(STA) → msleep(150) → VDEV_START → msleep(150) → PEER_CREATE →
-   msleep(100). The firmware accepts these commands for a vdev slot with no
-   host `wlan_objmgr_vdev` object.
-
-3. **Descriptor isolation** — injection desc_ids (0x8001–0x9000) don't collide
-   with the normal mgmt_txrx pool. The completion hook in `wma_mgmt.c` checks
-   `wma_mon_inject_is_desc_id()` first and consumes injection completions.
-
-4. **Lifecycle locking** — `lifecycle_lock` (qdf_mutex) serializes setup/teardown,
-   `state_lock` (qdf_spinlock) protects inflight state. No races between TX
-   and teardown.
-
-5. **Reaper** — 3-second periodic cleanup for stale nbufs (2-second timeout).
-
-6. **VDEV slot selection** — scans `wma->interfaces[i]` for empty slots,
-   avoids the monitor vdev ID, respects `max_bssid` limits.
-
-### 3.3 Critical issues
-
-#### CRITICAL 1: DMA-mapped nbuf never unmapped
-
-The WMI TLV layer (`send_mgmt_cmd_tlv` in `wmi_unified_tlv.c`) does:
-```c
-qdf_nbuf_map_single(qdf_ctx, param->tx_frame, QDF_DMA_TO_DEVICE);
-dma_addr = qdf_nbuf_get_frag_paddr(param->tx_frame, 0);
-cmd->paddr_lo = (uint32_t)(dma_addr & 0xffffffff);
+```text
+monitor ndo_start_xmit
+  -> linearize skb
+  -> validate and strip radiotap length
+  -> allow management frames only
+  -> copy 802.11 frame into a new qdf_nbuf
+  -> WMI_MGMT_TX_SEND on a firmware-only STA helper vdev
+  -> custom descriptor table
+  -> custom WMA completion interception or a 2-second timeout reaper
 ```
 
-Our `wma_mon_inject_tx()` passes the `wmi_buf` nbuf as `mgmt.tx_frame`.
-The WMI layer DMA-maps it and passes the physical address to firmware.
-Firmware DMA-reads the frame data from that address.
+Helper lifecycle:
 
-**On completion**, `wma_process_mgmt_tx_completion()` calls:
-```c
-buf = mgmt_txrx_get_nbuf(pdev, desc_id);  // returns NULL — not in pool
-if (buf)
-    wma_mgmt_unmap_buf(wma_handle, buf);   // skipped — buf is NULL
+```text
+WMI VDEV_CREATE(STA)
+  -> sleep 150 ms
+  -> WMI VDEV_START
+  -> sleep 150 ms
+  -> WMI PEER_CREATE(self)
+  -> sleep 100 ms
+  -> declare READY
 ```
 
-Our hook `wma_mon_inject_tx_complete()` correctly frees the nbuf, but it
-**never calls `qdf_nbuf_unmap_single`** before freeing. The DMA mapping leaks
-on every frame. On SM8750 (SNOC/LL path), this is a **SMMU mapping leak** —
-eventually the IOMMU pool exhausts and the device crashes.
+Teardown flushes all TX buffers first, then sends PEER_DELETE, VDEV_STOP, and
+VDEV_DELETE with 100 ms sleeps. It does not wait for firmware response events.
 
-**Loukious does this correctly** via `wma_injection_unmap_tx_buf()` which calls
-`qdf_nbuf_unmap_single(qdf_ctx, buf, QDF_DMA_TO_DEVICE)` on the LL path
-and is a no-op on the HL path.
+## 5. Confirmed defects in the current patch
 
-**Fix**: Add DMA unmap before nbuf free in both `wma_mon_inject_tx_complete()`
-and `wma_mon_inject_reaper_cb()` and `wma_mon_inject_flush_inflight()`.
+### 5.1 Every allocation returns the same descriptor ID
 
-#### CRITICAL 2: WMI TX copies frame inline AND DMA-maps the nbuf
-
-The `send_mgmt_cmd_tlv()` function does **two things** with the frame:
-1. Copies the first `bufp_len` bytes inline into the WMI command TLV
-   (`WMI_HOST_IF_MSG_COPY_CHAR_ARRAY(bufp, param->pdata, bufp_len)`)
-2. DMA-maps `param->tx_frame` and passes `paddr_lo/paddr_hi` to firmware
-
-Firmware uses the inline copy for small frames and DMA for the rest. But our
-patch allocates a separate `wmi_buf` nbuf, copies the frame into it, then
-passes that as both `tx_frame` (for DMA) and `pdata` (for inline copy).
-
-The problem: we copy `skb->data` → `wmi_buf`, then pass `frame_data` (pointing
-into `wmi_buf`) as `pdata` AND `wmi_buf` as `tx_frame`. The inline copy gets
-the right data. The DMA path maps the same `wmi_buf`. This actually works
-correctly for data integrity — firmware gets the frame either way.
-
-However, the **HDD layer also frees the original `skb`** after `wma_mon_inject_tx()`
-returns 0 (line 183: `qdf_nbuf_free(skb)`). This is correct — the HDD comment
-says "The caller retains ownership of @skb on both success and failure" but the
-HDD code always frees it. Our WMA copy is independent.
-
-This is actually fine. The real issue is CRITICAL 1 (DMA unmap).
-
-#### CRITICAL 3: Firmware may not send completions for helper vdev
-
-The helper STA vdev has **no host wlan_objmgr_vdev object**. When the firmware
-sends the WMI MGMT_TX_COMPLETION event, the WMI event handler calls
-`wma_process_mgmt_tx_completion()` which calls `mgmt_txrx_get_nbuf(pdev, desc_id)`.
-
-For our injection desc_ids, this returns NULL (not in the mgmt_txrx pool).
-Then `mgmt_txrx_tx_completion_handler()` is called — this may warn or crash
-if the desc_id is outside its pool range.
-
-Our hook intercepts **before** `wma_process_mgmt_tx_completion()` is called
-(in `wma_mgmt.c`, right at the top of the handler). So we consume the
-completion and return 0 before the pool lookup happens. This is correct.
-
-But: **does firmware actually send completions for the helper vdev?**
-
-If the helper vdev is in STARTED state with a self-peer, the firmware's
-WAL-TX path should transmit the frame and send a completion. However:
-- If firmware drops the frame (e.g., no valid peer for the destination MAC),
-  it may send a DISCARD completion or no completion at all.
-- Our reaper handles the no-completion case (2s timeout).
-
-**Verdict**: The completion path is architecturally correct but untested.
-If firmware doesn't send completions, the reaper frees stale nbufs every 3s.
-The DMA unmap leak (CRITICAL 1) still applies.
-
-#### HIGH 1: No backpressure on inflight count
-
-Our patch has 64 inflight slots but no atomic counter or high-water-mark
-check before submission. If firmware silently drops frames (no completions),
-all 64 slots fill up, then every new TX returns -EBUSY. The caller (HDD)
-drops the frame silently.
-
-**Loukious** uses `qdf_atomic_t inflight_count` with
-`WMA_INJECTION_INFLIGHT_HIGH = 200` and returns `QDF_STATUS_E_RESOURCES`
-when exceeded. The reaper gradually frees stale entries.
-
-**Fix**: Add `qdf_atomic_t inflight_count`, check before TX submission.
-
-#### HIGH 2: next_desc_id starts at WMA_MON_INJECT_DESC_ID_BASE (0x8001)
-
-The first injected frame uses desc_id 0x8001. If the normal mgmt_txrx pool
-also allocates IDs in this range, there's a collision. In practice, the
-mgmt_txrx pool uses its own ID space, but this should be verified.
-
-**Loukious** uses `WMA_INJECTION_DESC_ID_BASE = 0x2000` with mask 0x0FFF.
-Our 0x8001 is safer (further from normal pool), but the initial value
-should skip ID 0 to avoid ambiguity.
-
-#### HIGH 3: Probe-request SA not normalized
-
-The firmware's management TX handler may discard broadcast probe requests
-whose SA doesn't match the transmitting vdev's MAC. Our patch doesn't
-normalize the SA field (offset 10 in the 802.11 header) to match the
-helper vdev MAC.
-
-**Loukious** explicitly overrides SA for broadcast probe requests on
-monitor vdevs:
-```c
-if (monitor_vdev && is_probe_req && is_bcast_da && req->frame_len >= 24)
-    qdf_mem_copy(frame_data + 10, vdev_mac, QDF_MAC_ADDR_SIZE);
-```
-
-**Fix**: Add SA normalization in `wma_mon_inject_tx()` for probe requests.
-
-#### MEDIUM 1: chanfreq=0 for probe requests
-
-The P2P/host management TX path uses `chanfreq=0` for probe requests
-(meaning "use current channel"). Our patch always passes the explicit
-channel frequency. This should work, but some firmware builds may
-behave differently with explicit vs. zero chanfreq for probes.
-
-**Loukious** uses:
-```c
-mgmt_params.chanfreq = is_probe_req ? 0 : tx_chanfreq;
-if (monitor_vdev && is_probe_req && tx_chanfreq)
-    mgmt_params.chanfreq = tx_chanfreq;
-```
-
-#### MEDIUM 2: Helper MAC may equal monitor MAC
-
-If the monitor MAC already has the locally-administered bit set AND the
-last bit is 1, then `dst[0] |= 0x02; dst[5] ^= 0x01` produces a MAC
-identical to the monitor MAC. This would cause the firmware to reject
-PEER_CREATE (duplicate MAC on same pdev).
-
-**Fix**: If derived MAC equals monitor MAC, flip a different bit or
-use a completely random locally-administered address.
-
-#### MEDIUM 3: No WMI service check before using mgmt TX WMI path
-
-The `wma_mgmt_unified_cmd_send()` wrapper checks `wmi_service_mgmt_tx_wmi`
-before choosing between the WMI path and the legacy CDP path. Our patch
-calls `wmi_mgmt_unified_cmd_send()` directly (the low-level WMI function),
-bypassing this check.
-
-On SM8750 (SNOC transport), `wmi_service_mgmt_tx_wmi` should be enabled.
-But if it's not, our WMI command will fail silently or be ignored by
-firmware.
-
-**Fix**: Check `wmi_service_enabled(wma->wmi_handle, wmi_service_mgmt_tx_wmi)`
-before sending. Fall back to `cdp_mgmt_send_ext()` if unavailable (like
-Loukious does for non-monitor vdevs).
-
----
-
-## 4. Gap Analysis: Our Patch vs. Loukious Reference
-
-| Feature | Our Patch | Loukious | Impact |
-|---|---|---|---|
-| DMA unmap on completion | ❌ Missing | ✅ `wma_injection_unmap_tx_buf()` | **CRITICAL** — SMMU leak |
-| DMA unmap on reaper cleanup | ❌ Missing | ✅ | **CRITICAL** — SMMU leak |
-| Backpressure (inflight high-water) | ❌ Missing | ✅ 200 limit | HIGH — OOM under load |
-| Inflight atomic counter | ❌ Missing | ✅ `qdf_atomic_t` | HIGH — race potential |
-| Debug cache (256 entries) | ❌ 64-slot array | ✅ hash by desc_id | LOW — ours is simpler but works |
-| Probe-req SA normalization | ❌ Missing | ✅ Override SA to vdev MAC | HIGH — firmware drops probes |
-| chanfreq=0 for probe reqs | ❌ Always explicit | ✅ Conditional | MEDIUM — firmware compatibility |
-| WMI service check | ❌ Missing | ✅ `wmi_service_mgmt_tx_wmi` | MEDIUM — robustness |
-| CDP legacy fallback | ❌ Missing | ✅ `cdp_mgmt_send_ext` | LOW — SM8750 uses WMI |
-| Logging (first-N per status) | ❌ Basic | ✅ Rate-limited detailed logs | LOW — debugging |
-| Queue/throttle infrastructure | ❌ Direct TX | ✅ Queue + work thread | LOW — adds latency control |
-| Frame type check | HDD: mgmt only | WMA: passes all to WMI | LOW — firmware enforces |
-| VDEV type | STA (correct) | STA (was AP, fixed to STA) | ✅ Same |
-| Skip VDEV_UP | ✅ | ✅ | ✅ Same |
-| Object-manager vdev reservation | ❌ Not reserved | ❌ Not reserved | ⚠️ Both have this gap |
-| Stats (processed/dropped/fw_errors) | ❌ Missing | ✅ Detailed | LOW — observability |
-| Session state reset | ❌ Missing | ✅ On new vdev create | LOW — counter hygiene |
-
----
-
-## 5. Paths to Data/Control Frame Injection
-
-### 5.1 WMI_OFFCHAN_DATA_TX_SEND_CMDID — RAW data frame injection
-
-The firmware API defines `wmi_offchan_data_tx_send_cmd_fixed_param`:
-```c
-typedef struct {
-    A_UINT32 vdev_id;
-    A_UINT32 desc_id;   /* echoed in tx_compl_event */
-    A_UINT32 chanfreq;  /* MHz units */
-    A_UINT32 paddr_lo;
-    A_UINT32 paddr_hi;
-    A_UINT32 frame_len;
-    A_UINT32 buf_len;   // "it will be always be RAW frame, as it will be tx'ed on non-pause tid"
-    A_UINT32 tx_params_valid;
-} wmi_offchan_data_tx_send_cmd_fixed_param;
-```
-
-Completion: `WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID` with `desc_id` + `status`.
-
-The host WMI layer has this wired into the ops table:
-```c
-.send_offchan_data_tx_cmd = send_offchan_data_tx_cmd_tlv,
-```
-
-And the API function:
-```c
-QDF_STATUS wmi_offchan_data_tx_cmd_send(wmi_unified_t wmi_handle,
-    struct wmi_offchan_data_tx_params *param);
-```
-
-**This is the path to data-frame injection.** It accepts raw 802.11 data frames
-and transmits them on the specified channel through the helper vdev. The firmware
-treats them as RAW frames on a non-pause TID, bypassing the management-frame-only
-restriction.
-
-**Caveat**: We need to verify:
-1. Does the SM8750 firmware actually implement this handler? (The host-side code
-   exists, but firmware could return an error or ignore the command.)
-2. Does it work on our helper STA vdev, or does it require a specific vdev type?
-3. Are there firmware service bits that gate this feature?
-
-### 5.2 WMI_QOS_NULL_FRAME_TX_SEND_CMDID — control-like injection
+This is a deterministic bug, not a theory. The constants are:
 
 ```c
-typedef struct {
-    A_UINT32 vdev_id;
-    A_UINT32 desc_id;
-    A_UINT32 paddr_lo;
-    A_UINT32 paddr_hi;
-    A_UINT32 frame_len;
-    A_UINT32 buf_len;
-} wmi_qos_null_frame_tx_send_cmd_fixed_param;
+#define WMA_MON_INJECT_DESC_ID_BASE 0x8001
+#define WMA_MON_INJECT_DESC_ID_MASK 0x0fff
 ```
 
-This sends QoS Null frames. Not useful for general injection, but confirms the
-firmware has multiple TX paths beyond management frames.
-
-### 5.3 WMI_PDEV_FRAME_INJECT_CMDID — periodic frame injection
+The allocator increments `next_desc_id`, then tests:
 
 ```c
-enum wmi_frame_inject_type {
-    WMI_FRAME_INJECT_TYPE_QOS_NULL,
-    WMI_FRAME_INJECT_TYPE_CTS_TO_SELF,
-    WMI_FRAME_INJECT_TYPE_HOST_BUFFER,  // <-- arbitrary buffer
-    WMI_FRAME_INJECT_TYPE_MAX,
-};
+if ((next_desc_id & ~MASK) != BASE)
+        next_desc_id = BASE + 1;
 ```
 
-`WMI_FRAME_INJECT_TYPE_HOST_BUFFER` allows injecting an arbitrary frame template
-at a configurable period. This is designed for traffic shaping / keepalive, not
-single-shot injection. But it confirms firmware can TX arbitrary 802.11 frames.
+For any value in the intended range, `value & ~0x0fff` is `0x8000`, which can
+never equal the unaligned base `0x8001`. With the current initialization, every
+call returns `0x8002` and resets back to `0x8002`. Concurrent frames therefore
+share an ID; a completion can release the wrong buffer, and later completions
+become ambiguous.
 
-### 5.4 Assessment: Data frame injection is feasible
+The stock management descriptor pool is IDs 0 through 63
+(`MGMT_DESC_POOL_MAX` defaults to 64). A private range can be outside that pool,
+but the pinned host API stores `desc_id` as `uint16_t`, and every private
+completion must be consumed before stock code indexes the 64-entry array.
 
-The `WMI_OFFCHAN_DATA_TX_SEND_CMDID` path is the most promising for extending
-injection beyond management frames. The host-side WMI infrastructure exists and
-is wired into the ops table. The firmware API defines both the command and
-completion event.
+If a private allocator is retained, use an aligned range such as
+`0x8000..0x8fff`, allocate under the same lock as the in-flight table, scan for
+an unused ID, and never reset the sequence on helper recreation. More
+importantly, do not reuse an ID whose old completion remains possible. If
+firmware never completes frames, safe indefinite ID reuse is impossible without
+a firmware reset/quiescence guarantee.
 
-**Implementation plan for data-frame injection:**
-1. In `wma_mon_inject_tx()`, detect frame type from the 802.11 header
-2. For management frames: use existing `wmi_mgmt_unified_cmd_send()` path
-3. For data frames: use `wmi_offchan_data_tx_cmd_send()` path
-4. Remove the `ieee80211_is_mgmt()` filter in HDD
-5. Handle `WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID` completions in the
-   injection completion hook
-6. Test with a simple data frame (e.g., a raw 802.11 data frame with
-   broadcast DA)
+### 5.2 A timer frees memory that firmware may still DMA-read
 
-### 5.5 Control frames (ACK, CTS, RTS) — not directly possible
+The pinned `send_mgmt_cmd_tlv()`:
 
-Control frames are < 24 bytes and are generated by firmware/hardware, not
-the host. The WMI paths all require frames ≥ 24 bytes. The
-`WMI_FRAME_INJECT_TYPE_CTS_TO_SELF` provides periodic CTS-to-self but not
-single-shot. There is no general path for injecting arbitrary control frames.
+1. copies a prefix inline into the WMI message;
+2. DMA-maps the complete `tx_frame` nbuf;
+3. sends its physical address to firmware; and
+4. unmaps it only on local command-send failure.
 
----
+After a successful submission, ownership of that mapping lasts until TX
+completion or another documented device-quiescence boundary. The current
+2-second reaper unmaps and frees solely because time elapsed. Firmware can then
+DMA from reused memory. This can produce corrupted TX, use-after-DMA, an SMMU
+fault, or recovery.
 
-## 6. What Needs to Happen (Priority Order)
+The same bug exists in teardown: `wma_mon_inject_flush_inflight()` unmaps/frees
+all buffers **before** PEER_DELETE/VDEV_STOP/VDEV_DELETE are sent. Unmapping is
+not cancellation. Linux DMA rules require the device to have finished using a
+streaming mapping before unmap/free.
 
-### Phase 1: Fix current management-frame injection (CRITICAL)
+Required rule: a successful WMI submission is `FW_OWNED`. Release it only on
+the matching completion, or after a device reset/firmware-recovery boundary
+that guarantees DMA has stopped. A timeout may log and quarantine the buffer;
+it must not free it.
 
-1. **Add DMA unmap** — `qdf_nbuf_unmap_single()` before every `qdf_nbuf_free()`
-   in `wma_mon_inject_tx_complete()`, `wma_mon_inject_reaper_cb()`, and
-   `wma_mon_inject_flush_inflight()`. Use `cds_get_context(QDF_MODULE_ID_QDF_DEVICE)`
-   for the `qdf_ctx` handle.
+### 5.3 TX races teardown and can use a freed nbuf
 
-2. **Add inflight backpressure** — `qdf_atomic_t inflight_count` in
-   `wma_mon_inject_ctx`. Increment on WMI submission success, decrement in
-   completion/reaper/flush. Check against `WMA_MON_INJECT_MAX_INFLIGHT` before
-   submitting.
+`wma_mon_inject_tx()` publishes an in-flight slot, drops `state_lock`, rewrites
+the copied frame, and calls WMI. It does not hold `lifecycle_lock` and has no
+active-submitter barrier. Teardown can run between those operations, flush and
+free the nbuf, zero the helper MAC, and then let TX continue with freed memory.
 
-3. **Add probe-req SA normalization** — In `wma_mon_inject_tx()`, for frames
-   with FC type=0x00 subtype=0x40 (probe request) and broadcast DA, copy the
-   helper vdev MAC to the SA field (offset 10).
+The same race can make teardown call DMA-unmap on a buffer that has not yet been
+mapped. A very fast completion can also decrement `inflight_count` before the
+TX function increments it. The atomic counter is therefore not synchronized
+with slot ownership and can underflow or diverge.
 
-4. **Add WMI service check** — Before calling `wmi_mgmt_unified_cmd_send()`,
-   check `wmi_service_enabled(wma->wmi_handle, wmi_service_mgmt_tx_wmi)`.
+Fixing this requires:
 
-5. **Fix next_desc_id initialization** — Start at `WMA_MON_INJECT_DESC_ID_BASE + 1`
-   to avoid desc_id 0x8001 on first frame if that causes issues.
+- blocking new submissions before teardown;
+- an `active_submitters` count/ref with a waitable drain;
+- all slot transitions and the in-flight count under one lock;
+- copying vdev ID, MAC, channel, device handle, and generation while protected;
+- teardown waiting for active submitters before inspecting FW-owned slots.
 
-### Phase 2: Test and validate
+### 5.4 Setup error unwind does nothing
 
-1. Flash kernel with fixes
-2. Enable monitor mode: `iw phy0 interface add mon0 type monitor && ip link set mon0 up`
-3. Set channel: `iw dev mon0 set channel 1`
-4. Inject a deauth frame: `aireplay-ng -0 1 -a <AP_MAC> mon0`
-5. Verify with a second device in monitor mode that the frame appears OTA
-6. Check dmesg for injection completion status (OK vs DISCARDED)
+The state remains `DOWN` throughout create/start/peer setup. On a partial
+failure, `fail_teardown` calls a function that immediately returns when state is
+`DOWN`. A created or started firmware vdev can therefore leak.
 
-### Phase 3: Extend to data-frame injection (HIGH)
+Track command phases independently, for example:
 
-1. Wire up `WMI_OFFCHAN_DATA_TX_SEND_CMDID` in `wma_mon_inject_tx()`
-2. Remove `ieee80211_is_mgmt()` filter in HDD
-3. Register for `WMI_OFFCHAN_DATA_TX_COMPLETION_EVENTID` completions
-4. Test with raw 802.11 data frames
-
----
-
-## 7. Open Questions
-
-1. **Does SM8750 firmware actually send WMI MGMT_TX_COMPLETION events for the
-   helper vdev?** If not, the reaper handles cleanup, but we lose TX status
-   visibility. Need empirical testing.
-
-2. **Does `WMI_OFFCHAN_DATA_TX_SEND_CMDID` work on a STA vdev in STARTED
-   (not UP) state?** The management path works without VDEV_UP; the data path
-   may have different requirements.
-
-3. **What is `mgmt_tx_dl_frm_len`?** This variable controls how many bytes
-   are copied inline vs. DMA'd. If it's 0 or very small, all frame data goes
-   via DMA and the inline copy is empty. If it's ≥ frame length, no DMA is
-   needed and we can skip the DMA map/unmap entirely. Need to check the
-   SM8750 firmware configuration.
-
-4. **Are there firmware service bits gating `WMI_OFFCHAN_DATA_TX_SEND_CMDID`?**
-   Need to check if `wmi_service_offchan_data_tx` or similar exists.
-
-5. **Can we use `wmi_unified_vdev_create_send()` directly (like our patch does)
-   or should we go through the vdev manager?** The Loukious patch also calls
-   the WMI function directly. Both work because the helper vdev intentionally
-   has no host objmgr representation.
-
----
-
-## 8. Reference Implementations
-
-| Implementation | SoC | qcacld version | Notes |
-|---|---|---|---|
-| [Loukious/sm8150](https://github.com/Loukious/android_kernel_xiaomi_sm8150/blob/65c6a05ecd9b25ebf0742d39987c6a8a042227f1/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c) | SM8150 | qcacld-3.0 (older) | Gold standard. 2118 lines. Queue + work thread + DMA unmap + backpressure + debug cache |
-| [kimocoder/qualcomm_android_monitor_mode](https://github.com/kimocoder/qualcomm_android_monitor_mode) | Various | Various | Monitor mode enablement only, no injection |
-| Our patch (`fix/hidden-vdev-state`) | SM8750 | qcacld-3.0 (Kiwi) | 983 lines. Direct TX, no DMA unmap, no backpressure |
-
----
-
-## 9. SM8750 Defconfig Summary
-
-From `sun_gki_kiwi-v2_defconfig` + `kiwi_defconfig` + `default_defconfig`:
-
-```
-CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y
-CONFIG_WLAN_FEATURE_PKT_CAPTURE=y
-CONFIG_WLAN_FEATURE_PKT_CAPTURE_V2=y
-CONFIG_QCA_MONITOR_PKT_SUPPORT=y
-CONFIG_WLAN_DP_LOCAL_PKT_CAPTURE=y
-CONFIG_WIFI_MONITOR_SUPPORT=y
-CONFIG_CNSS_KIWI=y
-CONFIG_INCLUDE_HAL_KIWI=y
-CONFIG_WLAN_FEATURE_11BE=y
-CONFIG_WLAN_FEATURE_11BE_MLO=y
-CONFIG_CFG_MAX_STA_VDEVS=4
-CONFIG_CHIP_VERSION=1
+```text
+create_sent
+start_sent / start_acked
+peer_create_sent / peer_create_acked
 ```
 
-`WLAN_FEATURE_PKT_CAPTURE` is enabled but **capture-only**. No
-`FEATURE_FRAME_INJECTION_SUPPORT` or similar exists in the defconfig —
-our patch adds this capability from scratch.
+Unwind based on those flags even if the final `READY` state was never reached.
 
----
+### 5.5 Fixed sleeps are not acknowledgements
 
-*End of research document.*
+The pinned host stack has real VDEV_START, VDEV_STOP, and VDEV_DELETE response
+events. Their normal target-interface handlers require a response timer and a
+host vdev. A ghost helper has neither, so the normal handlers return early.
+
+The older repository commit `4b004b9` was directionally better: it intercepted
+exact helper responses before the normal timer/object lookup. That approach
+should be restored if a ghost helper remains, but matching must require the
+active helper vdev ID, lifecycle phase, and generation so normal events are
+never stolen.
+
+VDEV_CREATE has no corresponding create response in this host API. WMI command
+ordering plus a successful START response is the first useful confirmation that
+the created vdev exists.
+
+### 5.6 Peer responses are service-dependent
+
+The normal peer-create confirmation handler expects a matching
+`WMA_PEER_CREATE_REQ`. A direct ghost-helper command creates no such request, so
+the event is otherwise discarded. Firmware advertises peer-create confirmation
+through `wmi_service_peer_create_conf`, which the host maps to
+`WLAN_SOC_F_PEER_CREATE_RESP`.
+
+The normal driver explicitly falls back to legacy “command accepted” behavior
+when that service is absent. A helper must do the same honestly:
+
+- if peer-create confirmation is advertised, intercept the exact helper
+  vdev+MAC response and wait for its status;
+- if absent, label peer creation unconfirmed and restrict the experiment;
+- for deletion, wait for the exact peer-delete response only when
+  `wmi_service_sync_delete_cmds` is advertised.
+
+### 5.7 The ghost vdev ID is not reserved
+
+The helper scans `wma->interfaces[i].vdev == NULL`, but the real allocator uses
+the psoc's locked `wlan_vdev_id_map`. The helper never sets that map and never
+places a host vdev in `wlan_vdev_list`. Another interface operation can select
+the same ID while firmware still owns it.
+
+This is a structural problem. Creating a real host-managed vdev is the clean
+solution. Do not patch the private bitmap directly unless a supported reserve
+API and complete object lifecycle are added; a one-off bit set would merely
+move the inconsistency elsewhere.
+
+### 5.8 Peer/address semantics likely block the beacon test
+
+The ghost helper has one peer: its derived helper MAC. Stock management TX
+first looks up a peer by destination address, then source address, then MLD
+address. For a broadcast beacon/probe request, destination lookup cannot match;
+source address becomes important.
+
+The current patch rewrites source address only for broadcast probe requests.
+It does not normalize beacon SA/BSSID. If `beacon_inject` uses the monitor MAC
+or a spoofed address, it will not match the ghost self-peer. It is therefore
+plausible that firmware discards the frame even after helper start. This is an
+**inference**, because firmware peer selection is not open source.
+
+Silently rewriting addresses is not a general solution. The implementation
+must choose and document one contract:
+
+- preserve arbitrary SA/BSSID and prove firmware accepts it;
+- support only the vdev/self-peer MAC and reject other addresses;
+- or manage real transient peers per source MAC, including their response,
+  resource, teardown, and recovery lifecycle.
+
+The third option is high risk and should not be the first milestone.
+
+### 5.9 Channel state is fabricated or used after failure
+
+The current monitor open path starts a helper at hard-coded 2412 MHz before a
+successful user channel transition. After `wlan_hdd_set_mon_chan()`, it starts
+or reconfigures the helper even when the real monitor VDEV_START timed out or
+failed. A helper is not independent of the radio's actual channel.
+
+The helper also fabricates 20 MHz 11G/11A PHY settings and 20 dBm power. It
+does not faithfully carry channel width, center frequencies, regulatory power,
+6 GHz rules, or puncturing.
+
+Correct order:
+
+```text
+stop monitor TX queue
+  -> drain/quarantine TX safely
+  -> tear down old helper completely
+  -> perform the stock validated monitor channel transition
+  -> require successful monitor response
+  -> derive settings from the resulting wlan_channel
+  -> create/start a helper only if one is still needed
+  -> wake TX queue
+```
+
+For the first milestone, reject anything outside 2.4/5 GHz 20 MHz rather than
+guessing parameters.
+
+### 5.10 The radiotap and netdev contracts are incomplete
+
+The patch validates only radiotap version and length, then strips the entire
+header. It ignores extended presence bitmaps, alignment, FCS-present, TX flags,
+NOACK, rate, MCS/VHT/HE fields, and channel disagreement. An FCS included by
+userspace may be transmitted as payload.
+
+Use the kernel radiotap iterator if it is available/exported to this module, or
+write a bounded parser following the same alignment rules. The initial contract
+should accept a minimal header, strip an included FCS when explicitly flagged,
+and reject unsupported TX-control fields rather than pretending to honor them.
+
+`ndo_start_xmit` runs in atomic/BH-disabled contexts and cannot sleep. Normal
+resource exhaustion should stop the netdev queue before it fills and wake it on
+completion. If returning `NETDEV_TX_BUSY`, the driver must not retain, map, or
+free the skb. If it returns `NETDEV_TX_OK` after a drop, count the reason; a
+userspace `send()` success only means the kernel accepted the skb.
+
+### 5.11 `null` is not the current injection endpoint
+
+The current patch creates a firmware-only helper and no visible `null` netdev.
+Advice to run `ip link set null up` or inject through `null` applies to an older
+design. An unassociated STA netdev also cannot simply be treated as a raw
+injection endpoint by bringing it UP.
+
+## 6. Preferred experiment: use the real monitor vdev
+
+This is the most important new direction from the pinned-source audit.
+
+The stock OnePlus driver already does all of the following for the monitor
+interface:
+
+- creates a real object-manager vdev and reserves its ID;
+- maps `QDF_MONITOR_MODE` to `WMI_VDEV_TYPE_MONITOR`;
+- declares that monitor vdevs use a self-peer;
+- creates the WMI/objmgr/DP peer through `wma_create_peer()`;
+- registers monitor DP TX/RX operations;
+- starts the vdev on a validated channel and processes its real response;
+- exposes the standard management-TX descriptor pool and completion path.
+
+The open-source code does not show that `WMI_MGMT_TX_SEND` rejects a monitor
+vdev. That claim comes from third-party comments/reverse engineering and may or
+may not match `peach-v2` firmware. Test it before maintaining a second vdev.
+
+### 6.1 Proposed one-frame proof
+
+Implement only enough future code to submit one management nbuf through:
+
+```c
+wlan_mgmt_txrx_mgmt_frame_tx(monitor_self_peer, ...)
+```
+
+Do not call `wmi_mgmt_unified_cmd_send()` directly and do not allocate a custom
+descriptor. `wlan_mgmt_txrx_mgmt_frame_tx()` obtains a stock descriptor, holds
+the peer reference, routes through `wma_mgmt_unified_cmd_send()`, and lets the
+existing WMA completion code unmap before completion/free.
+
+For the first proof, require `wmi_service_mgmt_tx_wmi`. The alternate HTT/CDP
+management path has different download/OTA callback semantics and needs its own
+ownership audit if this service is absent. Fill a zeroed `wmi_mgmt_params` from
+validated state, approximately:
+
+```c
+mgmt.tx_frame = nbuf;
+mgmt.pdata = qdf_nbuf_data(nbuf);
+mgmt.frm_len = qdf_nbuf_len(nbuf);
+mgmt.vdev_id = wlan_vdev_get_id(mon_vdev);
+mgmt.chanfreq = active_monitor_freq;
+mgmt.qdf_ctx = wlan_psoc_get_qdf_dev(psoc); /* or the existing WMA qdf_dev */
+mgmt.tx_params_valid = false;
+mgmt.tx_flags = 0;
+mgmt.mlo_link_agnostic = false;
+```
+
+Do not assign `mgmt.desc_id`; `wma_mgmt_unified_cmd_send()` replaces it with the
+descriptor allocated by the stock management component. Keep default rate
+selection for the first proof and add radiotap rate control only after OTA works.
+
+Submission requirements:
+
+1. Resolve the active monitor `wlan_objmgr_vdev` by vdev ID with a proper ref.
+2. Resolve that vdev's real self-peer using its link/self MAC, not the injected
+   frame's DA/SA. Passing the peer explicitly avoids the host lookup gate in
+   `wma_tx_frame`; firmware may still enforce address matching, which the test
+   will reveal.
+3. Use the actual successful monitor channel. Do not fall back to 2412.
+4. Transfer one linear nbuf with radiotap removed. On synchronous failure the
+   caller still owns/frees it. On success the management-TX path owns it.
+5. Either pass no callbacks and let the stock handler free it, or pass exactly
+   one completion callback that records status and frees it exactly once. If a
+   callback is installed, its context must outlive vdev drain/SSR.
+6. Log the firmware completion enum:
+   `COMPLETE_OK`, `DISCARD`, `INSPECT`, `COMPLETE_NO_ACK`, or unknown.
+7. Capture on an independent adapter. A host completion is evidence, not proof
+   of RF airtime. Broadcast frames naturally receive no 802.11 ACK.
+
+First use a valid probe request or beacon whose SA/BSSID equals the monitor
+self-peer MAC. Then repeat with a deliberately different SA. This separates
+“monitor vdev rejected” from “source peer missing.”
+
+### 6.2 Ownership table for this path
+
+| Point | skb/nbuf owner | DMA state |
+|---|---|---|
+| `ndo_start_xmit` entry | monitor TX function | unmapped |
+| stock mgmt submit fails | monitor TX function | WMI has already unmapped if it mapped |
+| stock mgmt submit succeeds | mgmt_txrx descriptor | mapped on LL/WMI path |
+| WMI completion enters WMA | mgmt_txrx descriptor | mapped |
+| after `wma_mgmt_unmap_buf` | completion path | unmapped |
+| stock handler/no-callback or one custom callback | freed exactly once | unmapped |
+
+No timeout reaper should be added. If even a one-frame proof gets no completion,
+stop and diagnose the firmware path; do not make the missing completion “go
+away” by freeing the buffer.
+
+### 6.3 Result-driven decision
+
+| Completion/OTA result | Interpretation | Next action |
+|---|---|---|
+| completion + correct OTA frame | monitor path works | build on the stock pipeline; delete ghost helper |
+| `DISCARD`, no OTA | firmware/path rejected it | compare matching vs spoofed SA; then test helper |
+| `NO_ACK`, frame visible | normal for some broadcast/unicast cases | treat OTA capture as success |
+| completion says OK, no OTA | receiver/channel/FCS or firmware ambiguity | repeat with two receivers and inspect bytes/channel |
+| no completion | unsupported/broken path or recovery | single-frame logs, WMI event tracing, no retries/reaper |
+| synchronous send failure | host-side gate | log exact QDF status and failing function |
+
+## 7. Second choice: a real host-managed helper
+
+If the real monitor vdev is demonstrably rejected, prefer a real internal
+helper over a ghost vdev.
+
+The most promising candidate is `QDF_P2P_DEVICE_MODE` because the pinned MLME
+maps it to AP type plus P2P-device subtype, and `mlme_vdev_uses_self_peer()`
+returns true for that subtype. The normal lifecycle then reserves a vdev ID,
+creates host/DP/WMI state and the self-peer, owns response timers, and drains
+management descriptors during recovery.
+
+This is still an experiment, not a proven fix:
+
+- the helper must be internal and not exposed as a fake `null` interface;
+- standalone monitor mode currently rejects normal cfg80211 concurrency, so
+  policy-manager interactions need explicit review;
+- some configurations redirect P2P-device operations to a STA vdev on vdev
+  exhaustion; the helper must verify it obtained a distinct vdev;
+- P2P-device is AP-type internally. The claim that any AP-like helper triggers
+  beacon-offload firmware assertions is unproven for this firmware, so test
+  create/start/stop/delete with zero TX first;
+- use normal MLME/ROC/channel APIs, not direct WMI calls mixed with a host vdev.
+
+Relevant normal creation sequence:
+
+```text
+wlan_objmgr_vdev_obj_create
+  -> component create handlers / MLME object and state machine
+  -> vdev_mgr_create_send
+  -> CDP vdev attach
+  -> sme_vdev_post_vdev_create_setup
+  -> wma_vdev_self_peer_create
+```
+
+Do not manually duplicate only selected calls from this sequence. Partial
+object-manager, WMA, and DP state is harder to recover than the current ghost.
+
+Acceptance gate before TX: 100 create/start/stop/delete cycles across channel 1
+and channel 36, with every expected response received, no timeout, no CNSS
+recovery, no leaked vdev/peer, and the original monitor still operational.
+
+## 8. Last resort: requirements for a firmware-only helper
+
+If device evidence proves that only a STARTED STA ghost vdev can transmit, the
+minimum defensible design is below.
+
+### 8.1 Lifecycle state machine
+
+```text
+DOWN
+  -> CREATING (create_sent)
+  -> STARTING (wait START response + status)
+  -> PEER_CREATING (wait response when service exists)
+  -> READY
+
+READY
+  -> QUIESCING (block queue, drain active submitters)
+  -> PEER_DELETING (wait when sync-delete service exists)
+  -> STOPPING (wait STOP response)
+  -> DELETING (wait DELETE response)
+  -> DOWN
+
+any response timeout/unexpected status
+  -> FAILED_RECOVERY_REQUIRED
+```
+
+Keep phase flags independent of the high-level state so partial setup can be
+unwound. A failure must not clear the vdev ID, descriptor tombstones, or mapped
+buffers and then reuse them. On an uncertain timeout, quarantine them until a
+known firmware reset.
+
+### 8.2 Response interception
+
+Restore the concept used in repository commit `4b004b9`:
+
+- intercept helper VDEV_START before the stock response-timer lookup;
+- intercept helper VDEV_STOP before its stock lookup;
+- intercept helper VDEV_DELETE before its stock lookup;
+- intercept peer-create confirmation before `WMA_PEER_CREATE_REQ` lookup;
+- intercept peer-delete response before `WMA_DELETE_STA_REQ` lookup.
+
+Each hook must first verify all of:
+
+- injection feature initialized;
+- current lifecycle phase expects this event;
+- exact helper vdev ID;
+- exact helper MAC for peer events;
+- current helper generation/session.
+
+Return “consumed” only on a full match. Copy status under a spinlock, then signal
+a qdf event. Never wait while holding the spinlock.
+
+### 8.3 TX slot state and teardown
+
+A slot needs at least:
+
+```text
+FREE
+LOCAL_OR_SUBMITTING
+FW_OWNED
+COMPLETING
+QUARANTINED
+```
+
+Recommended submit algorithm:
+
+1. Under `state_lock`, verify READY/channel/generation, reserve a collision-free
+   descriptor and slot, copy all helper fields, increment active submitters.
+2. Drop the lock and call WMI.
+3. Reacquire the lock. On local failure, remove the still-local slot; the WMI
+   failure path has already unmapped. On success, mark it FW_OWNED unless the
+   completion hook already consumed it.
+4. Decrement active submitters and signal the drain event if zero.
+
+Completion must atomically detach the matching slot, then unmap/free outside the
+spinlock. It must handle both single and bundle completion events; the stock
+bundle handler already funnels each report through
+`wma_process_mgmt_tx_completion()`.
+
+Teardown order:
+
+```text
+stop netdev queue / reject new TX
+  -> wait active_submitters == 0
+  -> wait for FW-owned TX completions
+  -> if TX remains: quarantine and request recovery; do not free
+  -> peer delete as applicable
+  -> vdev stop + response
+  -> vdev delete + response
+  -> release ID/state only after confirmed quiescence
+```
+
+A successful stop/delete response might be usable as a quiescence boundary,
+but that is not documented in the available ABI. Prove it with targeted stress
+and SMMU instrumentation before relying on it. Firmware reset/recovery is the
+conservative boundary.
+
+### 8.4 Vdev ID reservation remains the blocker
+
+Response hooks do not solve ID collision. Without a supported object-manager
+reservation, a ghost helper cannot be considered production-safe. At minimum,
+all host vdev creation/destruction and helper lifecycle would need one shared
+allocator/lock and a reservation visible to the real allocator. The pinned
+source exposes no simple public “reserve this ID without a vdev object” flow.
+This is the strongest reason to prefer a real helper.
+
+## 9. Paths that should not be pursued first
+
+### 9.1 `WMI_PDEV_FRAME_INJECT_CMDID`
+
+Despite its name, the pinned host ABI does not carry an arbitrary frame buffer.
+`wmi_host_injector_frame_params` contains only vdev ID, enable, predefined frame
+type, period, duration, bandwidth, and destination MAC. It configures periodic
+firmware-generated injector frames; it is not a general radiotap/raw-frame TX
+path.
+
+### 9.2 `WMI_OFFCHAN_DATA_TX_SEND_CMDID`
+
+The wrapper and command encoder exist, but the pinned tree has no caller and no
+registered completion handler for it. The extraction function is only an ops
+pointer declaration. The encoder also ignores DMA-map failure and fails to
+unmap on later command failure. Its existence does not prove `peach-v2`
+firmware support or suitability for raw injection. It likely requires a real
+vdev/peer/remain-on-channel lifecycle.
+
+Do not expand to data frames until management injection has correct lifecycle,
+completion, and OTA evidence.
+
+### 9.3 QoS-null, packet capture, or `dev_queue_xmit()` alone
+
+- QoS-null WMI sends a specific firmware construct, not arbitrary frames.
+- packet-capture components observe RX/TX already handled by the datapath; they
+  do not create a raw injection route.
+- `dev_queue_xmit()` only reaches the driver's `ndo_start_xmit`; it cannot make
+  an unsupported firmware vdev/path transmit.
+
+### 9.4 More sleeps or a longer reaper timeout
+
+Longer sleeps merely make races less frequent. A 30-second DMA reaper is still
+unsafe if firmware owns the mapping. Only an event or a proven quiescence/reset
+boundary changes ownership.
+
+## 10. Review of the Loukious SM8150 commit
+
+Reference supplied by the user:
+`Loukious/android_kernel_xiaomi_sm8150@65c6a05ecd9b25ebf0742d39987c6a8a042227f1`.
+
+Useful ideas:
+
+- confirms one experimental family of patches used a helper STA and direct WMI
+  management TX;
+- points to the relevant WMI command and completion hook;
+- highlights source-peer matching as a possible firmware gate;
+- demonstrates the need to tear a helper down before monitor teardown.
+
+It is **not a gold-standard implementation** for OnePlus 13:
+
+- it targets an SM8150 kernel tree, not the pinned SM8750/`peach-v2` stack;
+- it is a 45-file, 11,825-line change with many unrelated/testing additions;
+- its helper uses fixed sleeps and an unreserved firmware-only vdev ID;
+- its descriptor allocator has the same unaligned-base/mask bug;
+- it states that firmware never completes helper TX and then unmaps/frees
+  DMA-owned buffers after two seconds, which violates DMA lifetime rules;
+- comments alternate between “hidden AP” and actual STA behavior and include
+  reverse-engineered firmware-symbol assertions that are not portable evidence.
+
+Use it as a hypothesis source only. Do not copy its reaper, allocator, or
+lifecycle.
+
+## 11. Future implementation map
+
+No edits are requested now. If another agent implements the research, likely
+touch points are:
+
+| Area | File/function | Purpose |
+|---|---|---|
+| monitor netdev TX | `qcacld-3.0/core/hdd/src/wlan_hdd_main.c`, `wlan_mon_drv_ops` | add safe `ndo_start_xmit` |
+| radiotap parsing | new small HDD helper or existing injection file | bounded parse and explicit supported fields |
+| stock-path submission | WMA helper near `wma_mgmt_unified_cmd_send` or a converged mgmt helper | resolve real vdev/self-peer and call `wlan_mgmt_txrx_mgmt_frame_tx` |
+| completion/status | one WMA-owned callback or existing WMA completion instrumentation | count status and free once |
+| monitor channel gate | `wlan_hdd_set_mon_chan` | enable TX only after successful real channel transition |
+| ghost response hooks, only if needed | `target_if_vdev_mgr_rx_ops.c`, `wma_dev_if.c` | consume exact helper lifecycle events |
+| build integration | `wlan_qcacld3_modules.bzl` and current patch generation | compile only the selected design |
+
+Avoid a large framework in the first build. The first patch should answer one
+question: **Can the real monitor vdev submit one peer-matching management frame
+through the stock management pipeline and produce a completion/OTA frame?**
+
+## 12. Required instrumentation
+
+Use bounded counters and rate-limited logs, not a log per high-rate frame.
+
+Capability/lifecycle once per session:
+
+- source/build revision and injection design (`real-monitor`, `real-helper`, or
+  `ghost-helper`);
+- `wmi_service_mgmt_tx_wmi`;
+- `wmi_service_peer_create_conf`;
+- `wmi_service_sync_delete_cmds`;
+- monitor/helper vdev ID, WMI type/subtype, host state, MAC, actual channel and
+  width;
+- peer lookup success and peer MAC;
+- every lifecycle command send result and response status/latency;
+- SSR/recovery generation.
+
+TX counters:
+
+```text
+accepted
+malformed_radiotap
+unsupported_radiotap
+unsupported_frame_type
+channel_not_ready
+peer_missing
+descriptor_exhausted
+wmi_submit_failed
+completion_ok
+completion_discard
+completion_no_ack
+completion_unknown
+completion_missing
+ota_verified (userspace test result, not a kernel guess)
+queue_stops / queue_wakes
+quarantined_dma_buffers
+```
+
+Do not increment `tx_packets` merely because WMI accepted a command. Count
+“submitted” separately from “completed”; OTA verification remains external.
+
+## 13. On-device test matrix
+
+Use an independent adapter placed close to the phone, locked to the exact
+channel/width, with capture timestamps. Start at one frame per second.
+
+### Gate A: stock monitor lifecycle
+
+1. Load `qca_cld3_peach_v2.ko con_mode=4`.
+2. Set channel 1, 20 MHz through the supported `iw` operation.
+3. Require successful VDEV_START and log actual bss/des channel.
+4. Verify monitor self-peer exists in objmgr/DP and record its MAC.
+5. Do not create a helper yet.
+
+### Gate B: real-monitor TX proof
+
+Run these one at a time:
+
+1. one valid broadcast probe request, SA = monitor self MAC;
+2. one valid beacon, SA/BSSID = monitor self MAC;
+3. one action frame with a known receiver;
+4. repeat the probe/beacon with a different source address.
+
+For every frame correlate:
+
+- userspace send result;
+- driver submission result and descriptor;
+- firmware completion status;
+- independent capture and actual frame bytes;
+- CNSS/WMI/SMMU logs.
+
+Repeat on channel 36 at 20 MHz only after channel 1 is stable.
+
+### Gate C: lifecycle robustness
+
+After a path produces OTA frames:
+
+- 100 frames at 1/s, then 10/s, then 100/s;
+- stop interface while one frame is in flight;
+- channel 1 -> 36 -> 1 while TX is idle, then while queued;
+- 100 interface down/up cycles;
+- 20 module unload/reload cycles if the platform safely supports it;
+- trigger the supported firmware recovery test and verify no old completion is
+  matched to a new descriptor/generation;
+- check that all descriptors, peer refs, DMA mappings, queues, vdev IDs, and
+  wake locks return to baseline.
+
+Do not advance the rate after a missing completion, negative counter, unknown
+descriptor, SMMU fault, WMI timeout, or recovery.
+
+## 14. Acceptance criteria
+
+A build should be called “management-frame injection working” only when all are
+true:
+
+- the monitor channel operation succeeds through the normal state machine;
+- at least probe request, beacon, and action management subtypes are captured
+  OTA on 2.4 and 5 GHz 20 MHz;
+- completion status and external capture correlate over repeated tests;
+- the stated SA/BSSID contract is enforced (arbitrary or self-MAC-only);
+- no buffer is timer-freed while firmware may own its DMA mapping;
+- no duplicate/private descriptor ambiguity exists;
+- interface stop/channel change/reload drain or quarantine safely;
+- no leaked host or firmware vdev/peer/descriptor remains;
+- no CNSS recovery, WMI timeout, SMMU fault, or kernel warning occurs in the
+  stress matrix;
+- unsupported radiotap fields, frame types, bands, and widths fail explicitly.
+
+Passing compilation or seeing `send()` return success is not an acceptance
+criterion.
+
+## 15. Open questions that only device evidence can answer
+
+1. Does `peach-v2` firmware accept `WMI_MGMT_TX_SEND` on the real monitor vdev?
+2. What completion status is returned for the current missing beacon?
+3. Does matching beacon/probe SA to the monitor/helper self-peer change it?
+4. Does firmware emit management completions for a ghost STARTED STA vdev?
+5. Which service bits are actually advertised on this firmware build?
+6. Can a real P2P-device vdev start alongside standalone monitor without policy
+   rejection or firmware assert?
+7. Does successful STOP/DELETE guarantee outstanding management DMA is no
+   longer referenced on this target?
+8. Which fields (sequence, duration, rate, FCS) does firmware rewrite?
+
+Do not encode answers to these as comments until a log/capture establishes
+them.
+
+## 16. Primary references
+
+Pinned OnePlus/Qualcomm source:
+
+- [OnePlus SM8750 WLAN tree at the exact pinned revision](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/tree/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan)
+- [`send_mgmt_cmd_tlv`: mapping, physical address, send-failure unmap](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/wmi/src/wmi_unified_tlv.c#L5244-L5355)
+- [`wmi_mgmt_params`: pinned 16-bit descriptor API](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h#L1902-L1964)
+- [Stock management descriptor allocation](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/umac/cmn_services/mgmt_txrx/core/src/wlan_mgmt_txrx_main.c#L31-L85)
+- [The pinned qcacld default of 64 management descriptors](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/configs/config_to_feature.h#L2572-L2576)
+- [Stock management submit/ownership path](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/umac/cmn_services/mgmt_txrx/dispatcher/src/wlan_mgmt_txrx_utils_api.c#L458-L574)
+- [Stock descriptor completion and bounds checks](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/umac/cmn_services/mgmt_txrx/dispatcher/src/wlan_mgmt_txrx_tgt_api.c#L1625-L1730)
+- [Vdev response handlers and their timer/object requirements](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/target_if/mlme/vdev_mgr/src/target_if_vdev_mgr_rx_ops.c#L384-L600)
+- [Object-manager vdev ID allocation/reservation](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/umac/cmn_services/obj_mgr/src/wlan_objmgr_psoc_obj.c#L879-L914)
+- [Monitor/P2P vdev type mapping](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/components/mlme/core/src/wlan_mlme_vdev_mgr_interface.c#L1504-L1568)
+- [Monitor and P2P-device self-peer rules](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/components/mlme/core/src/wlan_mlme_vdev_mgr_interface.c#L2274-L2287)
+- [Normal WMA self-peer creation](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_dev_if.c#L2942-L2995)
+- [Monitor link registration using the created self-peer](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c#L1315-L1362)
+- [Peer-create confirmation and peer-delete response handlers](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_dev_if.c#L3667-L3911)
+- [Peer-create service-bit gating](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_main.c#L6538-L6553)
+- [Synchronous peer-delete service handling](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_dev_if.c#L527-L585)
+- [Normal management peer lookup and submission](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_data.c#L2700-L2755)
+- [Management completion status, unmap, and dispatch](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_mgmt.c#L3020-L3210)
+- [Management completion event registration](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qcacld-3.0/core/wma/src/wma_main.c#L7043-L7070)
+- [`WMI_PDEV_FRAME_INJECT_CMDID` host parameter shape](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/blob/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/wlan/qca-wifi-host-cmn/wmi/inc/wmi_unified_param.h#L9216-L9235)
+
+Kernel driver rules:
+
+- [Linux dynamic DMA mapping guide](https://docs.kernel.org/core-api/dma-api-howto.html)
+- [Linux netdev synchronization and `ndo_start_xmit` contract](https://docs.kernel.org/networking/netdevices.html)
+- [Linux TX queue and stop/quiescence guidance](https://docs.kernel.org/networking/driver.html)
+- [Linux radiotap parsing guidance](https://docs.kernel.org/networking/radiotap-headers.html)
+- [mac80211 injection/radiotap semantics](https://docs.kernel.org/networking/mac80211-injection.html)
+
+Third-party comparison, not authority:
+
+- [Loukious SM8150 injection commit](https://github.com/Loukious/android_kernel_xiaomi_sm8150/commit/65c6a05ecd9b25ebf0742d39987c6a8a042227f1)
+- [Its broken descriptor allocator](https://github.com/Loukious/android_kernel_xiaomi_sm8150/blob/65c6a05ecd9b25ebf0742d39987c6a8a042227f1/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c#L568-L584)
+- [Its unsafe timeout reaper](https://github.com/Loukious/android_kernel_xiaomi_sm8150/blob/65c6a05ecd9b25ebf0742d39987c6a8a042227f1/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c#L918-L979)
+
+## 17. Handoff checklist for the next agent
+
+- [ ] Read this document and the exact pinned source before editing.
+- [ ] Do not preserve the current timeout reaper or descriptor allocator.
+- [ ] Make the first patch a real-monitor/stock-management-path proof.
+- [ ] Log service bits, exact peer, submission status, completion status, and
+      actual channel.
+- [ ] Use a matching-SA frame first, then test arbitrary SA separately.
+- [ ] Require an independent OTA capture.
+- [ ] Keep DMA ownership explicit on every return and teardown path.
+- [ ] Add a helper only after monitor-vdev rejection is demonstrated.
+- [ ] Prefer a real object-manager helper; treat a ghost helper as recovery-
+      sensitive experimental code.
+- [ ] Run `./validate_workflow.sh` after future patch/workflow changes and do not
+      trigger a live build until static validation passes.
