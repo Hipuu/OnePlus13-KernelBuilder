@@ -52,6 +52,9 @@ build_artifacts/
 .patch_work/
 .tmp/
 
+# Agent research handoffs (not build artifacts)
+*RESEARCH.md
+
 # Local module/kernel artifact dumps
 kernel_modules_*.zip/
 ddkart/
