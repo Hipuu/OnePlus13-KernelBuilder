@@ -6,6 +6,8 @@
  #include "wlan_mlme_main.h"
 +#include <linux/ieee80211.h>
 +#include "wlan_mgmt_txrx_utils_api.h"
++#include "wmi_unified_param.h"
++#include "wlan_objmgr_vdev_obj.h"
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
@@ -157,8 +159,7 @@
 +	struct hdd_context *hdd_ctx;
 +	struct ieee80211_hdr *hdr;
 +	struct wlan_objmgr_peer *peer;
-+	struct wlan_objmgr_pdev *pdev;
-+	struct mgmt_txrx_desc_param mgmt_params = {0};
++	struct wmi_mgmt_params mgmt_params = {0};
 +	struct wlan_channel channel = {0};
 +	QDF_STATUS status;
 +	int ctx_ret;
@@ -200,19 +201,19 @@
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
 +	    is_broadcast_ether_addr(hdr->addr1)) {
 +		ether_addr_copy(hdr->addr2,
-+				adapter->deflink->mac_addr.bytes);
++				adapter->deflink->link_addr.bytes);
 +	}
 +
 +	/* Resolve the monitor vdev's self-peer from objmgr */
-+	pdev = hdd_ctx->pdev;
-+	if (!pdev) {
-+		hdd_err("Injection: no pdev, dropping");
++	if (!adapter->deflink->vdev) {
++		hdd_err("Injection: no vdev for monitor adapter, dropping");
 +		goto drop;
 +	}
 +
-+	peer = wlan_objmgr_get_peer_by_mac_from_vdev(
-+			pdev, adapter->deflink->vdev_id,
-+			adapter->deflink->mac_addr, WLAN_OSIF_ID);
++	peer = wlan_objmgr_vdev_find_peer_by_mac(
++			adapter->deflink->vdev,
++			adapter->deflink->link_addr.bytes,
++			WLAN_OSIF_ID);
 +	if (!peer) {
 +		hdd_err("Injection: no self-peer for vdev %u, dropping",
 +			adapter->deflink->vdev_id);
@@ -224,10 +225,13 @@
 +		chanfreq = channel.ch_freq;
 +
 +	/* Fill management TX parameters */
++	mgmt_params.tx_frame = skb->data;
++	mgmt_params.frm_len = skb->len;
 +	mgmt_params.vdev_id = adapter->deflink->vdev_id;
 +	mgmt_params.chanfreq = chanfreq;
-+	mgmt_params.wait_for_ack = false;
-+	mgmt_params.dont_wait_for_ack = true;
++	mgmt_params.macaddr = adapter->deflink->link_addr.bytes;
++	mgmt_params.use_6mbps = false;
++	mgmt_params.tx_params_valid = false;
 +
 +	/*
 +	 * Submit through the stock management TX pipeline.
