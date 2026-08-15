@@ -303,7 +303,7 @@ new file mode 100644
 index 00000000..3f8c2d11
 --- /dev/null
 +++ b/core/wma/src/wma_frame_inject.c
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,656 @@
 +/*
 + * Copyright (c) 2024 The Linux Foundation. All rights reserved.
 + *
@@ -344,7 +344,9 @@ index 00000000..3f8c2d11
 +#include "qdf_nbuf.h"
 +#include "qdf_delayed_work.h"
 +#include "qdf_time.h"
++#include "qdf_atomic.h"
 +#include "cds_api.h"
++#include <linux/ieee80211.h>
 +
 +#define WMA_MON_INJECT_MAX_VDEV		(CFG_TGT_NUM_VDEV - 2)
 +#define WMA_MON_INJECT_MAX_INFLIGHT	64
@@ -379,11 +381,22 @@ index 00000000..3f8c2d11
 +	qdf_mutex_t lifecycle_lock;
 +	qdf_spinlock_t state_lock;
 +	struct wma_mon_inject_nbuf inflight[WMA_MON_INJECT_MAX_INFLIGHT];
++	qdf_atomic_t inflight_count;
 +	uint16_t next_desc_id;
 +	struct qdf_delayed_work reaper;
 +};
 +
 +static struct wma_mon_inject_ctx g_inj;
++
++/* ---- DMA unmap helper ---- */
++
++static void wma_mon_inject_unmap_nbuf(qdf_nbuf_t nbuf)
++{
++	void *qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
++
++	if (qdf_ctx && nbuf)
++		qdf_nbuf_unmap_single(qdf_ctx, nbuf, QDF_DMA_TO_DEVICE);
++}
 +
 +/* ---- descriptor helpers ---- */
 +
@@ -401,7 +414,7 @@ index 00000000..3f8c2d11
 +	g_inj.next_desc_id++;
 +	if ((g_inj.next_desc_id & ~WMA_MON_INJECT_DESC_ID_MASK) !=
 +	    WMA_MON_INJECT_DESC_ID_BASE)
-+		g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
++		g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE + 1;
 +
 +	return id;
 +}
@@ -434,6 +447,7 @@ index 00000000..3f8c2d11
 +			n->nbuf = NULL;
 +			n->valid = false;
 +			qdf_spin_unlock_bh(&g_inj.state_lock);
++			wma_mon_inject_unmap_nbuf(buf);
 +			qdf_nbuf_free(buf);
 +			qdf_spin_lock_bh(&g_inj.state_lock);
 +			reaped++;
@@ -442,8 +456,10 @@ index 00000000..3f8c2d11
 +
 +	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
-+	if (reaped)
++	if (reaped) {
++		qdf_atomic_sub(reaped, &g_inj.inflight_count);
 +		wma_info("Injection reaper: freed %u stale nbufs", reaped);
++	}
 +
 +	/* Re-arm */
 +	if (g_inj.initialized && g_inj.state == WMA_MON_INJECT_UP)
@@ -467,10 +483,14 @@ index 00000000..3f8c2d11
 +		g_inj.inflight[i].nbuf = NULL;
 +		g_inj.inflight[i].valid = false;
 +	}
++	if (count)
++		qdf_atomic_sub(count, &g_inj.inflight_count);
 +	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
-+	for (i = 0; i < count; i++)
++	for (i = 0; i < count; i++) {
++		wma_mon_inject_unmap_nbuf(pending[i]);
 +		qdf_nbuf_free(pending[i]);
++	}
 +}
 +
 +/* ---- TX completion ---- */
@@ -498,9 +518,11 @@ index 00000000..3f8c2d11
 +	}
 +	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
-+	if (nbuf)
++	if (nbuf) {
++		qdf_atomic_dec(&g_inj.inflight_count);
++		wma_mon_inject_unmap_nbuf(nbuf);
 +		qdf_nbuf_free(nbuf);
-+	else
++	} else
 +		wma_debug("Injection: completion for unknown desc_id=%u",
 +			  desc_id);
 +
@@ -518,6 +540,13 @@ index 00000000..3f8c2d11
 +	qdf_mem_copy(dst, monitor_mac, QDF_MAC_ADDR_SIZE);
 +	dst[0] |= 0x02;   /* locally-administered bit */
 +	dst[5] ^= 0x01;   /* flip last bit for uniqueness */
++
++	/* Guard: if the derived MAC still equals the monitor MAC (e.g.
++	 * monitor already had locally-administered + odd last byte),
++	 * flip bit 1 instead to guarantee a distinct address.
++	 */
++	if (!qdf_mem_cmp(dst, monitor_mac, QDF_MAC_ADDR_SIZE))
++		dst[5] ^= 0x02;
 +}
 +
 +/* ---- find free firmware vdev slot ---- */
@@ -724,7 +753,7 @@ index 00000000..3f8c2d11
 +	/* Helper is ready */
 +	qdf_spin_lock_bh(&g_inj.state_lock);
 +	g_inj.state = WMA_MON_INJECT_UP;
-+	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
++	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE + 1;
 +	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
 +	/* Start the reaper */
@@ -790,7 +819,8 @@ index 00000000..3f8c2d11
 +		return status;
 +	}
 +
-+	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE;
++	g_inj.next_desc_id = WMA_MON_INJECT_DESC_ID_BASE + 1;
++	qdf_atomic_set(&g_inj.inflight_count, 0);
 +	g_inj.state = WMA_MON_INJECT_DOWN;
 +	g_inj.initialized = true;
 +	return QDF_STATUS_SUCCESS;
@@ -828,6 +858,21 @@ index 00000000..3f8c2d11
 +	if (!g_inj.initialized || !wma || !wma->wmi_handle ||
 +	    !qdf_ctx || !skb)
 +		return -EINVAL;
++
++	/* Verify firmware supports WMI management TX path */
++	if (!wmi_service_enabled(wma->wmi_handle,
++				 wmi_service_mgmt_tx_wmi)) {
++		wma_err("Injection: firmware does not support WMI mgmt TX");
++		return -EOPNOTSUPP;
++	}
++
++	/* Backpressure: reject if too many frames are in-flight */
++	if (qdf_atomic_read(&g_inj.inflight_count) >=
++	    WMA_MON_INJECT_MAX_INFLIGHT) {
++		wma_warn("Injection: inflight high-water reached (%u)",
++			 qdf_atomic_read(&g_inj.inflight_count));
++		return -EBUSY;
++	}
 +
 +	/* Allocate WMI buffer and copy frame data */
 +	wmi_buf = qdf_nbuf_alloc(NULL, skb->len, 0, 0, false);
@@ -875,6 +920,21 @@ index 00000000..3f8c2d11
 +
 +	qdf_spin_unlock_bh(&g_inj.state_lock);
 +
++	/*
++	 * Probe-request SA normalization: firmware drops broadcast probe
++	 * requests whose SA does not match a known peer.  Overwrite SA
++	 * (offset 10) with the helper vdev MAC so the self-peer matches.
++	 */
++	if (skb->len >= 24) {
++		struct ieee80211_hdr *wh = (struct ieee80211_hdr *)frame_data;
++
++		if (ieee80211_is_probe_req(wh->frame_control) &&
++		    is_broadcast_ether_addr(wh->addr1)) {
++			qdf_mem_copy(frame_data + 10, g_inj.mac_addr,
++				     QDF_MAC_ADDR_SIZE);
++		}
++	}
++
 +	/* Fill WMI management parameters */
 +	mgmt.tx_frame = wmi_buf;
 +	mgmt.pdata = frame_data;
@@ -897,6 +957,7 @@ index 00000000..3f8c2d11
 +		return -EIO;
 +	}
 +
++	qdf_atomic_inc(&g_inj.inflight_count);
 +	return 0;
 +}
 diff --git a/core/wma/src/wma_main.c b/core/wma/src/wma_main.c
