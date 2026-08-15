@@ -45,3 +45,13 @@ secrets/
 .env
 .tmp_research/
 build_artifacts/
+
+# Codex / agent work directories
+.codex/
+.patch_verify/
+.patch_work/
+.tmp/
+
+# Local module/kernel artifact dumps
+kernel_modules_*.zip/
+ddkart/
