@@ -1,7 +1,5 @@
-diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
-index dcdaf2f6..8e3a7c12 100755
---- a/core/hdd/src/wlan_hdd_main.c
-+++ b/core/hdd/src/wlan_hdd_main.c
+--- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
++++ b/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:50:31.069449352 +0700
 @@ -156,6 +156,8 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
@@ -11,11 +9,11 @@ index dcdaf2f6..8e3a7c12 100755
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3451,102 @@ static void hdd_mon_turn_off_ps_and_wow(struct hdd_context *hdd_ctx)
+@@ -3449,6 +3451,102 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
-+/* Forward declarations — always visible (referenced outside #ifdef). */
++/* Forward declarations â always visible (referenced outside #ifdef). */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
 +
 +/* Always declare: referenced from suspend/resume paths and injection functions. */
@@ -114,7 +112,7 @@ index dcdaf2f6..8e3a7c12 100755
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3621,19 @@ static int __hdd_mon_open(struct net_device *dev)
+@@ -3523,6 +3621,19 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -132,9 +130,9 @@ index dcdaf2f6..8e3a7c12 100755
 +#endif
 +
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
- 						    PLD_BUS_WIDTH_VERY_HIGH);
+ 						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +5986,11 @@ int hdd_stop_no_trans(struct net_device *dev)
+@@ -5875,6 +5986,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -146,7 +144,7 @@ index dcdaf2f6..8e3a7c12 100755
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7422,123 @@ static const struct net_device_ops wlan_drv_ops = {
+@@ -7306,10 +7422,123 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -239,10 +237,10 @@ index dcdaf2f6..8e3a7c12 100755
 +	 */
 +	status = wlan_mgmt_txrx_mgmt_frame_tx(
 +			peer,
-+			NULL,           /* context */
++			NULL,		   /* context */
 +			skb,
-+			NULL,           /* no download callback */
-+			NULL,           /* no OTA callback */
++			NULL,		   /* no download callback */
++			NULL,		   /* no OTA callback */
 +			WLAN_OSIF_ID,
 +			&mgmt_params);
 +
