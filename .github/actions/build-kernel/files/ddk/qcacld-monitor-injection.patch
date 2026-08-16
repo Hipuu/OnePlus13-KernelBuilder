@@ -14,7 +14,7 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,325 @@
+@@ -3449,6 +3456,452 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -39,18 +39,37 @@
 +
 +/*
 + * Global injection context.  The spinlock protects ready, chanfreq,
-+ * vdev_id, and helper_mac.  The WMI handle is read-only after init.
++ * vdev_id, helper_mac, and the TX slot table.  The WMI handle is
++ * re-fetched from WMA on every TX (never cached across SSR).
 + */
++
++#define HDD_MON_INJECT_SLOTS	32
++#define HDD_MON_INJECT_DESC_BASE	0xF000
++#define HDD_MON_INJECT_REAP_MS	3000
++#define HDD_MON_INJECT_AGE_MS	2000
++
++struct hdd_mon_inject_slot {
++	bool in_use;
++	qdf_nbuf_t nbuf;
++	unsigned long submit_jiffies;
++};
++
 +struct hdd_mon_inject_ctx {
 +	bool ready;
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
 +	uint32_t chanfreq;
-+	struct wmi_unified *wmi_handle;
 +	qdf_spinlock_t lock;
++	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
++	uint32_t next_slot;
++	uint32_t inflight;
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
++
++/* Reaper: periodically unmap + free nbufs the firmware never completed. */
++static void hdd_mon_inject_reaper(struct work_struct *work);
++static DECLARE_DELAYED_WORK(hdd_mon_inject_reaper_dw, hdd_mon_inject_reaper);
 +
 +/* Always declare: referenced from suspend/resume paths and injection functions. */
 +static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
@@ -87,6 +106,103 @@
 +
 +	skb_pull(skb, rtap_len);
 +	return 0;
++}
++
++/*
++ * Unmap + free an injection nbuf.  WMI mapped it on submit (LL path);
++ * the stock mgmt_txrx completion path never sees our nbufs because we
++ * bypass the descriptor pool.  The firmware also never sends TX
++ * completion events for the ghost STA helper vdev, so we must reclaim
++ * every successfully submitted buffer ourselves.
++ */
++static void hdd_mon_inject_unmap_free(qdf_nbuf_t nbuf)
++{
++	void *qdf_ctx;
++
++	if (!nbuf)
++		return;
++
++	qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
++	if (qdf_ctx)
++		qdf_nbuf_unmap_single(qdf_ctx, nbuf, QDF_DMA_TO_DEVICE);
++	qdf_nbuf_free(nbuf);
++}
++
++/* Stash nbuf in the next free slot.  Caller holds g_inj.lock. */
++static int hdd_mon_inject_slot_put(qdf_nbuf_t nbuf)
++{
++	uint32_t i, idx;
++
++	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
++		idx = (g_inj.next_slot + i) % HDD_MON_INJECT_SLOTS;
++		if (!g_inj.slots[idx].in_use) {
++			g_inj.slots[idx].in_use = true;
++			g_inj.slots[idx].nbuf = nbuf;
++			g_inj.slots[idx].submit_jiffies = jiffies;
++			g_inj.next_slot = (idx + 1) % HDD_MON_INJECT_SLOTS;
++			g_inj.inflight++;
++			return (int)(HDD_MON_INJECT_DESC_BASE + idx);
++		}
++	}
++	return -1;
++}
++
++/* Flush every in-flight slot (teardown / SSR path). */
++static void hdd_mon_inject_slots_flush(void)
++{
++	uint32_t i;
++	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
++	uint32_t count = 0;
++
++	qdf_spin_lock_bh(&g_inj.lock);
++	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
++		if (g_inj.slots[i].in_use) {
++			nbufs[count++] = g_inj.slots[i].nbuf;
++			g_inj.slots[i].in_use = false;
++			g_inj.slots[i].nbuf = NULL;
++		}
++	}
++	g_inj.inflight = 0;
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	for (i = 0; i < count; i++)
++		hdd_mon_inject_unmap_free(nbufs[i]);
++}
++
++/*
++ * Reaper work: free nbufs older than HDD_MON_INJECT_AGE_MS.  Firmware
++ * never completes TX on the ghost STA helper, so without this the
++ * DMA-mapped buffers accumulate until SMMU faults / OOM.
++ */
++static void hdd_mon_inject_reaper(struct work_struct *work)
++{
++	uint32_t i;
++	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
++	uint32_t count = 0;
++	unsigned long age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
++
++	qdf_spin_lock_bh(&g_inj.lock);
++	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
++		if (g_inj.slots[i].in_use &&
++		    time_after(jiffies, g_inj.slots[i].submit_jiffies + age)) {
++			nbufs[count++] = g_inj.slots[i].nbuf;
++			g_inj.slots[i].in_use = false;
++			g_inj.slots[i].nbuf = NULL;
++			if (g_inj.inflight)
++				g_inj.inflight--;
++		}
++	}
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	for (i = 0; i < count; i++)
++		hdd_mon_inject_unmap_free(nbufs[i]);
++
++	/* Reschedule while helper is ready. */
++	qdf_spin_lock_bh(&g_inj.lock);
++	if (g_inj.ready)
++		schedule_delayed_work(&hdd_mon_inject_reaper_dw,
++				      msecs_to_jiffies(HDD_MON_INJECT_REAP_MS));
++	qdf_spin_unlock_bh(&g_inj.lock);
 +}
 +
 +/*
@@ -135,7 +251,6 @@
 +	g_inj.helper_mac[QDF_MAC_ADDR_SIZE - 1]++;
 +
 +	g_inj.vdev_id = vdev_id;
-+	g_inj.wmi_handle = wmi;
 +	g_inj.chanfreq = chanfreq;
 +
 +	/* WMI_VDEV_CREATE_CMDID: type=STA, subtype=0 */
@@ -231,10 +346,13 @@
 +	hdd_info("Injection: VDEV_UP sent (vdev %u)", vdev_id);
 +	msleep(100);
 +
-+	/* Mark helper as ready for TX */
++	/* Mark helper as ready for TX and start the reaper */
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	g_inj.ready = true;
 +	qdf_spin_unlock_bh(&g_inj.lock);
++
++	schedule_delayed_work(&hdd_mon_inject_reaper_dw,
++			      msecs_to_jiffies(HDD_MON_INJECT_REAP_MS));
 +
 +	hdd_info("Injection: ghost STA helper ready (vdev %u, mac %pM, %u MHz)",
 +		 vdev_id, g_inj.helper_mac, chanfreq);
@@ -246,18 +364,25 @@
 + */
 +static void hdd_mon_inject_helper_teardown(void)
 +{
++	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
 +	uint8_t vdev_id;
 +
-+	/* Block new TX first */
++	/* Stop reaper and block new TX */
++	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
++
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	g_inj.ready = false;
 +	vdev_id = g_inj.vdev_id;
-+	wmi = g_inj.wmi_handle;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
-+	if (!wmi)
++	/* Flush any in-flight nbufs (DMA unmap + free) */
++	hdd_mon_inject_slots_flush();
++
++	wma = cds_get_context(QDF_MODULE_ID_WMA);
++	if (!wma || !wma->wmi_handle)
 +		return;
++	wmi = wma->wmi_handle;
 +
 +	/* WMI_PEER_DELETE_CMDID */
 +	{
@@ -329,9 +454,11 @@
 +
 +/* Stub: forward-declared above; defined here for the !FEATURE case. */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work) {}
++static void hdd_mon_inject_reaper(struct work_struct *work) {}
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
 +	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
++	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
 +	hdd_mon_inject_tx_enable_adapter = NULL;
 +}
 +
@@ -379,7 +506,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,9 +7562,152 @@
+@@ -7306,9 +7562,166 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -494,30 +621,44 @@
 +	mgmt.macaddr = helper_mac;
 +	mgmt.use_6mbps = 0;
 +	mgmt.tx_params_valid = false;
++	mgmt.desc_id = 0;
 +
 +	/*
 +	 * Submit directly via wmi_mgmt_unified_cmd_send().  This bypasses
 +	 * wlan_mgmt_txrx and the objmgr peer lookup, routing the frame
 +	 * straight to the firmware on the helper vdev.
 +	 *
-+	 * On success, the WMI layer temporarily owns the nbuf (it will
-+	 * DMA-map it, send the command, and unmap on local failure).
-+	 * The management completion path eventually frees the nbuf.
-+	 * On failure, we must free the nbuf ourselves.
++	 * WMI DMA-maps tx_frame internally on LL (caller must NOT pre-map).
++	 * On success, WMI owns the DMA mapping but NOT the nbuf itself.
++	 * The firmware never sends TX completion for the ghost STA vdev,
++	 * so we must track the nbuf ourselves and reclaim it via the
++	 * reaper (which unmaps + frees after HDD_MON_INJECT_AGE_MS).
 +	 */
 +	status = wmi_mgmt_unified_cmd_send(wmi, &mgmt);
 +
 +	if (QDF_IS_STATUS_SUCCESS(status)) {
++		int slot_id;
++
++		qdf_spin_lock_bh(&g_inj.lock);
++		slot_id = hdd_mon_inject_slot_put(nbuf);
++		qdf_spin_unlock_bh(&g_inj.lock);
++
++		if (slot_id < 0) {
++			hdd_err("Injection: no free TX slot, reaping nbuf immediately");
++			hdd_mon_inject_unmap_free(nbuf);
++		}
++
 +		dev->stats.tx_packets++;
 +		dev->stats.tx_bytes += skb->len;
-+		hdd_debug("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes)",
-+			  vdev_id, chanfreq, (uint32_t)skb->len);
++		hdd_debug("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes, inflight %u)",
++			  vdev_id, chanfreq, (uint32_t)skb->len, g_inj.inflight);
 +		/* Free the original skb — we copied it into nbuf */
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
 +	hdd_err("Injection: wmi_mgmt_unified_cmd_send failed (%d)", status);
++	/* WMI already unmapped on its failure path; just free the nbuf */
 +	qdf_nbuf_free(nbuf);
 +
 +drop:
