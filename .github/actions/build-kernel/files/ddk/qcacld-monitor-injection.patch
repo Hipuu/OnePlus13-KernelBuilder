@@ -226,11 +226,11 @@
 +
 +	/* Fill management TX parameters */
 +	mgmt_params.tx_frame = skb->data;
-+	mgmt_params.frm_len = skb->len;
++	mgmt_params.frm_len = (uint16_t)skb->len;
 +	mgmt_params.vdev_id = adapter->deflink->vdev_id;
-+	mgmt_params.chanfreq = chanfreq;
++	mgmt_params.chanfreq = (uint16_t)chanfreq;
 +	mgmt_params.macaddr = adapter->deflink->link_addr.bytes;
-+	mgmt_params.use_6mbps = false;
++	mgmt_params.use_6mbps = 0;
 +	mgmt_params.tx_params_valid = false;
 +
 +	/*
@@ -245,7 +245,7 @@
 +			skb,
 +			NULL,		   /* no download callback */
 +			NULL,		   /* no OTA callback */
-+			WLAN_OSIF_ID,
++			WLAN_UMAC_COMP_MGMT_TXRX,
 +			&mgmt_params);
 +
 +	wlan_objmgr_peer_release_ref(peer,
