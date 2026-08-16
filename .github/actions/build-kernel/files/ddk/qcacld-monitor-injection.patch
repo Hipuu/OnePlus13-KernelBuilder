@@ -472,21 +472,24 @@
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
-@@ -11425,6 +11698,17 @@
+@@ -11425,6 +11698,20 @@
  	}
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
++	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		if (adapter->deflink && adapter->deflink->vdev) {
++			struct wlan_channel *ch = wlan_vdev_mlme_get_des_chan(
++					adapter->deflink->vdev);
++			if (ch && ch->ch_freq)
++				g_inj.chanfreq = ch->ch_freq;
++		}
++		qdf_spin_unlock_bh(&g_inj.lock);
++		hdd_info("Injection: channel updated to %u MHz",
++			 g_inj.chanfreq);
++	}
++#endif
  		return qdf_status_to_os_return(status);
  }
-+#ifdef FEATURE_MONITOR_MODE_SUPPORT
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	if (adapter->deflink && adapter->deflink->vdev) {
-+		struct wlan_channel *ch = wlan_vdev_mlme_get_des_chan(
-+				adapter->deflink->vdev);
-+		if (ch && ch->ch_freq)
-+			g_inj.chanfreq = ch->ch_freq;
-+	}
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+	hdd_info("Injection: channel updated to %u MHz", g_inj.chanfreq);
-+#endif
  #endif
  
  #if defined MSM_PLATFORM && (LINUX_VERSION_CODE <= KERNEL_VERSION(4, 19, 0))
