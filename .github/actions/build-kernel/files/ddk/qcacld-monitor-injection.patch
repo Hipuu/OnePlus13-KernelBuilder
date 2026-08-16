@@ -146,7 +146,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7424,125 @@
+@@ -7306,10 +7424,126 @@
  };
 
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
