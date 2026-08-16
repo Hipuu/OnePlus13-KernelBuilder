@@ -248,7 +248,8 @@
 +			WLAN_OSIF_ID,
 +			&mgmt_params);
 +
-+	wlan_objmgr_peer_release_ref(peer, WLAN_OSIF_ID);
++	wlan_objmgr_peer_release_ref(peer,
++			(wlan_objmgr_ref_dbgid)WLAN_OSIF_ID);
 +
 +	if (QDF_IS_STATUS_SUCCESS(status)) {
 +		dev->stats.tx_packets++;
