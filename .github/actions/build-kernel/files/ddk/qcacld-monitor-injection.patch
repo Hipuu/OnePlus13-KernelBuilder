@@ -14,7 +14,7 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,273 @@
+@@ -3449,6 +3456,308 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -194,6 +194,41 @@
 +		return status;
 +	}
 +	hdd_info("Injection: PEER_CREATE sent (vdev %u)", vdev_id);
++	msleep(100);
++
++	/*
++	 * WMI_VDEV_UP_CMDID: bring the helper vdev to UP state so the
++	 * firmware enables its mgmt TX ring.  Without VDEV_UP, the
++	 * firmware rejects WMI_MGMT_TX_SEND with QDF_STATUS_E_FAILURE.
++	 * Use the helper MAC as the BSSID (self-BSS for a lone STA).
++	 */
++	{
++		struct vdev_up_params vup = {0};
++		vup.vdev_id = vdev_id;
++		vup.assoc_id = 0;
++
++		status = wmi_unified_vdev_up_send(wmi, g_inj.helper_mac, &vup);
++		if (QDF_IS_STATUS_ERROR(status)) {
++			hdd_err("Injection: VDEV_UP failed (%d)", status);
++			/* Unwind: delete peer, stop, delete vdev */
++			{
++				struct peer_delete_cmd_params pdel = {0};
++				pdel.vdev_id = vdev_id;
++				wmi_unified_peer_delete_send(wmi,
++						g_inj.helper_mac, &pdel);
++			}
++			msleep(100);
++			{
++				struct vdev_stop_params vstop = {0};
++				vstop.vdev_id = vdev_id;
++				wmi_unified_vdev_stop_send(wmi, &vstop);
++			}
++			msleep(100);
++			wmi_unified_vdev_delete_send(wmi, vdev_id);
++			return status;
++		}
++	}
++	hdd_info("Injection: VDEV_UP sent (vdev %u)", vdev_id);
 +	msleep(100);
 +
 +	/* Mark helper as ready for TX */
