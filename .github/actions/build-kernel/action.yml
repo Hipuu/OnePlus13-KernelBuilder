@@ -2260,16 +2260,12 @@ runs:
           echo "::error::patch applied but .ndo_start_xmit hook is missing"
           exit 1
         fi
-        if ! grep -q 'wlan_mgmt_txrx_mgmt_frame_tx' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
-          echo "::error::patch applied but stock mgmt TX pipeline call is missing"
+        if ! grep -q 'wmi_mgmt_unified_cmd_send' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but direct WMI mgmt TX call is missing"
           exit 1
         fi
-        if ! grep -q 'wlan_objmgr_vdev_find_peer_by_mac' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
-          echo "::error::patch applied but monitor self-peer lookup is missing"
-          exit 1
-        fi
-        if ! grep -q 'wlan_mgmt_txrx_utils_api.h' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
-          echo "::error::patch applied but wlan_mgmt_txrx_utils_api.h include is missing"
+        if ! grep -q 'g_inj' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but injection context struct is missing"
           exit 1
         fi
 

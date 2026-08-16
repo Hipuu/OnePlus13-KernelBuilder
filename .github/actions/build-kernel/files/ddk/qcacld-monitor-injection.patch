@@ -1,22 +1,55 @@
 --- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
-+++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 03:15:00.000000000 +0700
-@@ -156,6 +156,10 @@
++++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 08:00:00.000000000 +0700
+@@ -156,6 +156,12 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
 +#include <linux/ieee80211.h>
-+#include "wlan_mgmt_txrx_utils_api.h"
++#include "wmi_unified_api.h"
 +#include "wmi_unified_param.h"
 +#include "wlan_objmgr_vdev_obj.h"
++#include "wlan_vdev_mlme.h"
++#include "wma.h"
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3453,102 @@
+@@ -3449,6 +3455,265 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
-
+ 
++/*
++ * Ghost STA helper for management-frame injection on the monitor vdev.
++ *
++ * peach-v2 firmware crashes (SSR) when WMI_MGMT_TX_SEND targets the
++ * monitor vdev directly.  We work around this by creating a hidden STA
++ * vdev via direct WMI commands, VDEV_START-ing it on the monitor
++ * channel, and creating a self-peer — then submitting management frames
++ * through wmi_mgmt_unified_cmd_send() on that helper vdev.
++ *
++ * This bypasses objmgr/policy-manager entirely (which blocks virtual
++ * interface creation in monitor mode).  The helper vdev ID is not
++ * reserved in the psoc vdev_id_map, so it can collide with a
++ * concurrently-allocated real interface.  This is a known limitation.
++ */
++
 +/* Forward declarations — always visible (referenced outside #ifdef). */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
++static void hdd_mon_inject_stop(struct hdd_adapter *adapter);
++
++/*
++ * Global injection context.  The spinlock protects ready, chanfreq,
++ * vdev_id, and helper_mac.  The WMI handle is read-only after init.
++ */
++struct hdd_mon_inject_ctx {
++	bool ready;
++	uint8_t vdev_id;
++	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
++	uint32_t chanfreq;
++	struct wmi_unified *wmi_handle;
++	qdf_spinlock_t lock;
++};
++
++static struct hdd_mon_inject_ctx g_inj;
 +
 +/* Always declare: referenced from suspend/resume paths and injection functions. */
 +static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
@@ -55,34 +88,161 @@
 +	return 0;
 +}
 +
-+static bool hdd_mon_inject_get_channel(struct hdd_adapter *mon_adapter,
-+				       struct wlan_channel *channel)
++/*
++ * Create the ghost STA helper vdev.  Called after the monitor adapter
++ * is started (in __hdd_mon_open).  Must NOT run in atomic context.
++ */
++static QDF_STATUS hdd_mon_inject_helper_create(struct hdd_adapter *adapter,
++					       uint32_t chanfreq)
 +{
-+	struct wlan_objmgr_vdev *vdev;
-+	struct wlan_channel *source;
-+	bool valid = false;
++	tp_wma_handle wma;
++	struct wmi_unified *wmi;
++	struct vdev_create_params vcreate = {0};
++	struct vdev_start_params vstart = {0};
++	struct peer_create_params pcreate = {0};
++	QDF_STATUS status;
++	int i;
++	uint8_t vdev_id = WLAN_INVALID_VDEV_ID;
 +
-+	vdev = hdd_objmgr_get_vdev_by_user(mon_adapter->deflink, WLAN_OSIF_ID);
-+	if (!vdev)
-+		return false;
++	wma = cds_get_context(QDF_MODULE_ID_WMA);
++	if (!wma || !wma->wmi_handle) {
++		hdd_err("Injection: WMA/WMI handle unavailable");
++		return QDF_STATUS_E_FAILURE;
++	}
++	wmi = wma->wmi_handle;
 +
-+	source = wlan_vdev_mlme_get_bss_chan(vdev);
-+	if (!source || !source->ch_freq)
-+		source = wlan_vdev_mlme_get_des_chan(vdev);
-+
-+	if (source && source->ch_freq) {
-+		qdf_mem_copy(channel, source, sizeof(*channel));
-+		valid = true;
++	/*
++	 * Scan WMA interfaces for a free slot.  Skip slots occupied by
++	 * real STA vdevs to avoid conflicts with active connections.
++	 */
++	for (i = 0; i < wma->max_bssid; i++) {
++		if (wma->interfaces[i].vdev == NULL &&
++		    wma->interfaces[i].type != WMI_VDEV_TYPE_STA) {
++			vdev_id = i;
++			break;
++		}
++	}
++	if (vdev_id == WLAN_INVALID_VDEV_ID) {
++		hdd_err("Injection: no free WMA slot for helper vdev");
++		return QDF_STATUS_E_FAILURE;
 +	}
 +
-+	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
-+	return valid;
++	/* Derive helper MAC: locally-administered bit + increment last byte */
++	qdf_mem_copy(g_inj.helper_mac, adapter->deflink->link_addr.bytes,
++		     QDF_MAC_ADDR_SIZE);
++	g_inj.helper_mac[0] |= 0x02;
++	g_inj.helper_mac[QDF_MAC_ADDR_SIZE - 1]++;
++
++	g_inj.vdev_id = vdev_id;
++	g_inj.wmi_handle = wmi;
++	g_inj.chanfreq = chanfreq;
++
++	/* WMI_VDEV_CREATE_CMDID: type=STA, subtype=0 */
++	vcreate.vdev_id = vdev_id;
++	vcreate.type = WMI_VDEV_TYPE_STA;
++	vcreate.subtype = 0;
++	vcreate.nss_2g = 1;
++	vcreate.nss_5g = 1;
++	vcreate.pdev_id = WMI_PDEV_ID_1ST;
++
++	status = wmi_unified_vdev_create_send(wmi, g_inj.helper_mac, &vcreate);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: VDEV_CREATE failed (%d)", status);
++		return status;
++	}
++	hdd_info("Injection: VDEV_CREATE sent (vdev %u)", vdev_id);
++	msleep(150);
++
++	/* WMI_VDEV_START_CMDID: monitor channel, 20 MHz */
++	vstart.vdev_id = vdev_id;
++	vstart.channel.mhz = chanfreq;
++	vstart.channel.ch_freq_seg1 = chanfreq;
++	vstart.channel.ch_width = CH_WIDTH_20MHZ;
++	vstart.channel.phy_mode = WLAN_PHYMODE_11G;
++	vstart.beacon_interval = 0;
++	vstart.dtim_period = 0;
++	vstart.preferred_rx_streams = 1;
++	vstart.preferred_tx_streams = 1;
++
++	status = wmi_unified_vdev_start_send(wmi, &vstart);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: VDEV_START failed (%d)", status);
++		/* Attempt to unwind: delete the vdev we just created */
++		wmi_unified_vdev_delete_send(wmi, vdev_id);
++		return status;
++	}
++	hdd_info("Injection: VDEV_START sent (vdev %u, %u MHz)", vdev_id, chanfreq);
++	msleep(150);
++
++	/* WMI_PEER_CREATE_CMDID: self-peer with helper MAC */
++	pcreate.vdev_id = vdev_id;
++	qdf_mem_copy(pcreate.peer_addr, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++	pcreate.peer_type = WMI_PEER_TYPE_DEFAULT;
++
++	status = wmi_unified_peer_create_send(wmi, &pcreate);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: PEER_CREATE failed (%d)", status);
++		/* Unwind: stop and delete the vdev */
++		wmi_unified_vdev_stop_send(wmi, vdev_id);
++		msleep(100);
++		wmi_unified_vdev_delete_send(wmi, vdev_id);
++		return status;
++	}
++	hdd_info("Injection: PEER_CREATE sent (vdev %u)", vdev_id);
++	msleep(100);
++
++	/* Mark helper as ready for TX */
++	qdf_spin_lock_bh(&g_inj.lock);
++	g_inj.ready = true;
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	hdd_info("Injection: ghost STA helper ready (vdev %u, mac %pM, %u MHz)",
++		 vdev_id, g_inj.helper_mac, chanfreq);
++	return QDF_STATUS_SUCCESS;
++}
++
++/*
++ * Tear down the ghost STA helper.  Must NOT run in atomic context.
++ */
++static void hdd_mon_inject_helper_teardown(void)
++{
++	struct wmi_unified *wmi;
++	uint8_t vdev_id;
++
++	/* Block new TX first */
++	qdf_spin_lock_bh(&g_inj.lock);
++	g_inj.ready = false;
++	vdev_id = g_inj.vdev_id;
++	wmi = g_inj.wmi_handle;
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	if (!wmi)
++		return;
++
++	/* WMI_PEER_DELETE_CMDID */
++	{
++		struct peer_delete_cmd_params pdel = {0};
++		pdel.vdev_id = vdev_id;
++		wmi_unified_peer_delete_send(wmi, g_inj.helper_mac, &pdel);
++	}
++	msleep(100);
++
++	/* WMI_VDEV_STOP_CMDID */
++	wmi_unified_vdev_stop_send(wmi, vdev_id);
++	msleep(100);
++
++	/* WMI_VDEV_DELETE_CMDID */
++	wmi_unified_vdev_delete_send(wmi, vdev_id);
++	msleep(100);
++
++	hdd_info("Injection: ghost STA helper torn down (vdev %u)", vdev_id);
 +}
 +
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
 +	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
 +	hdd_mon_inject_tx_enable_adapter = NULL;
++	hdd_mon_inject_helper_teardown();
 +}
 +
 +/* Delayed work: enable carrier + TX queues after hdd_start_adapter finishes */
@@ -108,24 +268,36 @@
 +
 +/* Stub: forward-declared above; defined here for the !FEATURE case. */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work) {}
++static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
++{
++	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
++	hdd_mon_inject_tx_enable_adapter = NULL;
++}
 +
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3623,19 @@
+@@ -3523,6 +3740,26 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
 +
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +		/*
-+		 * Defer carrier-on and queue wake: hdd_start_adapter() calls
-+		 * netif_carrier_off() and netif_tx_stop_all_queues() after
-+		 * ndo_open returns, so enabling them here is futile.  Use a
-+		 * delayed work to re-enable after adapter init completes.
++		 * Initialize the injection context and create the ghost STA
++		 * helper vdev.  Use 2412 MHz as the default channel until
++		 * wlan_hdd_set_mon_chan() updates it.
 +		 */
++		qdf_mem_zero(&g_inj, sizeof(g_inj));
++		qdf_spinlock_create(&g_inj.lock);
++
++		if (hdd_mon_inject_helper_create(adapter, 2412) !=
++		    QDF_STATUS_SUCCESS)
++			hdd_err("Injection: helper creation failed, TX disabled");
++
++		/* Defer carrier-on and queue wake until after adapter init. */
 +		hdd_mon_inject_tx_enable_adapter = adapter;
 +		schedule_delayed_work(&hdd_mon_inject_tx_enable_dw,
 +				      msecs_to_jiffies(500));
@@ -134,10 +306,10 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +5988,11 @@
+@@ -5875,6 +6108,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
-
+ 
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
 +		hdd_mon_inject_stop(adapter);
@@ -146,9 +318,9 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7424,126 @@
+@@ -7306,9 +7544,143 @@
  };
-
+ 
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 -/* Monitor mode net_device_ops, does not Tx and most of operations. */
 +
@@ -158,12 +330,15 @@
 +	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 +	struct hdd_context *hdd_ctx;
 +	struct ieee80211_hdr *hdr;
-+	struct wlan_objmgr_peer *peer;
-+	struct wmi_mgmt_params mgmt_params = {0};
-+	struct wlan_channel channel = {0};
 +	QDF_STATUS status;
 +	int ctx_ret;
-+	uint32_t chanfreq = 0;
++	struct wmi_mgmt_params mgmt = {0};
++	qdf_nbuf_t nbuf;
++	uint32_t chanfreq;
++	uint8_t vdev_id;
++	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
++	struct wmi_unified *wmi;
++	bool ready;
 +
 +	if (!adapter) {
 +		hdd_err("Injection: NULL adapter, dropping");
@@ -179,7 +354,12 @@
 +		return NETDEV_TX_OK;
 +	}
 +
-+	if (skb_linearize(skb) || hdd_mon_inject_strip_radiotap(skb)) {
++	if (skb_linearize(skb)) {
++		hdd_err("Injection: skb_linearize failed, dropping");
++		goto drop;
++	}
++
++	if (hdd_mon_inject_strip_radiotap(skb)) {
 +		hdd_err("Injection: malformed radiotap frame, dropping");
 +		goto drop;
 +	}
@@ -192,74 +372,84 @@
 +	}
 +
 +	/*
++	 * Snapshot helper state under the lock.  After this we can
++	 * use the local copies without holding the lock.
++	 */
++	qdf_spin_lock_bh(&g_inj.lock);
++	ready = g_inj.ready;
++	vdev_id = g_inj.vdev_id;
++	chanfreq = g_inj.chanfreq;
++	qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++	wmi = g_inj.wmi_handle;
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	if (!ready || !wmi) {
++		hdd_err("Injection: helper not ready, dropping");
++		goto drop;
++	}
++
++	/*
 +	 * SA normalization: for broadcast probe requests, firmware drops
 +	 * frames whose SA does not match a known peer.  Overwrite SA
-+	 * (offset 10 in the 802.11 header) with the monitor vdev's own
-+	 * MAC so the self-peer lookup succeeds.
++	 * (addr2, offset 10) with the helper MAC so the self-peer
++	 * lookup in firmware succeeds.
 +	 */
 +	if (skb->len >= 24 &&
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
 +	    is_broadcast_ether_addr(hdr->addr1)) {
-+		ether_addr_copy(hdr->addr2,
-+				adapter->deflink->link_addr.bytes);
++		ether_addr_copy(hdr->addr2, helper_mac);
 +	}
-+
-+	/* Resolve the monitor vdev's self-peer from objmgr */
-+	if (!adapter->deflink->vdev) {
-+		hdd_err("Injection: no vdev for monitor adapter, dropping");
-+		goto drop;
-+	}
-+
-+	peer = wlan_objmgr_vdev_find_peer_by_mac(
-+			adapter->deflink->vdev,
-+			adapter->deflink->link_addr.bytes,
-+			WLAN_OSIF_ID);
-+	if (!peer) {
-+		hdd_err("Injection: no self-peer for vdev %u, dropping",
-+			adapter->deflink->vdev_id);
-+		goto drop;
-+	}
-+
-+	/* Determine the current monitor channel frequency */
-+	if (hdd_mon_inject_get_channel(adapter, &channel) && channel.ch_freq)
-+		chanfreq = channel.ch_freq;
-+
-+	/* Fill management TX parameters */
-+	mgmt_params.tx_frame = skb->data;
-+	mgmt_params.frm_len = (uint16_t)skb->len;
-+	mgmt_params.vdev_id = adapter->deflink->vdev_id;
-+	mgmt_params.chanfreq = (uint16_t)chanfreq;
-+	mgmt_params.macaddr = adapter->deflink->link_addr.bytes;
-+	mgmt_params.use_6mbps = 0;
-+	mgmt_params.tx_params_valid = false;
 +
 +	/*
-+	 * Submit through the stock management TX pipeline.
-+	 * On success, wlan_mgmt_txrx_mgmt_frame_tx() takes ownership
-+	 * of the nbuf and frees it via the completion path.
-+	 * On failure, the caller must free it.
++	 * The original skb is owned by the netdev stack and must not be
++	 * passed to the WMI layer (which may asynchronously free it).
++	 * Allocate a new qdf_nbuf and copy the 802.11 frame data into it.
 +	 */
-+	status = wlan_mgmt_txrx_mgmt_frame_tx(
-+			peer,
-+			NULL,		   /* context */
-+			skb,
-+			NULL,		   /* no download callback */
-+			NULL,		   /* no OTA callback */
-+			WLAN_UMAC_COMP_MGMT_TXRX,
-+			&mgmt_params);
++	nbuf = qdf_nbuf_alloc(NULL, skb->len, 0, 4, false);
++	if (!nbuf) {
++		hdd_err("Injection: nbuf alloc failed (%u bytes), dropping",
++			skb->len);
++		goto drop;
++	}
++	qdf_nbuf_put_tail(nbuf, skb->len);
++	qdf_mem_copy(qdf_nbuf_data(nbuf), skb->data, skb->len);
 +
-+	wlan_objmgr_peer_release_ref(peer,
-+			(wlan_objmgr_ref_dbgid)WLAN_OSIF_ID);
++	/* Fill WMI management TX parameters */
++	mgmt.tx_frame = nbuf;
++	mgmt.pdata = qdf_nbuf_data(nbuf);
++	mgmt.frm_len = qdf_nbuf_len(nbuf);
++	mgmt.vdev_id = vdev_id;
++	mgmt.chanfreq = chanfreq;
++	mgmt.qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
++	mgmt.macaddr = helper_mac;
++	mgmt.use_6mbps = 0;
++	mgmt.tx_params_valid = false;
++
++	/*
++	 * Submit directly via wmi_mgmt_unified_cmd_send().  This bypasses
++	 * wlan_mgmt_txrx and the objmgr peer lookup, routing the frame
++	 * straight to the firmware on the helper vdev.
++	 *
++	 * On success, the WMI layer temporarily owns the nbuf (it will
++	 * DMA-map it, send the command, and unmap on local failure).
++	 * The management completion path eventually frees the nbuf.
++	 * On failure, we must free the nbuf ourselves.
++	 */
++	status = wmi_mgmt_unified_cmd_send(wmi, &mgmt);
 +
 +	if (QDF_IS_STATUS_SUCCESS(status)) {
 +		dev->stats.tx_packets++;
 +		dev->stats.tx_bytes += skb->len;
-+		hdd_debug("Injection: frame submitted via stock mgmt TX on %u MHz",
-+			  chanfreq);
++		hdd_debug("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes)",
++			  vdev_id, chanfreq, (uint32_t)skb->len);
++		/* Free the original skb — we copied it into nbuf */
++		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
-+	hdd_err("Injection: mgmt_frame_tx failed (%d)", status);
++	hdd_err("Injection: wmi_mgmt_unified_cmd_send failed (%d)", status);
++	qdf_nbuf_free(nbuf);
++
 +drop:
 +	dev->stats.tx_dropped++;
 +	qdf_nbuf_free(skb);
@@ -273,4 +463,21 @@
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
-
+@@ -11425,6 +11697,17 @@
+ 	}
+ 		return qdf_status_to_os_return(status);
+ }
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
++	qdf_spin_lock_bh(&g_inj.lock);
++	if (adapter->deflink && adapter->deflink->vdev) {
++		struct wlan_channel *ch = wlan_vdev_mlme_get_des_chan(
++				adapter->deflink->vdev);
++		if (ch && ch->ch_freq)
++			g_inj.chanfreq = ch->ch_freq;
++	}
++	qdf_spin_unlock_bh(&g_inj.lock);
++	hdd_info("Injection: channel updated to %u MHz", g_inj.chanfreq);
++#endif
+ #endif
+ 
+ #if defined MSM_PLATFORM && (LINUX_VERSION_CODE <= KERNEL_VERSION(4, 19, 0))
