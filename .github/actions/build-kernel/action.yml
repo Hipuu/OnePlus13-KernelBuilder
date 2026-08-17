@@ -1954,9 +1954,30 @@ runs:
           # Stock gki_defconfig has "# CONFIG_WLAN_VENDOR_ATH is not set".
           # A bare append leaves both lines; strip the negations first so the
           # merge_defconfig path cannot keep ATH off.
-          sed -i             -e '/^# CONFIG_WLAN_VENDOR_ATH is not set$/d'             -e '/^# CONFIG_ATH_COMMON is not set$/d'             -e '/^# CONFIG_ATH9K is not set$/d'             -e '/^# CONFIG_ATH9K_HW is not set$/d'             -e '/^# CONFIG_ATH9K_COMMON is not set$/d'             -e '/^# CONFIG_ATH9K_HTC is not set$/d'             -e '/^# CONFIG_CAN_SLCAN is not set$/d'             "$MSM_DEF"
+          sed -i \
+            -e '/^# CONFIG_WLAN_VENDOR_ATH is not set$/d' \
+            -e '/^# CONFIG_ATH_COMMON is not set$/d' \
+            -e '/^# CONFIG_ATH9K is not set$/d' \
+            -e '/^# CONFIG_ATH9K_HW is not set$/d' \
+            -e '/^# CONFIG_ATH9K_COMMON is not set$/d' \
+            -e '/^# CONFIG_ATH9K_HTC is not set$/d' \
+            -e '/^# CONFIG_MAC80211_LEDS is not set$/d' \
+            -e '/^# CONFIG_CAN_SLCAN is not set$/d' \
+            "$MSM_DEF"
           # Drop any prior positive lines so re-runs stay idempotent.
-          sed -i             -e '/^CONFIG_WLAN_VENDOR_ATH=/d'             -e '/^CONFIG_ATH_COMMON=/d'             -e '/^CONFIG_ATH9K_HW=/d'             -e '/^CONFIG_ATH9K_COMMON=/d'             -e '/^CONFIG_ATH9K_HTC=/d'             -e '/^CONFIG_CAN_SLCAN=/d'             "$MSM_DEF"
+          sed -i \
+            -e '/^CONFIG_WLAN_VENDOR_ATH=/d' \
+            -e '/^CONFIG_ATH_COMMON=/d' \
+            -e '/^CONFIG_ATH9K_HW=/d' \
+            -e '/^CONFIG_ATH9K_COMMON=/d' \
+            -e '/^CONFIG_ATH9K_HTC=/d' \
+            -e '/^CONFIG_MAC80211_LEDS=/d' \
+            -e '/^CONFIG_CAN_SLCAN=/d' \
+            "$MSM_DEF"
+          # ATH9K_HTC selects MAC80211_LEDS when LEDS_CLASS is available
+          # (GKI already has LED class via flash/multicolor). sun_perf.config
+          # hard-negates MAC80211_LEDS; that must flip to y or check_merged
+          # fails with "MAC80211_LEDS n -> y".
           cat >> "$MSM_DEF" <<EOF
         # NetHunter AR9271 (ath9k_htc) -- DDK path; links to vendor mac80211
         CONFIG_WLAN_VENDOR_ATH=y
@@ -1964,11 +1985,33 @@ runs:
         CONFIG_ATH9K_HW=m
         CONFIG_ATH9K_COMMON=m
         CONFIG_ATH9K_HTC=m
+        CONFIG_MAC80211_LEDS=y
         CONFIG_CAN_SLCAN=m
         EOF
-          for k in CONFIG_WLAN_VENDOR_ATH CONFIG_ATH_COMMON CONFIG_ATH9K_HW CONFIG_ATH9K_COMMON CONFIG_ATH9K_HTC; do
+          for k in CONFIG_WLAN_VENDOR_ATH CONFIG_ATH_COMMON CONFIG_ATH9K_HW CONFIG_ATH9K_COMMON CONFIG_ATH9K_HTC CONFIG_MAC80211_LEDS; do
             grep -q "^${k}=" "$MSM_DEF" || { echo "::error::$k missing after append"; exit 1; }
           done
+          # Align vendor fragment so merge_config + check_merged_defconfig agree.
+          SUN_PERF_CFG="$MSM_KERNEL_FOLDER/arch/arm64/configs/vendor/sun_perf.config"
+          if [ -f "$SUN_PERF_CFG" ]; then
+            sed -i \
+              -e '/^# CONFIG_MAC80211_LEDS is not set$/d' \
+              -e '/^CONFIG_MAC80211_LEDS=/d' \
+              "$SUN_PERF_CFG"
+            # Keep MAC80211_LEDS near the other MAC80211 knobs if present.
+            if grep -q '^CONFIG_MAC80211=' "$SUN_PERF_CFG"; then
+              sed -i '/^CONFIG_MAC80211=/a CONFIG_MAC80211_LEDS=y' "$SUN_PERF_CFG"
+            else
+              echo 'CONFIG_MAC80211_LEDS=y' >> "$SUN_PERF_CFG"
+            fi
+            grep -q '^CONFIG_MAC80211_LEDS=y$' "$SUN_PERF_CFG" || {
+              echo "::error::failed to set CONFIG_MAC80211_LEDS=y in sun_perf.config"
+              exit 1
+            }
+            echo "Aligned sun_perf.config CONFIG_MAC80211_LEDS=y (ath9k select)"
+          else
+            echo "::warning::sun_perf.config missing; relying on gki_defconfig only"
+          fi
           echo "Appended ath9k_htc stack to msm-kernel gki_defconfig"
 
           # sun.bzl hardcodes in_tree_module_list. Kleaf only stages kos named
