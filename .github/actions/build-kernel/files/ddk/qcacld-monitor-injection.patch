@@ -1,7 +1,6 @@
 --- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
 +++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 08:00:00.000000000 +0700
-@@ -156,7 +156,14 @@
- 
+@@ -156,6 +156,13 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
@@ -15,8 +14,7 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,7 +3456,621 @@
- 
+@@ -3449,6 +3456,620 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -637,8 +635,7 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,7 +4144,35 @@
- 
+@@ -3523,6 +4144,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -673,8 +670,7 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,7 +6524,12 @@
- 
+@@ -5875,6 +6524,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -686,8 +682,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,10 +7960,221 @@
- 
+@@ -7306,9 +7960,220 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -909,8 +904,7 @@
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
-@@ -11425,7 +12290,26 @@
- 
+@@ -11425,6 +11698,25 @@
  	}
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
