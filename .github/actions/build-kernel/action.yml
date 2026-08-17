@@ -1961,6 +1961,40 @@ runs:
         CONFIG_CAN_SLCAN=m
         EOF
           echo "Appended ath9k_htc stack to msm-kernel gki_defconfig"
+
+          # sun.bzl hardcodes in_tree_module_list. Kleaf only stages kos named
+          # there (allow_undeclared_modules only stops the build from aborting).
+          # Insert ath9k next to the existing mac80211 entry.
+          SUN_BZL="$MSM_KERNEL_FOLDER/sun.bzl"
+          if [ ! -f "$SUN_BZL" ]; then
+            echo "::error::msm-kernel sun.bzl missing at $SUN_BZL"
+            exit 1
+          fi
+          if grep -q 'ath9k_htc.ko' "$SUN_BZL"; then
+            echo "sun.bzl already lists ath9k_htc"
+          else
+            ANCHOR='        "net/mac80211/mac80211.ko",'
+            if [ "$(grep -cF "$ANCHOR" "$SUN_BZL")" -ne 1 ]; then
+              echo "::error::expected exactly one mac80211.ko anchor in sun.bzl"
+              grep -n 'mac80211.ko' "$SUN_BZL" || true
+              exit 1
+            fi
+            # awk rewrite keeps the file intact; sed '\a' is less portable here
+            awk -v a="$ANCHOR" '
+              index($0, a) {
+                print
+                print "        \"drivers/net/wireless/ath/ath.ko\","
+                print "        \"drivers/net/wireless/ath/ath9k/ath9k_hw.ko\","
+                print "        \"drivers/net/wireless/ath/ath9k/ath9k_common.ko\","
+                print "        \"drivers/net/wireless/ath/ath9k/ath9k_htc.ko\","
+                next
+              }
+              { print }
+            ' "$SUN_BZL" > "$SUN_BZL.tmp"
+            mv "$SUN_BZL.tmp" "$SUN_BZL"
+            echo "Patched sun.bzl in_tree_module_list with ath9k stack"
+          fi
+          grep -n 'ath9k_htc.ko\|mac80211.ko' "$SUN_BZL" | head -10
         else
           cd "$COMMON_KERNEL_FOLDER"
           cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
