@@ -1,5 +1,6 @@
---- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
-+++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 08:00:00.000000000 +0700
+diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
+--- a/core/hdd/src/wlan_hdd_main.c
++++ b/core/hdd/src/wlan_hdd_main.c
 @@ -156,6 +156,13 @@
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
@@ -14,7 +15,7 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,620 @@
+@@ -3449,6 +3456,699 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -35,20 +36,23 @@
 + * TX lifetime / completion model (host safety):
 + *   - desc_id is assigned from HDD_MON_INJECT_DESC_BASE + slot BEFORE
 + *     WMI submit so firmware completions never hit stock pool id 0.
-+ *   - We intentionally do NOT hook wma_process_mgmt_tx_completion from
-+ *     this HDD-only patch: that handler lives in WMA and expects a
-+ *     mgmt_txrx pool entry.  Completions for our high-range desc_ids
-+ *     fail the stock lookup and are ignored; the slot reaper (or an
-+ *     explicit flush on stop/teardown) unmaps + frees the nbuf.
++ *   - wma_process_mgmt_tx_completion calls hdd_mon_inject_tx_complete()
++ *     before the stock mgmt_txrx pool lookup. Matching high-range
++ *     desc_ids are reclaimed immediately (unmap+free). The reaper is
++ *     only a safety net for lost completions.
 + *   - Backpressure drops new frames when the slot table is near full
 + *     so DMA-mapped buffers cannot grow without bound while Android
 + *     still has the netdev open.
++ *   - ndo_get_stats uses hdd_mon_get_stats so netdev->stats (not DP)
++ *     is what sysfs reports for monitor injection.
 + */
 +
 +/* Forward declarations — always visible (referenced outside #ifdef). */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter);
 +static void hdd_mon_inject_slots_flush(void);
++/* Called from wma_process_mgmt_tx_completion (same .ko). */
++bool hdd_mon_inject_tx_complete(uint32_t desc_id, uint32_t status);
 +
 +/*
 + * Global injection context.  The spinlock protects ready, chanfreq,
@@ -84,6 +88,10 @@
 +	uint32_t next_slot;
 +	uint32_t inflight;
 +	uint32_t seq;		/* monotonic salt mixed into desc_id */
++	struct net_device *mon_dev;
++	uint64_t tx_ok;
++	uint64_t tx_fail;
++	uint64_t tx_complete;
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
@@ -255,12 +263,68 @@
 +		hdd_info("Injection: flushed %u in-flight nbuf(s)", count);
 +}
 +
++/**
++ * hdd_mon_inject_tx_complete() - WMA completion reclaim for inject desc_ids
++ * @desc_id: WMI mgmt desc_id from firmware completion
++ * @status:  firmware TX status (0 = success)
++ *
++ * Return: true if consumed (injection path), false for stock pool path.
++ */
++bool hdd_mon_inject_tx_complete(uint32_t desc_id, uint32_t status)
++{
++	qdf_nbuf_t nbuf = NULL;
++	struct net_device *dev = NULL;
++	uint32_t inflight_snap = 0;
++	uint64_t ok_snap, fail_snap;
++	uint32_t idx;
++
++	if (!g_inj.lock_inited)
++		return false;
++	if (!hdd_mon_inject_desc_is_ours(desc_id))
++		return false;
++
++	idx = (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
++	if (idx >= HDD_MON_INJECT_SLOTS)
++		return true;
++
++	qdf_spin_lock_bh(&g_inj.lock);
++	if (g_inj.slots[idx].in_use &&
++	    g_inj.slots[idx].desc_id == desc_id) {
++		nbuf = g_inj.slots[idx].nbuf;
++		g_inj.slots[idx].in_use = false;
++		g_inj.slots[idx].nbuf = NULL;
++		g_inj.slots[idx].desc_id = 0;
++		if (g_inj.inflight)
++			g_inj.inflight--;
++	}
++	dev = g_inj.mon_dev;
++	g_inj.tx_complete++;
++	if (status)
++		g_inj.tx_fail++;
++	else
++		g_inj.tx_ok++;
++	inflight_snap = g_inj.inflight;
++	ok_snap = g_inj.tx_ok;
++	fail_snap = g_inj.tx_fail;
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	if (nbuf)
++		hdd_mon_inject_unmap_free(nbuf);
++
++	if (dev && status)
++		dev->stats.tx_errors++;
++
++	hdd_info("Injection: TX complete desc 0x%x status %u inflight %u (ok=%llu fail=%llu)",
++		 desc_id, status, inflight_snap,
++		 (unsigned long long)ok_snap,
++		 (unsigned long long)fail_snap);
++	return true;
++}
++
 +/*
-+ * Reaper work: free nbufs older than the age threshold.  peach-v2
-+ * emits TX completions, but stock mgmt_txrx cannot match our desc_ids,
-+ * so without this the DMA-mapped buffers accumulate until SMMU faults
-+ * / late reboot.  Under pressure (high inflight) use a shorter age and
-+ * a faster reschedule so reclaim keeps up with burst injectors.
++ * Reaper work: free nbufs older than the age threshold. Safety net only
++ * when firmware never completes (or completion is lost). Under pressure
++ * use a shorter age and faster reschedule.
 + */
 +static void hdd_mon_inject_reaper(struct work_struct *work)
 +{
@@ -564,8 +628,13 @@
 +	hdd_mon_inject_slots_flush();
 +
 +	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.mon_dev = NULL;
++		qdf_spin_unlock_bh(&g_inj.lock);
 +		qdf_spinlock_destroy(&g_inj.lock);
 +		g_inj.lock_inited = false;
++	} else {
++		g_inj.mon_dev = NULL;
 +	}
 +}
 +
@@ -612,6 +681,13 @@
 +	}
 +
 +	/* Keep carrier/tx queue state consistent with helper readiness. */
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.mon_dev = dev;
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		g_inj.mon_dev = dev;
++	}
 +	netif_carrier_on(dev);
 +	netif_tx_wake_all_queues(dev);
 +	hdd_info("Injection: carrier on + TX queues woken (deferred)");
@@ -623,6 +699,10 @@
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work) {}
 +static void hdd_mon_inject_reaper(struct work_struct *work) {}
 +static void hdd_mon_inject_slots_flush(void) {}
++bool hdd_mon_inject_tx_complete(uint32_t desc_id, uint32_t status)
++{
++	return false;
++}
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
 +	hdd_mon_inject_tx_enable_adapter = NULL;
@@ -635,7 +715,7 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4144,34 @@
+@@ -3523,6 +4223,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -670,7 +750,7 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6524,11 @@
+@@ -5875,6 +6603,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -682,7 +762,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,9 +7960,220 @@
+@@ -7306,11 +8039,227 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -804,13 +884,11 @@
 +
 +	/*
 +	 * Reserve a tracking slot and assign a unique high-range desc_id
-+	 * BEFORE submit.  desc_id 0 collides with the stock mgmt_txrx
-+	 * pool and makes wma_process_mgmt_tx_completion spam
-+	 * "descriptor unavailable for id 0".  Our IDs live at
-+	 * HDD_MON_INJECT_DESC_BASE|slot with a seq in the upper 16 bits
-+	 * so stock completion misses cleanly.  We cannot hook that WMA
-+	 * handler from this HDD-only patch; the reaper reclaims the
-+	 * DMA-mapped nbuf after AGE_MS (faster under pressure).
++	 * BEFORE submit. desc_id 0 collides with the stock mgmt_txrx
++	 * pool. Our IDs live at HDD_MON_INJECT_DESC_BASE|slot with a
++	 * seq in the upper 16 bits. wma_process_mgmt_tx_completion
++	 * routes them to hdd_mon_inject_tx_complete for immediate
++	 * unmap+free; the reaper is only a lost-completion safety net.
 +	 */
 +	{
 +		int slot_id;
@@ -858,10 +936,8 @@
 +	 * straight to the firmware on the helper vdev.
 +	 *
 +	 * WMI DMA-maps tx_frame internally on LL (caller must NOT pre-map).
-+	 * On success, WMI holds the DMA mapping; we own the nbuf and the
-+	 * reaper unmaps + frees it (peach-v2 emits completion events, but
-+	 * stock mgmt_txrx cannot match our desc_ids, so reclaim is host-
-+	 * side only until a WMA completion hook exists).
++	 * On success, WMI holds the DMA mapping until firmware completion;
++	 * hdd_mon_inject_tx_complete then unmaps + frees the nbuf.
 +	 */
 +	status = wmi_mgmt_unified_cmd_send(wmi, &mgmt);
 +
@@ -897,14 +973,28 @@
 +	return NETDEV_TX_OK;
 +}
 +
++/*
++ * Monitor-mode stats must come from netdev->stats. hdd_get_stats routes
++ * through ucfg_dp_get_dev_stats, which stays zero for the injection path.
++ */
++static struct net_device_stats *hdd_mon_get_stats(struct net_device *dev)
++{
++	return &dev->stats;
++}
++
 +/* Monitor mode net_device_ops with management-frame injection support. */
  static const struct net_device_ops wlan_mon_drv_ops = {
  	.ndo_open = hdd_mon_open,
  	.ndo_stop = hdd_stop,
+-	.ndo_get_stats = hdd_get_stats,
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
- 	.ndo_get_stats = hdd_get_stats,
++	.ndo_get_stats = hdd_mon_get_stats,
  };
-@@ -11425,6 +11698,25 @@
+ 
+ /**
+@@ -11423,6 +12372,25 @@
+ 			adapter->monitor_mode_vdev_up_in_progress = false;
+ 		}
  	}
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
@@ -928,5 +1018,31 @@
  		return qdf_status_to_os_return(status);
  }
  #endif
+diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
+--- a/core/wma/src/wma_mgmt.c
++++ b/core/wma/src/wma_mgmt.c
+@@ -64,6 +64,9 @@
+ #include <cdp_txrx_misc.h>
+ #include <cdp_txrx_misc.h>
+ #include "wlan_mgmt_txrx_tgt_api.h"
++
++/* HDD injection reclaim — same module, defined in wlan_hdd_main.c */
++bool hdd_mon_inject_tx_complete(uint32_t desc_id, uint32_t status);
+ #include "wlan_objmgr_psoc_obj.h"
+ #include "wlan_objmgr_pdev_obj.h"
+ #include "wlan_objmgr_vdev_obj.h"
+@@ -3165,6 +3168,14 @@
+ 	if (wma_validate_handle(wma_handle))
+ 		return -EINVAL;
  
- #if defined MSM_PLATFORM && (LINUX_VERSION_CODE <= KERNEL_VERSION(4, 19, 0))
++	/*
++	 * Injection uses high-range desc_ids outside MGMT_DESC_POOL_MAX.
++	 * Reclaim them here so stock mgmt_txrx never logs out-of-bounds
++	 * and the DMA-mapped nbuf is freed as soon as firmware completes.
++	 */
++	if (hdd_mon_inject_tx_complete(desc_id, status))
++		return 0;
++
+ 	wma_debug("status: %s wmi_desc_id: %d",
+ 		  wma_get_status_str(status), desc_id);
+ 

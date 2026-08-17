@@ -2268,6 +2268,22 @@ runs:
           echo "::error::patch applied but injection context struct is missing"
           exit 1
         fi
+        if ! grep -q 'hdd_mon_inject_tx_complete' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but hdd_mon_inject_tx_complete is missing"
+          exit 1
+        fi
+        if ! grep -q 'hdd_mon_inject_tx_complete' "$QCACLD/core/wma/src/wma_mgmt.c"; then
+          echo "::error::patch applied but WMA completion hook is missing"
+          exit 1
+        fi
+        if ! grep -q 'hdd_mon_get_stats' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::patch applied but hdd_mon_get_stats is missing"
+          exit 1
+        fi
+        if grep -q 'wmi_unified_vdev_up_send' "$QCACLD/core/hdd/src/wlan_hdd_main.c"; then
+          echo "::error::injection path must not call VDEV_UP (firmware SSR)"
+          exit 1
+        fi
 
 
         # The injection hook lives in the monitor-mode net_device_ops, which are
