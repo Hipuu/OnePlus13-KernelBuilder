@@ -68,6 +68,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +#define HDD_MON_INJECT_AGE_FAST_MS	400	/* under pressure */
 +#define HDD_MON_INJECT_PRESSURE		16	/* faster reaper threshold */
 +#define HDD_MON_INJECT_BACKPRESSURE	24	/* drop TX at this inflight */
++#define HDD_MON_INJECT_PEER_MAX		8	/* unicast DA peer cache */
 +
 +struct hdd_mon_inject_slot {
 +	bool in_use;
@@ -82,6 +83,9 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	bool helper_created;	/* WMI create was attempted/succeeded */
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
++	/* Dynamic WMI peers created for unicast DA (FW rejects unicast without peer). */
++	uint8_t peer_mac[HDD_MON_INJECT_PEER_MAX][QDF_MAC_ADDR_SIZE];
++	uint8_t peer_count;
 +	uint32_t chanfreq;
 +	qdf_spinlock_t lock;
 +	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
@@ -606,6 +610,27 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	/* WMI_PEER_DELETE_CMDID */
 +	{
 +		struct peer_delete_cmd_params pdel = {0};
++		uint8_t peers[HDD_MON_INJECT_PEER_MAX][QDF_MAC_ADDR_SIZE];
++		uint8_t pcount = 0, pi;
++
++		if (g_inj.lock_inited)
++			qdf_spin_lock_bh(&g_inj.lock);
++		pcount = g_inj.peer_count;
++		if (pcount > HDD_MON_INJECT_PEER_MAX)
++			pcount = HDD_MON_INJECT_PEER_MAX;
++		for (pi = 0; pi < pcount; pi++)
++			qdf_mem_copy(peers[pi], g_inj.peer_mac[pi],
++				     QDF_MAC_ADDR_SIZE);
++		g_inj.peer_count = 0;
++		qdf_mem_zero(g_inj.peer_mac, sizeof(g_inj.peer_mac));
++		if (g_inj.lock_inited)
++			qdf_spin_unlock_bh(&g_inj.lock);
++
++		for (pi = 0; pi < pcount; pi++) {
++			pdel.vdev_id = vdev_id;
++			wmi_unified_peer_delete_send(wmi, peers[pi], &pdel);
++			msleep(20);
++		}
 +		pdel.vdev_id = vdev_id;
 +		wmi_unified_peer_delete_send(wmi, helper_mac, &pdel);
 +	}
@@ -801,6 +826,65 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 -/* Monitor mode net_device_ops, does not Tx and most of operations. */
 +
++/*
++ * Firmware mgmt TX on the ghost STA accepts broadcast without a DA peer,
++ * but unicast completions return status=1 unless a WMI peer exists for the
++ * destination. Create peers on demand (best-effort; failures still attempt TX).
++ * Called without g_inj.lock held; takes the lock around the cache only.
++ */
++static void hdd_mon_inject_ensure_peer(struct wmi_unified *wmi, uint8_t vdev_id,
++				       const uint8_t *mac)
++{
++	struct peer_create_params pcreate = {0};
++	QDF_STATUS status;
++	uint8_t i, count;
++	uint8_t slot;
++
++	if (!wmi || !mac)
++		return;
++	if (is_broadcast_ether_addr(mac) || is_multicast_ether_addr(mac) ||
++	    is_zero_ether_addr(mac))
++		return;
++
++	qdf_spin_lock_bh(&g_inj.lock);
++	count = g_inj.peer_count;
++	for (i = 0; i < count && i < HDD_MON_INJECT_PEER_MAX; i++) {
++		if (ether_addr_equal(g_inj.peer_mac[i], mac)) {
++			qdf_spin_unlock_bh(&g_inj.lock);
++			return;
++		}
++	}
++	if (count >= HDD_MON_INJECT_PEER_MAX) {
++		/* Evict oldest (slot 0); FW may retain stale peer — best effort. */
++		slot = 0;
++		qdf_mem_copy(g_inj.peer_mac[0], mac, QDF_MAC_ADDR_SIZE);
++	} else {
++		slot = count;
++		qdf_mem_copy(g_inj.peer_mac[slot], mac, QDF_MAC_ADDR_SIZE);
++		g_inj.peer_count = count + 1;
++	}
++	qdf_spin_unlock_bh(&g_inj.lock);
++
++	{
++		uint8_t mac_copy[QDF_MAC_ADDR_SIZE];
++
++		ether_addr_copy(mac_copy, mac);
++		pcreate.vdev_id = vdev_id;
++		pcreate.peer_addr = mac_copy;
++		pcreate.peer_type = WMI_PEER_TYPE_DEFAULT;
++		status = wmi_unified_peer_create_send(wmi, &pcreate);
++	}
++	if (QDF_IS_STATUS_ERROR(status)) {
++		hdd_err("Injection: PEER_CREATE for %pM failed (%d)", mac, status);
++		return;
++	}
++	/* No sleep here: ndo_start_xmit must not block. FW create is async;
++	 * first unicast after peer create may still fail; later frames OK.
++	 */
++	hdd_info("Injection: PEER_CREATE for unicast DA %pM on vdev %u", mac,
++		 vdev_id);
++}
++
 +static netdev_tx_t hdd_mon_hard_start_xmit(struct sk_buff *skb,
 +					   struct net_device *dev)
 +{
@@ -890,15 +974,26 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	wmi = wma->wmi_handle;
 +
 +	/*
-+	 * SA normalization: for broadcast probe requests, firmware drops
-+	 * frames whose SA does not match a known peer.  Overwrite SA
-+	 * (addr2, offset 10) with the helper MAC so the self-peer
-+	 * lookup in firmware succeeds.
++	 * Address / peer policy for peach mgmt TX on ghost STA:
++	 * - broadcast probe_req: rewrite SA to helper (self-peer) — proven OTA
++	 * - unicast any mgmt: ensure WMI peer for DA; FW status 1 without it
++	 * - deauth/disassoc keep caller SA (AP spoof) — broadcast deauth OTA works
++	 * - mgmt.macaddr: DA for unicast (peer key), helper for broadcast
 +	 */
 +	if (skb->len >= 24 &&
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
 +	    is_broadcast_ether_addr(hdr->addr1)) {
 +		ether_addr_copy(hdr->addr2, helper_mac);
++	}
++	if (skb->len >= 24 &&
++	    !is_broadcast_ether_addr(hdr->addr1) &&
++	    !is_multicast_ether_addr(hdr->addr1)) {
++		hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr1);
++		/* Also peer the SA when spoofing a third party (e.g. AP BSSID). */
++		if (!ether_addr_equal(hdr->addr2, helper_mac) &&
++		    !is_broadcast_ether_addr(hdr->addr2) &&
++		    !is_zero_ether_addr(hdr->addr2))
++			hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr2);
 +	}
 +
 +	/*
@@ -959,7 +1054,16 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	mgmt.vdev_id = vdev_id;
 +	mgmt.chanfreq = chanfreq;
 +	mgmt.qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
-+	mgmt.macaddr = helper_mac;
++	/*
++	 * Peer MAC passed to WMI: unicast DA after ensure_peer; helper for bcast.
++	 * Snapshot under no lock — hdr bytes are local to this skb copy path.
++	 */
++	if (skb->len >= 24 &&
++	    !is_broadcast_ether_addr(hdr->addr1) &&
++	    !is_multicast_ether_addr(hdr->addr1))
++		mgmt.macaddr = hdr->addr1;
++	else
++		mgmt.macaddr = helper_mac;
 +	mgmt.use_6mbps = 0;
 +	mgmt.tx_params_valid = false;
 +
