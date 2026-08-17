@@ -37,7 +37,7 @@ Drivers are built as modules and shipped in `kernel_modules_*.zip`:
 
 - **No boot.img / vendor_boot / DLKM images.** Output is a raw `Image`, an AnyKernel3 ZIP, and a modules ZIP.
 - **No other devices.** OnePlus 13 only.
-- **No external USB Wi-Fi adapters on the DDK build.** See [DDK build](#ddk-build).
+- **DDK build ships internal peach + AR9271 (`ath9k_htc`).** Full USB zoo (rtw88/mt76/…) stays on non-DDK variants. See [DDK build](#ddk-build).
 
 ## DDK build
 
@@ -55,25 +55,25 @@ enabled in the stock `sun_gki_peach-v2_defconfig` and gated at runtime by the
 [monitor-mode injection](#monitor-mode-injection).
 
 > [!IMPORTANT]
-> The DDK build and the external-adapter module pack are mutually exclusive.
-> `msm-kernel` declares `cfg80211.ko` and `mac80211.ko` among its in-tree
-> modules, and the vendor kernel is a mixed build on top of GKI, so adding the
-> same two to the GKI defconfig makes `modpost` fail with `'wiphy_new_nm'
-> exported twice`. Only one copy can exist. The DDK build keeps the platform
-> pair, since that is what `qca_cld3_peach_v2.ko` is CRC-matched against, so
-> `ath9k_htc` and the other external drivers are not built on this variant.
-> This is the same incompatibility described in
-> [why the drivers are not built in](#why-the-drivers-are-not-built-in),
-> reached at build time rather than on device.
-
-Build the other five variants for external adapter support, or set `ddk` to
-`false` to build `6.6.118` the `make` way.
+> DDK cannot ship a *second* GKI-built `cfg80211`/`mac80211` pair.
+> `msm-kernel` already declares those among its in-tree modules, and a mixed
+> build that also enables them on `//common` fails modpost with
+> `'wiphy_new_nm' exported twice`. Peach is CRC-matched to the vendor pair, so
+> that pair stays authoritative.
+>
+> AR9271 support on DDK is built *on the vendor kernel* (`ath9k_htc` + deps on
+> msm-kernel `gki_defconfig`) so it links against the same mac80211 peach uses.
+> The modules ZIP ships peach, vendor cfg/mac, and the ath9k stack. Loading
+> `ath9k_htc` via `nethunter-wifi.sh` displaces peach only; reboot or
+> `restore` brings internal Wi-Fi back. The broader USB zoo (rtw88, mt76, …)
+> remains on non-DDK variants.
 
 The module pack on this variant contains `qca_cld3_peach_v2.ko`, the platform
-`cfg80211`/`mac80211`/`rfkill` it links against, the full dependency closure
-that `modules.dep` resolves (about 60 modules), and the CAN and USB-serial
-drivers. The build fails if the shipped modules' `vermagic` does not match the
-`Image`, since a mismatch makes them unloadable.
+`cfg80211`/`mac80211`/`rfkill` it links against, `ath9k_htc` (+ `ath`,
+`ath9k_hw`, `ath9k_common`), the full dependency closure that `modules.dep`
+resolves, and the CAN and USB-serial drivers. The build fails if the shipped
+modules' `vermagic` does not match the `Image`, since a mismatch makes them
+unloadable.
 
 ### Monitor-mode injection
 
