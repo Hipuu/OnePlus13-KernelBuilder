@@ -15,7 +15,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,699 @@
+@@ -3449,6 +3456,732 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -180,9 +180,20 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +static bool hdd_mon_inject_desc_is_ours(uint32_t desc_id)
 +{
-+	return (desc_id & 0xFFFFU) >= HDD_MON_INJECT_DESC_BASE &&
-+	       (desc_id & 0xFFFFU) <
-+			(HDD_MON_INJECT_DESC_BASE + HDD_MON_INJECT_SLOTS);
++	uint32_t low = desc_id & 0xFFFFU;
++
++	/*
++	 * Firmware completion events typically echo only the low 16 bits
++	 * of the WMI desc_id.  Match on that lane either way.
++	 */
++	return low >= HDD_MON_INJECT_DESC_BASE &&
++	       low < (HDD_MON_INJECT_DESC_BASE + HDD_MON_INJECT_SLOTS);
++}
++
++/* Slot index from a full or low16-only desc_id. */
++static uint32_t hdd_mon_inject_desc_slot(uint32_t desc_id)
++{
++	return (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
 +}
 +
 +/* Stash nbuf in the next free slot.  Caller holds g_inj.lock.
@@ -219,13 +230,16 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	if (!hdd_mon_inject_desc_is_ours(desc_id))
 +		return;
 +
-+	idx = (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
++	idx = hdd_mon_inject_desc_slot(desc_id);
 +	if (idx >= HDD_MON_INJECT_SLOTS)
 +		return;
 +
++	/*
++	 * Match by slot + nbuf.  Do NOT require full 32-bit desc equality:
++	 * firmware completions often return only the low 16 bits.
++	 */
 +	if (g_inj.slots[idx].in_use &&
-+	    g_inj.slots[idx].nbuf == nbuf &&
-+	    g_inj.slots[idx].desc_id == desc_id) {
++	    g_inj.slots[idx].nbuf == nbuf) {
 +		g_inj.slots[idx].in_use = false;
 +		g_inj.slots[idx].nbuf = NULL;
 +		g_inj.slots[idx].desc_id = 0;
@@ -277,32 +291,47 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint32_t inflight_snap = 0;
 +	uint64_t ok_snap, fail_snap;
 +	uint32_t idx;
++	uint32_t stored_desc = 0;
++	bool freed = false;
 +
 +	if (!g_inj.lock_inited)
 +		return false;
 +	if (!hdd_mon_inject_desc_is_ours(desc_id))
 +		return false;
 +
-+	idx = (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
++	idx = hdd_mon_inject_desc_slot(desc_id);
 +	if (idx >= HDD_MON_INJECT_SLOTS)
 +		return true;
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
-+	if (g_inj.slots[idx].in_use &&
-+	    g_inj.slots[idx].desc_id == desc_id) {
-+		nbuf = g_inj.slots[idx].nbuf;
-+		g_inj.slots[idx].in_use = false;
-+		g_inj.slots[idx].nbuf = NULL;
-+		g_inj.slots[idx].desc_id = 0;
-+		if (g_inj.inflight)
-+			g_inj.inflight--;
++	/*
++	 * Firmware often returns only low16(desc_id).  Identify the slot
++	 * from that lane; accept the completion if the slot is in use.
++	 * Optional: if upper bits are present, prefer exact match, else
++	 * still reclaim by slot so DMA nbufs never leak.
++	 */
++	if (g_inj.slots[idx].in_use) {
++		stored_desc = g_inj.slots[idx].desc_id;
++		if ((desc_id >> 16) == 0 ||
++		    stored_desc == desc_id ||
++		    (stored_desc & 0xFFFFU) == (desc_id & 0xFFFFU)) {
++			nbuf = g_inj.slots[idx].nbuf;
++			g_inj.slots[idx].in_use = false;
++			g_inj.slots[idx].nbuf = NULL;
++			g_inj.slots[idx].desc_id = 0;
++			if (g_inj.inflight)
++				g_inj.inflight--;
++			freed = true;
++		}
 +	}
 +	dev = g_inj.mon_dev;
-+	g_inj.tx_complete++;
-+	if (status)
-+		g_inj.tx_fail++;
-+	else
-+		g_inj.tx_ok++;
++	if (freed) {
++		g_inj.tx_complete++;
++		if (status)
++			g_inj.tx_fail++;
++		else
++			g_inj.tx_ok++;
++	}
 +	inflight_snap = g_inj.inflight;
 +	ok_snap = g_inj.tx_ok;
 +	fail_snap = g_inj.tx_fail;
@@ -311,13 +340,17 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	if (nbuf)
 +		hdd_mon_inject_unmap_free(nbuf);
 +
-+	if (dev && status)
++	if (dev && status && freed)
 +		dev->stats.tx_errors++;
 +
-+	hdd_info("Injection: TX complete desc 0x%x status %u inflight %u (ok=%llu fail=%llu)",
-+		 desc_id, status, inflight_snap,
-+		 (unsigned long long)ok_snap,
-+		 (unsigned long long)fail_snap);
++	if (freed)
++		hdd_info("Injection: TX complete desc 0x%x (slot %u stored 0x%x) status %u inflight %u (ok=%llu fail=%llu)",
++			 desc_id, idx, stored_desc, status, inflight_snap,
++			 (unsigned long long)ok_snap,
++			 (unsigned long long)fail_snap);
++	else
++		hdd_err("Injection: TX complete desc 0x%x slot %u not in use / mismatch (stored 0x%x)",
++			desc_id, idx, stored_desc);
 +	return true;
 +}
 +
@@ -715,7 +748,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4223,34 @@
+@@ -3523,6 +4256,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -750,7 +783,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6603,11 @@
+@@ -5875,6 +6636,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -762,7 +795,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8039,227 @@
+@@ -7306,11 +8072,227 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -992,7 +1025,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12372,25 @@
+@@ -11423,6 +12405,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
