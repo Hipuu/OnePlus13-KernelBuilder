@@ -1,6 +1,7 @@
 --- a/core/hdd/src/wlan_hdd_main.c	2026-08-15 23:46:42.526391879 +0700
 +++ b/core/hdd/src/wlan_hdd_main.c	2026-08-16 08:00:00.000000000 +0700
-@@ -156,6 +156,13 @@
+@@ -156,7 +156,14 @@
+ 
  #include "wlan_hdd_twt.h"
  #include "qc_sap_ioctl.h"
  #include "wlan_mlme_main.h"
@@ -14,7 +15,8 @@
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,424 @@
+@@ -3449,7 +3456,621 @@
+ 
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -31,11 +33,24 @@
 + * interface creation in monitor mode).  The helper vdev ID is not
 + * reserved in the psoc vdev_id_map, so it can collide with a
 + * concurrently-allocated real interface.  This is a known limitation.
++ *
++ * TX lifetime / completion model (host safety):
++ *   - desc_id is assigned from HDD_MON_INJECT_DESC_BASE + slot BEFORE
++ *     WMI submit so firmware completions never hit stock pool id 0.
++ *   - We intentionally do NOT hook wma_process_mgmt_tx_completion from
++ *     this HDD-only patch: that handler lives in WMA and expects a
++ *     mgmt_txrx pool entry.  Completions for our high-range desc_ids
++ *     fail the stock lookup and are ignored; the slot reaper (or an
++ *     explicit flush on stop/teardown) unmaps + frees the nbuf.
++ *   - Backpressure drops new frames when the slot table is near full
++ *     so DMA-mapped buffers cannot grow without bound while Android
++ *     still has the netdev open.
 + */
 +
 +/* Forward declarations — always visible (referenced outside #ifdef). */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work);
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter);
++static void hdd_mon_inject_slots_flush(void);
 +
 +/*
 + * Global injection context.  The spinlock protects ready, chanfreq,
@@ -43,19 +58,26 @@
 + * re-fetched from WMA on every TX (never cached across SSR).
 + */
 +
-+#define HDD_MON_INJECT_SLOTS	32
-+#define HDD_MON_INJECT_DESC_BASE	0xF000
-+#define HDD_MON_INJECT_REAP_MS	3000
-+#define HDD_MON_INJECT_AGE_MS	2000
++#define HDD_MON_INJECT_SLOTS		32
++#define HDD_MON_INJECT_DESC_BASE	0xF000U
++#define HDD_MON_INJECT_REAP_MS		1000	/* nominal reaper period */
++#define HDD_MON_INJECT_REAP_FAST_MS	250	/* under pressure */
++#define HDD_MON_INJECT_AGE_MS		1500	/* nominal nbuf lifetime */
++#define HDD_MON_INJECT_AGE_FAST_MS	400	/* under pressure */
++#define HDD_MON_INJECT_PRESSURE		16	/* faster reaper threshold */
++#define HDD_MON_INJECT_BACKPRESSURE	24	/* drop TX at this inflight */
 +
 +struct hdd_mon_inject_slot {
 +	bool in_use;
 +	qdf_nbuf_t nbuf;
 +	unsigned long submit_jiffies;
++	uint32_t desc_id;
 +};
 +
 +struct hdd_mon_inject_ctx {
 +	bool ready;
++	bool lock_inited;
++	bool helper_created;	/* WMI create was attempted/succeeded */
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
 +	uint32_t chanfreq;
@@ -63,15 +85,16 @@
 +	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
 +	uint32_t next_slot;
 +	uint32_t inflight;
++	uint32_t seq;		/* monotonic salt mixed into desc_id */
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
 +
-+/* Reaper: periodically unmap + free nbufs the firmware never completed. */
++/* Reaper: periodically unmap + free nbufs stock completion cannot reclaim. */
 +static void hdd_mon_inject_reaper(struct work_struct *work);
 +static DECLARE_DELAYED_WORK(hdd_mon_inject_reaper_dw, hdd_mon_inject_reaper);
 +
-+/* Always declare: referenced from suspend/resume paths and injection functions. */
++/* Always declare: referenced from stop/open paths and injection functions. */
 +static DECLARE_DELAYED_WORK(hdd_mon_inject_tx_enable_dw,
 +			    hdd_mon_inject_tx_enable_work);
 +static struct hdd_adapter *hdd_mon_inject_tx_enable_adapter;
@@ -109,11 +132,18 @@
 +}
 +
 +/*
-+ * Unmap + free an injection nbuf.  WMI mapped it on submit (LL path);
-+ * the stock mgmt_txrx completion path never sees our nbufs because we
-+ * bypass the descriptor pool.  The firmware also never sends TX
-+ * completion events for the ghost STA helper vdev, so we must reclaim
-+ * every successfully submitted buffer ourselves.
++ * Unmap + free an injection nbuf.  WMI mapped it on submit (LL path).
++ * Stock mgmt_txrx completion cannot reclaim our nbufs: we bypass its
++ * descriptor pool and use high-range desc_ids.  peach-v2 DOES emit TX
++ * completion events for the ghost STA helper, but wma_process_mgmt_tx_
++ * completion only logs "descriptor unavailable" for our ids and never
++ * unmaps — so the host must reclaim every successfully submitted
++ * buffer via the reaper or an explicit flush.
++ *
++ * NOTE: unmapping a buffer the firmware may still be DMA-reading is
++ * inherently racy on a ghost vdev.  We mitigate with short ages under
++ * pressure and a hard flush only on stop/teardown after cancelling
++ * new submits.  A true fix needs WMA-layer completion ownership.
 + */
 +static void hdd_mon_inject_unmap_free(qdf_nbuf_t nbuf)
 +{
@@ -128,31 +158,85 @@
 +	qdf_nbuf_free(nbuf);
 +}
 +
-+/* Stash nbuf in the next free slot.  Caller holds g_inj.lock. */
++/*
++ * Build a unique desc_id in the high reserved range:
++ *   bits[15:0]  = HDD_MON_INJECT_DESC_BASE | slot
++ *   bits[31:16] = low 16 of monotonic seq (avoids stale FW completions
++ *                 matching a recycled slot after wrap).
++ * Stock mgmt_txrx pools are small; any id >= DESC_BASE misses cleanly.
++ */
++static uint32_t hdd_mon_inject_make_desc_id(uint32_t idx, uint32_t seq)
++{
++	return HDD_MON_INJECT_DESC_BASE |
++	       (idx & (HDD_MON_INJECT_SLOTS - 1)) |
++	       ((seq & 0xFFFFU) << 16);
++}
++
++static bool hdd_mon_inject_desc_is_ours(uint32_t desc_id)
++{
++	return (desc_id & 0xFFFFU) >= HDD_MON_INJECT_DESC_BASE &&
++	       (desc_id & 0xFFFFU) <
++			(HDD_MON_INJECT_DESC_BASE + HDD_MON_INJECT_SLOTS);
++}
++
++/* Stash nbuf in the next free slot.  Caller holds g_inj.lock.
++ * Returns desc_id (>= DESC_BASE) or -1 if the table is full.
++ */
 +static int hdd_mon_inject_slot_put(qdf_nbuf_t nbuf)
 +{
 +	uint32_t i, idx;
++	uint32_t desc_id;
 +
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
 +		idx = (g_inj.next_slot + i) % HDD_MON_INJECT_SLOTS;
 +		if (!g_inj.slots[idx].in_use) {
++			g_inj.seq++;
++			desc_id = hdd_mon_inject_make_desc_id(idx, g_inj.seq);
 +			g_inj.slots[idx].in_use = true;
 +			g_inj.slots[idx].nbuf = nbuf;
 +			g_inj.slots[idx].submit_jiffies = jiffies;
++			g_inj.slots[idx].desc_id = desc_id;
 +			g_inj.next_slot = (idx + 1) % HDD_MON_INJECT_SLOTS;
 +			g_inj.inflight++;
-+			return (int)(HDD_MON_INJECT_DESC_BASE + idx);
++			return (int)desc_id;
 +		}
 +	}
 +	return -1;
 +}
 +
-+/* Flush every in-flight slot (teardown / SSR path). */
++/* Drop a specific slot after a failed WMI submit.  Caller may hold lock. */
++static void hdd_mon_inject_slot_release_locked(uint32_t desc_id,
++					       qdf_nbuf_t nbuf)
++{
++	uint32_t idx;
++
++	if (!hdd_mon_inject_desc_is_ours(desc_id))
++		return;
++
++	idx = (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
++	if (idx >= HDD_MON_INJECT_SLOTS)
++		return;
++
++	if (g_inj.slots[idx].in_use &&
++	    g_inj.slots[idx].nbuf == nbuf &&
++	    g_inj.slots[idx].desc_id == desc_id) {
++		g_inj.slots[idx].in_use = false;
++		g_inj.slots[idx].nbuf = NULL;
++		g_inj.slots[idx].desc_id = 0;
++		if (g_inj.inflight)
++			g_inj.inflight--;
++	}
++}
++
++/* Flush every in-flight slot (teardown / stop / SSR path). */
 +static void hdd_mon_inject_slots_flush(void)
 +{
 +	uint32_t i;
 +	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
 +	uint32_t count = 0;
++
++	if (!g_inj.lock_inited)
++		return;
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
@@ -160,6 +244,7 @@
 +			nbufs[count++] = g_inj.slots[i].nbuf;
 +			g_inj.slots[i].in_use = false;
 +			g_inj.slots[i].nbuf = NULL;
++			g_inj.slots[i].desc_id = 0;
 +		}
 +	}
 +	g_inj.inflight = 0;
@@ -167,42 +252,70 @@
 +
 +	for (i = 0; i < count; i++)
 +		hdd_mon_inject_unmap_free(nbufs[i]);
++
++	if (count)
++		hdd_info("Injection: flushed %u in-flight nbuf(s)", count);
 +}
 +
 +/*
-+ * Reaper work: free nbufs older than HDD_MON_INJECT_AGE_MS.  Firmware
-+ * never completes TX on the ghost STA helper, so without this the
-+ * DMA-mapped buffers accumulate until SMMU faults / OOM.
++ * Reaper work: free nbufs older than the age threshold.  peach-v2
++ * emits TX completions, but stock mgmt_txrx cannot match our desc_ids,
++ * so without this the DMA-mapped buffers accumulate until SMMU faults
++ * / late reboot.  Under pressure (high inflight) use a shorter age and
++ * a faster reschedule so reclaim keeps up with burst injectors.
 + */
 +static void hdd_mon_inject_reaper(struct work_struct *work)
 +{
 +	uint32_t i;
 +	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
 +	uint32_t count = 0;
-+	unsigned long age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
++	uint32_t inflight_snap;
++	bool ready_snap;
++	unsigned long age;
++	unsigned int reap_ms;
++
++	if (!g_inj.lock_inited)
++		return;
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
++	inflight_snap = g_inj.inflight;
++	ready_snap = g_inj.ready;
++	if (inflight_snap >= HDD_MON_INJECT_PRESSURE)
++		age = msecs_to_jiffies(HDD_MON_INJECT_AGE_FAST_MS);
++	else
++		age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
++
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
 +		if (g_inj.slots[i].in_use &&
-+		    time_after(jiffies, g_inj.slots[i].submit_jiffies + age)) {
++		    time_after(jiffies,
++			       g_inj.slots[i].submit_jiffies + age)) {
 +			nbufs[count++] = g_inj.slots[i].nbuf;
 +			g_inj.slots[i].in_use = false;
 +			g_inj.slots[i].nbuf = NULL;
++			g_inj.slots[i].desc_id = 0;
 +			if (g_inj.inflight)
 +				g_inj.inflight--;
 +		}
 +	}
++	inflight_snap = g_inj.inflight;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
 +	for (i = 0; i < count; i++)
 +		hdd_mon_inject_unmap_free(nbufs[i]);
 +
-+	/* Reschedule while helper is ready. */
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	if (g_inj.ready)
++	if (count)
++		hdd_debug("Injection: reaped %u nbuf(s), inflight now %u",
++			  count, inflight_snap);
++
++	/* Reschedule while helper is ready; go faster under pressure. */
++	if (ready_snap) {
++		if (inflight_snap >= HDD_MON_INJECT_PRESSURE)
++			reap_ms = HDD_MON_INJECT_REAP_FAST_MS;
++		else
++			reap_ms = HDD_MON_INJECT_REAP_MS;
 +		schedule_delayed_work(&hdd_mon_inject_reaper_dw,
-+				      msecs_to_jiffies(HDD_MON_INJECT_REAP_MS));
-+	qdf_spin_unlock_bh(&g_inj.lock);
++				      msecs_to_jiffies(reap_ms));
++	}
 +}
 +
 +/*
@@ -267,6 +380,10 @@
 +		return status;
 +	}
 +	hdd_info("Injection: VDEV_CREATE sent (vdev %u)", vdev_id);
++	qdf_spin_lock_bh(&g_inj.lock);
++	g_inj.helper_created = true;
++	g_inj.vdev_id = vdev_id;
++	qdf_spin_unlock_bh(&g_inj.lock);
 +	msleep(150);
 +
 +	/* WMI_VDEV_START_CMDID: monitor channel, 20 MHz */
@@ -320,6 +437,7 @@
 +
 +	/* Mark helper as ready for TX and start the reaper */
 +	qdf_spin_lock_bh(&g_inj.lock);
++	g_inj.helper_created = true;
 +	g_inj.ready = true;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
@@ -333,34 +451,68 @@
 +
 +/*
 + * Tear down the ghost STA helper.  Must NOT run in atomic context.
++ * Order matters for host safety:
++ *   1. mark !ready so xmit drops immediately
++ *   2. cancel reaper (no concurrent unmap)
++ *   3. flush all DMA-mapped slots
++ *   4. PEER_DELETE / VDEV_STOP / VDEV_DELETE
++ * Leaving the ghost STA alive after Android turns Wi-Fi off is a
++ * leading suspect for the 10-20 min late reboot; always tear it down
++ * from hdd_stop / hdd_mon_inject_stop.
 + */
 +static void hdd_mon_inject_helper_teardown(void)
 +{
 +	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
 +	uint8_t vdev_id;
++	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
++	bool helper_created = false;
 +
-+	/* Stop reaper and block new TX */
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		helper_created = g_inj.helper_created;
++		g_inj.ready = false;
++		g_inj.helper_created = false;
++		vdev_id = g_inj.vdev_id;
++		qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		helper_created = g_inj.helper_created;
++		g_inj.ready = false;
++		g_inj.helper_created = false;
++		vdev_id = g_inj.vdev_id;
++		qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++	}
++
++	/* Stop reaper before flush so it cannot race unmap/free. */
 +	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
 +
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	g_inj.ready = false;
-+	vdev_id = g_inj.vdev_id;
-+	qdf_spin_unlock_bh(&g_inj.lock);
-+
-+	/* Flush any in-flight nbufs (DMA unmap + free) */
++	/* Force-reclaim every outstanding DMA-mapped nbuf. */
 +	hdd_mon_inject_slots_flush();
 +
-+	wma = cds_get_context(QDF_MODULE_ID_WMA);
-+	if (!wma || !wma->wmi_handle)
++	if (!helper_created)
 +		return;
++
++	wma = cds_get_context(QDF_MODULE_ID_WMA);
++	if (!wma || !wma->wmi_handle) {
++		if (g_inj.lock_inited) {
++			qdf_spin_lock_bh(&g_inj.lock);
++			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
++			qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++			qdf_spin_unlock_bh(&g_inj.lock);
++		} else {
++			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
++			qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		}
++		return;
++	}
 +	wmi = wma->wmi_handle;
 +
 +	/* WMI_PEER_DELETE_CMDID */
 +	{
 +		struct peer_delete_cmd_params pdel = {0};
 +		pdel.vdev_id = vdev_id;
-+		wmi_unified_peer_delete_send(wmi, g_inj.helper_mac, &pdel);
++		wmi_unified_peer_delete_send(wmi, helper_mac, &pdel);
 +	}
 +	msleep(100);
 +
@@ -376,14 +528,47 @@
 +	wmi_unified_vdev_delete_send(wmi, vdev_id);
 +	msleep(100);
 +
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
++		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
++		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++	}
++
 +	hdd_info("Injection: ghost STA helper torn down (vdev %u)", vdev_id);
 +}
 +
++/*
++ * Full stop path used from hdd_stop when the monitor iface goes down
++ * (Android Wi-Fi off, ifconfig down, mode switch).  Cancels deferred
++ * create, tears down the helper, flushes slots, and stops carrier/TX
++ * so the netdev cannot queue more frames into a dead helper.
++ */
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
-+	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
++	struct net_device *dev = adapter ? adapter->dev : NULL;
++
++	/* Block deferred create from racing teardown. */
 +	hdd_mon_inject_tx_enable_adapter = NULL;
++	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
++
++	if (dev) {
++		netif_tx_stop_all_queues(dev);
++		netif_carrier_off(dev);
++	}
++
 +	hdd_mon_inject_helper_teardown();
++
++	/* Belt-and-suspenders: flush again after teardown returns. */
++	hdd_mon_inject_slots_flush();
++
++	if (g_inj.lock_inited) {
++		qdf_spinlock_destroy(&g_inj.lock);
++		g_inj.lock_inited = false;
++	}
 +}
 +
 +/* Delayed work: enable carrier + TX queues after hdd_start_adapter finishes */
@@ -392,6 +577,7 @@
 +	struct hdd_adapter *adapter;
 +	struct net_device *dev;
 +	struct hdd_context *hdd_ctx;
++	uint32_t chanfreq;
 +
 +	/* Recover adapter from the global we stashed in __hdd_mon_open */
 +	adapter = hdd_mon_inject_tx_enable_adapter;
@@ -411,12 +597,23 @@
 +	 * vdev start and makes the firmware drop the monitor vdev up
 +	 * event, which sends the whole driver into SSR.
 +	 */
-+	if (hdd_mon_inject_helper_create(adapter, g_inj.chanfreq) !=
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		chanfreq = g_inj.chanfreq;
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		chanfreq = g_inj.chanfreq;
++	}
++
++	if (hdd_mon_inject_helper_create(adapter, chanfreq) !=
 +	    QDF_STATUS_SUCCESS) {
 +		hdd_err("Injection: helper creation failed, TX disabled");
++		netif_tx_stop_all_queues(dev);
++		netif_carrier_off(dev);
 +		return;
 +	}
 +
++	/* Keep carrier/tx queue state consistent with helper readiness. */
 +	netif_carrier_on(dev);
 +	netif_tx_wake_all_queues(dev);
 +	hdd_info("Injection: carrier on + TX queues woken (deferred)");
@@ -427,11 +624,12 @@
 +/* Stub: forward-declared above; defined here for the !FEATURE case. */
 +static void hdd_mon_inject_tx_enable_work(struct work_struct *work) {}
 +static void hdd_mon_inject_reaper(struct work_struct *work) {}
++static void hdd_mon_inject_slots_flush(void) {}
 +static void hdd_mon_inject_stop(struct hdd_adapter *adapter)
 +{
++	hdd_mon_inject_tx_enable_adapter = NULL;
 +	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
 +	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
-+	hdd_mon_inject_tx_enable_adapter = NULL;
 +}
 +
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
@@ -439,7 +637,8 @@
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +3741,26 @@
+@@ -3523,7 +4144,35 @@
+ 
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -452,9 +651,17 @@
 +		 * sequence and sends the firmware into SSR.
 +		 * Default channel 2412 MHz until wlan_hdd_set_mon_chan()
 +		 * updates g_inj.chanfreq.
++		 *
++		 * If a previous open left state around (unexpected), force
++		 * a clean stop first so we never leak DMA-mapped slots or
++		 * a ghost STA across monitor reopen.
 +		 */
++		if (g_inj.lock_inited || g_inj.ready)
++			hdd_mon_inject_stop(adapter);
++
 +		qdf_mem_zero(&g_inj, sizeof(g_inj));
 +		qdf_spinlock_create(&g_inj.lock);
++		g_inj.lock_inited = true;
 +		g_inj.chanfreq = 2412;
 +
 +		/* Defer helper create + carrier-on + queue wake. */
@@ -466,7 +673,8 @@
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6109,11 @@
+@@ -5875,7 +6524,12 @@
+ 
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -478,7 +686,8 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,9 +7562,194 @@
+@@ -7306,10 +7960,221 @@
+ 
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -536,18 +745,33 @@
 +	 * Snapshot helper state under the lock.  The WMI handle is NOT
 +	 * cached: re-fetch it from WMA on every TX so a firmware SSR
 +	 * (which replaces the handle) never makes us send through a
-+	 * dead handle.
++	 * dead handle.  Also enforce backpressure: if too many nbufs
++	 * are already DMA-mapped and awaiting the reaper, drop rather
++	 * than grow the leak window toward an SMMU/OOM reboot.
 +	 */
-+	qdf_spin_lock_bh(&g_inj.lock);
-+	ready = g_inj.ready;
-+	vdev_id = g_inj.vdev_id;
-+	chanfreq = g_inj.chanfreq;
-+	qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
-+	qdf_spin_unlock_bh(&g_inj.lock);
++	{
++		uint32_t inflight_snap;
 +
-+	if (!ready) {
-+		hdd_err("Injection: helper not ready, dropping");
-+		goto drop;
++		qdf_spin_lock_bh(&g_inj.lock);
++		ready = g_inj.ready;
++		vdev_id = g_inj.vdev_id;
++		chanfreq = g_inj.chanfreq;
++		inflight_snap = g_inj.inflight;
++		qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		qdf_spin_unlock_bh(&g_inj.lock);
++
++		if (!ready) {
++			hdd_err("Injection: helper not ready, dropping");
++			goto drop;
++		}
++
++		if (inflight_snap >= HDD_MON_INJECT_BACKPRESSURE) {
++			hdd_err("Injection: backpressure (inflight %u), dropping",
++				inflight_snap);
++			/* Nudge the reaper to reclaim sooner. */
++			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
++			goto drop;
++		}
 +	}
 +
 +	wma = cds_get_context(QDF_MODULE_ID_WMA);
@@ -584,23 +808,39 @@
 +	qdf_mem_copy(qdf_nbuf_data(nbuf), skb->data, skb->len);
 +
 +	/*
-+	 * Reserve a tracking slot and assign a non-zero desc_id BEFORE
-+	 * submit.  desc_id 0 collides with the stock mgmt_txrx pool and
-+	 * makes wma_process_mgmt_tx_completion spam "descriptor
-+	 * unavailable for id 0".  Our IDs live in HDD_MON_INJECT_DESC_BASE
-+	 * range so stock completion looks them up, fails harmlessly, and
-+	 * the reaper reclaims the DMA-mapped nbuf.
++	 * Reserve a tracking slot and assign a unique high-range desc_id
++	 * BEFORE submit.  desc_id 0 collides with the stock mgmt_txrx
++	 * pool and makes wma_process_mgmt_tx_completion spam
++	 * "descriptor unavailable for id 0".  Our IDs live at
++	 * HDD_MON_INJECT_DESC_BASE|slot with a seq in the upper 16 bits
++	 * so stock completion misses cleanly.  We cannot hook that WMA
++	 * handler from this HDD-only patch; the reaper reclaims the
++	 * DMA-mapped nbuf after AGE_MS (faster under pressure).
 +	 */
 +	{
 +		int slot_id;
 +
 +		qdf_spin_lock_bh(&g_inj.lock);
++		if (!g_inj.ready) {
++			qdf_spin_unlock_bh(&g_inj.lock);
++			qdf_nbuf_free(nbuf);
++			hdd_err("Injection: helper went down, dropping");
++			goto drop;
++		}
++		if (g_inj.inflight >= HDD_MON_INJECT_BACKPRESSURE) {
++			qdf_spin_unlock_bh(&g_inj.lock);
++			qdf_nbuf_free(nbuf);
++			hdd_err("Injection: backpressure at submit, dropping");
++			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
++			goto drop;
++		}
 +		slot_id = hdd_mon_inject_slot_put(nbuf);
 +		qdf_spin_unlock_bh(&g_inj.lock);
 +
 +		if (slot_id < 0) {
 +			hdd_err("Injection: no free TX slot, dropping");
 +			qdf_nbuf_free(nbuf);
++			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
 +			goto drop;
 +		}
 +		mgmt.desc_id = (uint32_t)slot_id;
@@ -624,19 +864,26 @@
 +	 *
 +	 * WMI DMA-maps tx_frame internally on LL (caller must NOT pre-map).
 +	 * On success, WMI holds the DMA mapping; we own the nbuf and the
-+	 * reaper unmaps + frees it after HDD_MON_INJECT_AGE_MS (peach-v2
-+	 * does emit completion events, but stock mgmt_txrx cannot match
-+	 * our desc_ids, so the reaper is still required).
++	 * reaper unmaps + frees it (peach-v2 emits completion events, but
++	 * stock mgmt_txrx cannot match our desc_ids, so reclaim is host-
++	 * side only until a WMA completion hook exists).
 +	 */
 +	status = wmi_mgmt_unified_cmd_send(wmi, &mgmt);
 +
 +	if (QDF_IS_STATUS_SUCCESS(status)) {
++		uint32_t inflight_snap;
++
 +		/* netdev stats (hdd_get_stats may hide these in sysfs) */
 +		dev->stats.tx_packets++;
 +		dev->stats.tx_bytes += skb->len;
-+		hdd_info("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes, desc %u, inflight %u)",
++
++		qdf_spin_lock_bh(&g_inj.lock);
++		inflight_snap = g_inj.inflight;
++		qdf_spin_unlock_bh(&g_inj.lock);
++
++		hdd_info("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes, desc 0x%x, inflight %u)",
 +			 vdev_id, chanfreq, (uint32_t)skb->len, mgmt.desc_id,
-+			 g_inj.inflight);
++			 inflight_snap);
 +		/* Free the original skb — we copied it into nbuf */
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
@@ -644,21 +891,9 @@
 +
 +	hdd_err("Injection: wmi_mgmt_unified_cmd_send failed (%d)", status);
 +	/* WMI already unmapped on its failure path; drop the slot + free */
-+	{
-+		uint32_t idx = mgmt.desc_id - HDD_MON_INJECT_DESC_BASE;
-+
-+		if (idx < HDD_MON_INJECT_SLOTS) {
-+			qdf_spin_lock_bh(&g_inj.lock);
-+			if (g_inj.slots[idx].in_use &&
-+			    g_inj.slots[idx].nbuf == nbuf) {
-+				g_inj.slots[idx].in_use = false;
-+				g_inj.slots[idx].nbuf = NULL;
-+				if (g_inj.inflight)
-+					g_inj.inflight--;
-+			}
-+			qdf_spin_unlock_bh(&g_inj.lock);
-+		}
-+	}
++	qdf_spin_lock_bh(&g_inj.lock);
++	hdd_mon_inject_slot_release_locked(mgmt.desc_id, nbuf);
++	qdf_spin_unlock_bh(&g_inj.lock);
 +	qdf_nbuf_free(nbuf);
 +
 +drop:
@@ -674,20 +909,26 @@
 +	.ndo_start_xmit = hdd_mon_hard_start_xmit,
  	.ndo_get_stats = hdd_get_stats,
  };
-@@ -11425,6 +11698,20 @@
+@@ -11425,7 +12290,26 @@
+ 
  	}
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
 +	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
-+		qdf_spin_lock_bh(&g_inj.lock);
-+		if (adapter->deflink && adapter->deflink->vdev) {
-+			struct wlan_channel *ch = wlan_vdev_mlme_get_des_chan(
-+					adapter->deflink->vdev);
-+			if (ch && ch->ch_freq)
-+				g_inj.chanfreq = ch->ch_freq;
++		{
++			uint32_t chanfreq_snap = 0;
++
++			qdf_spin_lock_bh(&g_inj.lock);
++			if (adapter->deflink && adapter->deflink->vdev) {
++				struct wlan_channel *ch = wlan_vdev_mlme_get_des_chan(
++						adapter->deflink->vdev);
++				if (ch && ch->ch_freq)
++					g_inj.chanfreq = ch->ch_freq;
++			}
++			chanfreq_snap = g_inj.chanfreq;
++			qdf_spin_unlock_bh(&g_inj.lock);
++			hdd_info("Injection: channel updated to %u MHz",
++				 chanfreq_snap);
 +		}
-+		qdf_spin_unlock_bh(&g_inj.lock);
-+		hdd_info("Injection: channel updated to %u MHz",
-+			 g_inj.chanfreq);
 +	}
 +#endif
  		return qdf_status_to_os_return(status);
