@@ -1951,6 +1951,12 @@ runs:
             echo "::error::msm-kernel gki_defconfig missing at $MSM_DEF"
             exit 1
           fi
+          # Stock gki_defconfig has "# CONFIG_WLAN_VENDOR_ATH is not set".
+          # A bare append leaves both lines; strip the negations first so the
+          # merge_defconfig path cannot keep ATH off.
+          sed -i             -e '/^# CONFIG_WLAN_VENDOR_ATH is not set$/d'             -e '/^# CONFIG_ATH_COMMON is not set$/d'             -e '/^# CONFIG_ATH9K is not set$/d'             -e '/^# CONFIG_ATH9K_HW is not set$/d'             -e '/^# CONFIG_ATH9K_COMMON is not set$/d'             -e '/^# CONFIG_ATH9K_HTC is not set$/d'             -e '/^# CONFIG_CAN_SLCAN is not set$/d'             "$MSM_DEF"
+          # Drop any prior positive lines so re-runs stay idempotent.
+          sed -i             -e '/^CONFIG_WLAN_VENDOR_ATH=/d'             -e '/^CONFIG_ATH_COMMON=/d'             -e '/^CONFIG_ATH9K_HW=/d'             -e '/^CONFIG_ATH9K_COMMON=/d'             -e '/^CONFIG_ATH9K_HTC=/d'             -e '/^CONFIG_CAN_SLCAN=/d'             "$MSM_DEF"
           cat >> "$MSM_DEF" <<EOF
         # NetHunter AR9271 (ath9k_htc) -- DDK path; links to vendor mac80211
         CONFIG_WLAN_VENDOR_ATH=y
@@ -1960,6 +1966,9 @@ runs:
         CONFIG_ATH9K_HTC=m
         CONFIG_CAN_SLCAN=m
         EOF
+          for k in CONFIG_WLAN_VENDOR_ATH CONFIG_ATH_COMMON CONFIG_ATH9K_HW CONFIG_ATH9K_COMMON CONFIG_ATH9K_HTC; do
+            grep -q "^${k}=" "$MSM_DEF" || { echo "::error::$k missing after append"; exit 1; }
+          done
           echo "Appended ath9k_htc stack to msm-kernel gki_defconfig"
 
           # sun.bzl hardcodes in_tree_module_list. Kleaf only stages kos named
