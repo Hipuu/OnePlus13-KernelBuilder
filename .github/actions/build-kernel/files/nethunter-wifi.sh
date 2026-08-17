@@ -57,7 +57,13 @@ INSTALL_DIR=/data/adb/nethunter-wifi
 
 # Modules the platform stack owns. Displacing these is what costs internal
 # Wi-Fi, so it happens only when a requested driver actually needs mac80211.
-PLATFORM_MODULES="qca_cld3_peach_v2 mac80211 cfg80211"
+#
+# DDK packs ship peach + vendor cfg/mac + ath9k_htc all CRC-matched together.
+# ath9k links against the same mac80211 peach uses, so only peach is unloaded
+# and the already-resident cfg/mac stay. Non-DDK packs ship a GKI cfg/mac pair
+# that must replace the platform pair (different CRCs).
+PLATFORM_MODULES_FULL="qca_cld3_peach_v2 mac80211 cfg80211"
+PLATFORM_MODULES_DDK="qca_cld3_peach_v2"
 PLATFORM_DIR=/vendor/lib/modules
 
 # The internal Qualcomm Wi-Fi driver. Its operating mode is fixed at insmod time
@@ -212,12 +218,21 @@ needs_mac80211() {
 
 wifi_cmd() { cmd wifi "$@" >/dev/null 2>&1; }
 
+# Modules to unload before loading an external mac80211 driver.
+platform_displace_list() {
+  if have_module qca_cld3_peach_v2; then
+    echo "$PLATFORM_MODULES_DDK"
+  else
+    echo "$PLATFORM_MODULES_FULL"
+  fi
+}
+
 unload_platform_stack() {
   echo "=== displacing platform Wi-Fi stack ==="
   echo "  (internal Wi-Fi stops working until you reboot or run: $0 restore)"
   wifi_cmd set-wifi-enabled disabled
   sleep 2
-  for m in $PLATFORM_MODULES; do
+  for m in $(platform_displace_list); do
     if resident "$m"; then
       if rmmod "$m" 2>"$ERR"; then
         echo "  unloaded $m"
@@ -286,12 +301,17 @@ cmd_restore() {
   fi
 
   echo "=== restoring platform Wi-Fi stack ==="
+  # Prefer pack copies when present (DDK peach matches this Image's CRCs).
   for m in cfg80211 mac80211 qca_cld3_peach_v2; do
     if resident "$m"; then
       echo "  $m already resident"
+    elif [ -f "$DIR/$m.ko" ]; then
+      insmod "$DIR/$m.ko" 2>"$ERR" \
+        && echo "  restored $m (pack)" \
+        || echo "  $m: $(cat "$ERR" 2>/dev/null)"
     elif [ -f "$PLATFORM_DIR/$m.ko" ]; then
       insmod "$PLATFORM_DIR/$m.ko" 2>"$ERR" \
-        && echo "  restored $m" \
+        && echo "  restored $m (vendor)" \
         || echo "  $m: $(cat "$ERR" 2>/dev/null)"
     fi
   done
