@@ -478,7 +478,7 @@
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,9 +7562,166 @@
+@@ -7306,9 +7562,194 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -583,6 +583,29 @@
 +	qdf_nbuf_put_tail(nbuf, skb->len);
 +	qdf_mem_copy(qdf_nbuf_data(nbuf), skb->data, skb->len);
 +
++	/*
++	 * Reserve a tracking slot and assign a non-zero desc_id BEFORE
++	 * submit.  desc_id 0 collides with the stock mgmt_txrx pool and
++	 * makes wma_process_mgmt_tx_completion spam "descriptor
++	 * unavailable for id 0".  Our IDs live in HDD_MON_INJECT_DESC_BASE
++	 * range so stock completion looks them up, fails harmlessly, and
++	 * the reaper reclaims the DMA-mapped nbuf.
++	 */
++	{
++		int slot_id;
++
++		qdf_spin_lock_bh(&g_inj.lock);
++		slot_id = hdd_mon_inject_slot_put(nbuf);
++		qdf_spin_unlock_bh(&g_inj.lock);
++
++		if (slot_id < 0) {
++			hdd_err("Injection: no free TX slot, dropping");
++			qdf_nbuf_free(nbuf);
++			goto drop;
++		}
++		mgmt.desc_id = (uint32_t)slot_id;
++	}
++
 +	/* Fill WMI management TX parameters */
 +	mgmt.tx_frame = nbuf;
 +	mgmt.pdata = qdf_nbuf_data(nbuf);
@@ -593,7 +616,6 @@
 +	mgmt.macaddr = helper_mac;
 +	mgmt.use_6mbps = 0;
 +	mgmt.tx_params_valid = false;
-+	mgmt.desc_id = 0;
 +
 +	/*
 +	 * Submit directly via wmi_mgmt_unified_cmd_send().  This bypasses
@@ -601,36 +623,42 @@
 +	 * straight to the firmware on the helper vdev.
 +	 *
 +	 * WMI DMA-maps tx_frame internally on LL (caller must NOT pre-map).
-+	 * On success, WMI owns the DMA mapping but NOT the nbuf itself.
-+	 * The firmware never sends TX completion for the ghost STA vdev,
-+	 * so we must track the nbuf ourselves and reclaim it via the
-+	 * reaper (which unmaps + frees after HDD_MON_INJECT_AGE_MS).
++	 * On success, WMI holds the DMA mapping; we own the nbuf and the
++	 * reaper unmaps + frees it after HDD_MON_INJECT_AGE_MS (peach-v2
++	 * does emit completion events, but stock mgmt_txrx cannot match
++	 * our desc_ids, so the reaper is still required).
 +	 */
 +	status = wmi_mgmt_unified_cmd_send(wmi, &mgmt);
 +
 +	if (QDF_IS_STATUS_SUCCESS(status)) {
-+		int slot_id;
-+
-+		qdf_spin_lock_bh(&g_inj.lock);
-+		slot_id = hdd_mon_inject_slot_put(nbuf);
-+		qdf_spin_unlock_bh(&g_inj.lock);
-+
-+		if (slot_id < 0) {
-+			hdd_err("Injection: no free TX slot, reaping nbuf immediately");
-+			hdd_mon_inject_unmap_free(nbuf);
-+		}
-+
++		/* netdev stats (hdd_get_stats may hide these in sysfs) */
 +		dev->stats.tx_packets++;
 +		dev->stats.tx_bytes += skb->len;
-+		hdd_debug("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes, inflight %u)",
-+			  vdev_id, chanfreq, (uint32_t)skb->len, g_inj.inflight);
++		hdd_info("Injection: mgmt frame submitted (vdev %u, %u MHz, %u bytes, desc %u, inflight %u)",
++			 vdev_id, chanfreq, (uint32_t)skb->len, mgmt.desc_id,
++			 g_inj.inflight);
 +		/* Free the original skb — we copied it into nbuf */
 +		qdf_nbuf_free(skb);
 +		return NETDEV_TX_OK;
 +	}
 +
 +	hdd_err("Injection: wmi_mgmt_unified_cmd_send failed (%d)", status);
-+	/* WMI already unmapped on its failure path; just free the nbuf */
++	/* WMI already unmapped on its failure path; drop the slot + free */
++	{
++		uint32_t idx = mgmt.desc_id - HDD_MON_INJECT_DESC_BASE;
++
++		if (idx < HDD_MON_INJECT_SLOTS) {
++			qdf_spin_lock_bh(&g_inj.lock);
++			if (g_inj.slots[idx].in_use &&
++			    g_inj.slots[idx].nbuf == nbuf) {
++				g_inj.slots[idx].in_use = false;
++				g_inj.slots[idx].nbuf = NULL;
++				if (g_inj.inflight)
++					g_inj.inflight--;
++			}
++			qdf_spin_unlock_bh(&g_inj.lock);
++		}
++	}
 +	qdf_nbuf_free(nbuf);
 +
 +drop:
