@@ -2700,6 +2700,19 @@ runs:
         install -m 0644 "$DDK_KO" "$UNAME_DIR/kernel/drivers/net/wireless/$EXPECTED_KO"
         echo "DDK module staged: $EXPECTED_KO ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$DDK_KO")") unstripped)"
 
+        # The qcacld dependency closure (wlan platform cnss*, dataipa ipam,
+        # soc gsim/rmnet_mem/smem-mailbox) builds as separate Bazel kernel_module
+        # targets whose .kos only reach a staging archive in the full device
+        # dist, not the //msm-kernel:sun_perf dist we consume. Sweep any
+        # built-but-unstaged .ko into the tree before the strip pass so they
+        # ship stripped and depmod sees the whole closure.
+        while IFS= read -r -d '' ko; do
+          base="$(basename "$ko")"
+          [ -e "$UNAME_DIR/$base" ] && continue
+          install -m 0644 "$ko" "$UNAME_DIR/"
+          echo "Swept external module: $base ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$ko")"))"
+        done < <(find -L bazel-bin -type f -name '*.ko' -print0 2>/dev/null)
+
         # kernel_build.strip_modules defaults to False and msm-kernel never sets
         # it (only //common:kernel_aarch64 passes strip_modules = True), so every
         # vendor and DDK module carries full debug info. Unstripped,
