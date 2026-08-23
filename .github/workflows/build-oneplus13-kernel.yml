@@ -290,8 +290,20 @@ jobs:
           else
             owner=tiann; name=KernelSU; default_ref=main
           fi
-          ref="${KSU_BRANCH:-}"
-          [ -n "$ref" ] || ref="$default_ref"
+
+          # Prefer the last known-good commit for this variant so SUSFS and KernelSU
+          # stay in sync. Falls back to the branch HEAD when no compatible commit is
+          # recorded, allowing users to opt into latest by passing a branch name.
+          compatible_commit=$(jq -r --arg ref "$default_ref" '.ksu[$ref] // empty' .github/compatible-commits.json)
+          if [ -n "${KSU_BRANCH:-}" ]; then
+            ref="$KSU_BRANCH"
+          elif [ -n "$compatible_commit" ]; then
+            ref="$compatible_commit"
+            echo "ℹ️ Using compatible KernelSU commit for $KSU_VARIANT ($default_ref): $ref"
+          else
+            ref="$default_ref"
+            echo "ℹ️ No compatible commit recorded; using KernelSU branch: $ref"
+          fi
 
           query='query($owner: String!, $name: String!, $headRef: String!, $tagRef: String!, $objRef: String!) {
             repository(owner: $owner, name: $name) {
