@@ -1925,8 +1925,9 @@ runs:
         CONFIG_MT7603E=m
         CONFIG_MT76x0U=m
         CONFIG_MT76x2U=m
-        CONFIG_MT7915E=m
-        CONFIG_MT7921E=m
+        # MT7915E / MT7921E are PCI/PCIe card drivers -- unusable on the
+        # phone -- and MT7915E drags in relayfs symbols that modpost cannot
+        # resolve against the vendor config. USB variants stay.
         CONFIG_MT7921U=m
         CONFIG_MAC80211_HWSIM=m
         CONFIG_MAC80211_LEDS=y
@@ -1939,8 +1940,8 @@ runs:
                    CONFIG_RT2X00 CONFIG_RT2500USB CONFIG_RT73USB CONFIG_RT2800USB \
                    CONFIG_ZD1211RW \
                    CONFIG_P54_COMMON CONFIG_P54_USB CONFIG_MT7601U CONFIG_MT7603E \
-                   CONFIG_MT76x0U CONFIG_MT76x2U CONFIG_MT7915E \
-                   CONFIG_MT7921E CONFIG_MT7921U CONFIG_MAC80211_HWSIM; do
+                   CONFIG_MT76x0U CONFIG_MT76x2U \
+                   CONFIG_MT7921U CONFIG_MAC80211_HWSIM; do
             grep -q "^${k}=" "$MSM_DEF" || { echo "::error::$k missing after append"; exit 1; }
           done
           # Align vendor fragment so merge_config + check_merged_defconfig agree.
