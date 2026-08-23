@@ -856,11 +856,7 @@ runs:
           return 1
         }
 
-        KERNEL_PATCHES_COMMIT="757201d983e2549dc7945a21fa6a056eb2e55263"
         retry_clone "https://github.com/WildKernels/kernel_patches.git" "main" "1"
-        git -C kernel_patches fetch --depth=1 origin "$KERNEL_PATCHES_COMMIT"
-        git -C kernel_patches checkout --detach "$KERNEL_PATCHES_COMMIT"
-        test "$(git -C kernel_patches rev-parse HEAD)" = "$KERNEL_PATCHES_COMMIT"
 
         if [ "${{ env.OP_SUSFS }}" = true ]; then
           echo "Using SUSFS branch/commit: $SUSFS_BRANCH"
