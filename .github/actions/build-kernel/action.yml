@@ -1922,12 +1922,12 @@ runs:
         CONFIG_P54_USB=m
         CONFIG_WLAN_VENDOR_MEDIATEK=y
         CONFIG_MT7601U=m
-        CONFIG_MT7603E=m
         CONFIG_MT76x0U=m
         CONFIG_MT76x2U=m
-        # MT7915E / MT7921E are PCI/PCIe card drivers -- unusable on the
-        # phone -- and MT7915E drags in relayfs symbols that modpost cannot
-        # resolve against the vendor config. USB variants stay.
+        CONFIG_MT7663U=m
+        # MT7603E / MT7915E / MT7921E are PCI(e) card drivers -- unusable
+        # on the phone -- and MT7915E drags in relayfs symbols that modpost
+        # cannot resolve against the vendor config. USB variants stay.
         CONFIG_MT7921U=m
         CONFIG_MAC80211_HWSIM=m
         CONFIG_MAC80211_LEDS=y
@@ -1939,7 +1939,7 @@ runs:
                    CONFIG_RTW88_8723DU \
                    CONFIG_RT2X00 CONFIG_RT2500USB CONFIG_RT73USB CONFIG_RT2800USB \
                    CONFIG_ZD1211RW \
-                   CONFIG_P54_COMMON CONFIG_P54_USB CONFIG_MT7601U CONFIG_MT7603E \
+                   CONFIG_P54_COMMON CONFIG_P54_USB CONFIG_MT7601U CONFIG_MT7663U \
                    CONFIG_MT76x0U CONFIG_MT76x2U \
                    CONFIG_MT7921U CONFIG_MAC80211_HWSIM; do
             grep -q "^${k}=" "$MSM_DEF" || { echo "::error::$k missing after append"; exit 1; }
@@ -2019,21 +2019,26 @@ runs:
                 print "        \"drivers/net/wireless/zydas/zd1211rw/zd1211rw.ko\","
                 print "        \"drivers/net/wireless/intersil/p54/p54common.ko\","
                 print "        \"drivers/net/wireless/intersil/p54/p54usb.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt7601u/mt7601u.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76-usb.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7603e.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt76x2-common.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt76x0-common.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt76x0u.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt76x2u.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7615-common.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7915e.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7921-common.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7921e.ko\","
-                print "        \"drivers/net/wireless/mediatek/mt76/mt7921u.ko\","
+                # mt76 leaf drivers build inside per-chip subdirectories
+                # (verified against the vendor tree's mt76/*/Makefile);
+                # flat paths here made Kleaf staging fail with
+                # "Unable to find ... .ko". PCI-only leaves (7603e, 7915e,
+                # 7921e) are excluded -- their configs are never set.
+                print "        \"drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0-common.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt76x0/mt76x0u.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt7615/mt7615-common.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt7615/mt7663-usb-sdio-common.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt7615/mt7663u.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt7921/mt7921-common.ko\","
+                print "        \"drivers/net/wireless/mediatek/mt76/mt7921/mt7921u.ko\","
                 # 6.6 already keeps mac80211_hwsim under wireless/virtual/
                 # (verified against the v6.6 Makefiles). The post-build guard
                 # in Stage Bazel outputs fails loudly if a path is wrong.
