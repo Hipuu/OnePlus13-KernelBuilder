@@ -29,10 +29,10 @@ on:
           - KSU
         default: KSUN
       ksu_branch:
-        description: KernelSU branch, tag, or commit (default pinned commit is known-good for SUSFS v2.2.0)
+        description: KernelSU branch, tag, or commit (empty uses main for KSU, dev for KSUN)
         required: false
         type: string
-        default: '0b375cee4d7fe0426371aced7252951fe58544b3'
+        default: ''
       use_susfs:
         description: Enable SUSFS
         required: true
