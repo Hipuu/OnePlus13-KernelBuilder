@@ -37,7 +37,7 @@ Drivers are built as modules and shipped in `kernel_modules_*.zip`:
 
 - **No boot.img / vendor_boot / DLKM images.** Output is a raw `Image`, an AnyKernel3 ZIP, and a modules ZIP.
 - **No other devices.** OnePlus 13 only.
-- **DDK build ships internal peach + AR9271 (`ath9k_htc`).** Full USB zoo (rtw88/mt76/…) stays on non-DDK variants. See [DDK build](#ddk-build).
+- **DDK build ships internal peach + the full USB zoo.** Same external-adapter coverage as non-DDK variants, built on the vendor kernel; only the out-of-tree rtw88 replacement stays non-DDK (in-tree `rtw88_*_usb` chips are covered). See [DDK build](#ddk-build).
 
 ## DDK build
 
@@ -61,16 +61,17 @@ enabled in the stock `sun_gki_peach-v2_defconfig` and gated at runtime by the
 > `'wiphy_new_nm' exported twice`. Peach is CRC-matched to the vendor pair, so
 > that pair stays authoritative.
 >
-> AR9271 support on DDK is built *on the vendor kernel* (`ath9k_htc` + deps on
-> msm-kernel `gki_defconfig`) so it links against the same mac80211 peach uses.
-> The modules ZIP ships peach, vendor cfg/mac, and the ath9k stack. Loading
-> `ath9k_htc` via `nethunter-wifi.sh` displaces peach only; reboot or
-> `restore` brings internal Wi-Fi back. The broader USB zoo (rtw88, mt76, …)
-> remains on non-DDK variants.
+> The full USB zoo (and AR9271) on DDK is built *on the vendor kernel* (driver
+> configs on msm-kernel `gki_defconfig`) so every driver links against the same
+> mac80211 peach uses. The modules ZIP ships peach, vendor cfg/mac, the ath9k
+> stack, and the whole external-driver zoo. Loading any external driver via
+> `nethunter-wifi.sh` displaces peach only; reboot or `restore` brings internal
+> Wi-Fi back.
 
 The module pack on this variant contains `qca_cld3_peach_v2.ko`, the platform
-`cfg80211`/`mac80211`/`rfkill` it links against, `ath9k_htc` (+ `ath`,
-`ath9k_hw`, `ath9k_common`), the full dependency closure that `modules.dep`
+`cfg80211`/`mac80211`/`rfkill` it links against, `ath9k_htc` (+ deps), the same
+external USB Wi-Fi drivers as the non-DDK variants (`rtl8xxxu`, `rt2800usb`,
+`rtw88_*_usb`, `mt76*`, …), the full dependency closure that `modules.dep`
 resolves, and the CAN and USB-serial drivers. The build fails if the shipped
 modules' `vermagic` does not match the `Image`, since a mismatch makes them
 unloadable.
