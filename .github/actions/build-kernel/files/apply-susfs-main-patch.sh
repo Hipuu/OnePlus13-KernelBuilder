@@ -139,11 +139,10 @@ apply_postpatch() {
       perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\) \{\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t\}/\t\t\tif (vma->vm_end > last_vma_end)\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);/' ./fs/proc/task_mmu.c
     fi
 
-    if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
-      echo "Postpatch: removing temporary nr_subpages/res declarations for android15-6.6"
-      sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
-             -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
-    fi
+    # The nr_subpages/res declarations are prepatched when the vendor kernel lacks
+    # them, and the SUSFS patch's pagemap_read modifications reference both. Keep
+    # them in place rather than reverting them, otherwise the build fails with
+    # "use of undeclared identifier 'nr_subpages'".
   fi
 
   if [ "$ANDROID_VER" = "android12" ] && [ "$KERNEL_VER" = "5.10" ]; then
