@@ -1,0 +1,14 @@
+{
+  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit.",
+  "susfs": {
+    "android12-5.10": "",
+    "android13-5.15": "",
+    "android14-6.1": "",
+    "android15-6.6": "be7b7ef49a1e1b189c3abf00eacaa7ebdb4168c1",
+    "android16-6.12": ""
+  },
+  "ksu": {
+    "main": "",
+    "dev": ""
+  }
+}

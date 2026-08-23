@@ -340,7 +340,21 @@ jobs:
             ["android16-6.12"]="gki-android16-6.12"
           )
           default_branch="${DEFAULT_SUSFS_BRANCHES[$kernel_key]:-gki-android15-6.6}"
-          ref="${SUSFS_BRANCH_INPUT:-$default_branch}"
+
+          # Prefer the last known-good commit for this GKI version so builds stay
+          # green when upstream SUSFS introduces incompatible changes. The mapping
+          # lives in .github/compatible-commits.json and can be updated whenever a
+          # newer compatible commit is verified.
+          compatible_commit=$(jq -r --arg key "$kernel_key" '.susfs[$key] // empty' .github/compatible-commits.json)
+          if [ -n "$SUSFS_BRANCH_INPUT" ]; then
+            ref="$SUSFS_BRANCH_INPUT"
+          elif [ -n "${compatible_commit:-}" ]; then
+            ref="$compatible_commit"
+            echo "ℹ️ Using compatible SUSFS commit for $kernel_key: $ref"
+          else
+            ref="$default_branch"
+            echo "ℹ️ No compatible commit recorded; using SUSFS branch: $ref"
+          fi
 
           echo "Resolving SUSFS ref '$ref' for $kernel_key"
           query="{ project(fullPath: \"simonpunk/susfs4ksu\") { repository { commit(ref: \"$ref\") { sha } } } }"
