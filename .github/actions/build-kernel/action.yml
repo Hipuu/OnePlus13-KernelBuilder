@@ -1916,6 +1916,9 @@ runs:
         CONFIG_WLAN_VENDOR_ZYDAS=y
         CONFIG_ZD1211RW=m
         CONFIG_WLAN_VENDOR_INTERSIL=y
+        # P54_USB *depends on* P54_COMMON (no select), so COMMON must be
+        # listed explicitly; it has a prompt, so olddefconfig honors it.
+        CONFIG_P54_COMMON=m
         CONFIG_P54_USB=m
         CONFIG_WLAN_VENDOR_MEDIATEK=y
         CONFIG_MT7601U=m
@@ -1935,7 +1938,7 @@ runs:
                    CONFIG_RTW88_8723DU \
                    CONFIG_RT2X00 CONFIG_RT2500USB CONFIG_RT73USB CONFIG_RT2800USB \
                    CONFIG_ZD1211RW \
-                   CONFIG_P54_USB CONFIG_MT7601U CONFIG_MT7603E \
+                   CONFIG_P54_COMMON CONFIG_P54_USB CONFIG_MT7601U CONFIG_MT7603E \
                    CONFIG_MT76x0U CONFIG_MT76x2U CONFIG_MT7915E \
                    CONFIG_MT7921E CONFIG_MT7921U CONFIG_MAC80211_HWSIM; do
             grep -q "^${k}=" "$MSM_DEF" || { echo "::error::$k missing after append"; exit 1; }
