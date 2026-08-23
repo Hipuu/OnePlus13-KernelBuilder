@@ -2026,7 +2026,7 @@ runs:
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko\","
                 print "        \"drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko\","
                 # mt76 leaf drivers build inside per-chip subdirectories
-                # (verified against the vendor tree's mt76/*/Makefile);
+                # (paths verified against each mt76/*/Makefile);
                 # flat paths here made Kleaf staging fail with
                 # "Unable to find ... .ko". PCI-only leaves (7603e, 7915e,
                 # 7921e) are excluded -- their configs are never set.
