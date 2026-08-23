@@ -125,9 +125,9 @@ gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
 |-------|-------------|---------|
 | `kernel_version` | Variant to build; `all` builds every variant in parallel | `6.6.89 A16` |
 | `ksu_variant` | `KSUN` or `KSU` | `KSUN` |
-| `ksu_branch` | KernelSU branch/tag/commit (empty = `dev` for KSUN, `main` for KSU) | empty |
+| `ksu_branch` | KernelSU branch/tag/commit (empty = known-good commit from `compatible-commits.json`, else branch `dev` for KSUN / `main` for KSU) | empty |
 | `use_susfs` | Enable SUSFS | `true` |
-| `susfs_branch` | SUSFS branch/commit (empty = `gki-android15-6.6`) | empty |
+| `susfs_branch` | SUSFS branch/commit (empty = known-good commit from `compatible-commits.json`, else branch `gki-android15-6.6`) | empty |
 | `nethunter` | Enable NetHunter inline configs | `true` |
 | `wireless_modules` | Build and package wireless kernel modules | `true` |
 | `optimize_level` | `O2` or `O3` | `O2` |
@@ -304,6 +304,7 @@ The OnePlus 13 kernel needs WildKernels' manifest fork, pinned source/toolchain 
 - Source sync pulls pinned Clang, kernel build-tools and AnyKernel3 from WildKernels' public `toolchain-cache` release, so no per-repository toolchain mirror is needed.
 - A thin workflow exposes only OnePlus 13 options.
 - The KernelSU ref is resolved to a commit SHA before building. KernelSU-Next's `setup.sh` checks out the *latest tag* when given no argument, and that tag lags the SUSFS patch set — `10_enable_susfs_for_ksu.patch` expects a `kernel/Kconfig` that only exists on `dev`, leaving an unfixable `kernel/Kconfig.rej`.
+- When no explicit ref is supplied, KernelSU/SUSFS default to the known-good commits in `.github/compatible-commits.json` instead of raw branch HEADs. SUSFS patches must match the KernelSU checkout; upstream HEADs can drift apart and fail mid-patch. After verifying a build passes with newer commits, record them in the JSON.
 
 See [TESTING.md](TESTING.md) for validation, build profiles, and debugging.
 
@@ -312,6 +313,7 @@ See [TESTING.md](TESTING.md) for validation, build profiles, and debugging.
 ```
 .github/
   workflows/build-oneplus13-kernel.yml    # multi-version matrix workflow
+  compatible-commits.json                 # known-good KSU/SUSFS commit defaults
   actions/
     build-kernel/                         # vendored build pipeline + NetHunter extensions
       files/nethunter-wifi.sh             # on-device module loader
