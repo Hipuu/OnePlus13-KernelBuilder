@@ -181,5 +181,6 @@ This wraps the `gh` CLI to inspect recent runs, fetch logs, or download artifact
 ### Modifying the wireless module pack
 
 - The module configs are appended to `gki_defconfig` inside `.github/actions/build-kernel/action.yml`.
+- DDK variants (`OP_DDK`) must not touch the *common* `gki_defconfig` for `cfg80211`/`mac80211` (modpost "exported twice"); their driver configs go on the **msm-kernel** `gki_defconfig`, and every shipped `.ko` must be listed in msm-kernel's `sun.bzl` `in_tree_module_list` or Kleaf will not stage it (a post-build orphan guard fails the build).
 - The packaging logic computes a dependency closure from `modules.dep` and ships a flat ZIP plus `nethunter-wifi.sh`.
 - Any change to the loader must pass `dash -n` and the bashism/awk/CRLF checks in `validate_workflow.sh`.
