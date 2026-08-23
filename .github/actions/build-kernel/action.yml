@@ -1850,6 +1850,8 @@ runs:
           # leaves both lines; strip every negation first so the merge_defconfig
           # path cannot keep a driver off, and drop any prior positive line so
           # re-runs stay idempotent.
+          # HWMON and SPMI_MSM_PMIC_ARB are set =m by the vendor perf fragment;
+          # stripping the base negations avoids merge "overridden config" aborts.
           STRIP_KEYS="
             WLAN_VENDOR_ATH ATH_COMMON ATH9K_HW ATH9K_COMMON ATH9K_HTC
             CARL9170 CARL9170_LEDS
@@ -1866,6 +1868,7 @@ runs:
             MT76x2_COMMON MT76x0_COMMON MT76x0U MT76x2U
             MT7615_COMMON MT7915E MT7921_COMMON MT7921E MT7921U
             MAC80211_HWSIM EEPROM_93CX6 MAC80211_LEDS CAN_SLCAN
+            HWMON SPMI_MSM_PMIC_ARB
           "
           for k in $STRIP_KEYS; do
             sed -i -e "/^# CONFIG_${k} is not set$/d" -e "/^CONFIG_${k}=/d" "$MSM_DEF"
@@ -1876,8 +1879,10 @@ runs:
           # check_merged fails with "MAC80211_LEDS n -> y".
           cat >> "$MSM_DEF" <<EOF
         # NetHunter external USB Wi-Fi zoo -- DDK path; links to vendor mac80211.
-        # Mirrors the non-DDK append below minus CONFIG_CFG80211/CONFIG_MAC80211:
-        # those are vendor in_tree_modules here and a GKI copy breaks modpost.
+        # Mirrors the non-DDK append below minus the cfg80211/mac80211 cores:
+        # those ship as vendor in_tree_modules and a GKI copy breaks modpost.
+        # Keep this comment free of Kconfig-style tokens -- the merge
+        # checker treats them as previous values and aborts the build.
         CONFIG_WLAN_VENDOR_ATH=y
         CONFIG_ATH_COMMON=m
         CONFIG_ATH9K_HW=m
@@ -1949,18 +1954,26 @@ runs:
             sed -i \
               -e '/^# CONFIG_MAC80211_LEDS is not set$/d' \
               -e '/^CONFIG_MAC80211_LEDS=/d' \
+              -e '/^# CONFIG_MAC80211_HWSIM is not set$/d' \
+              -e '/^CONFIG_MAC80211_HWSIM=/d' \
               "$SUN_PERF_CFG"
-            # Keep MAC80211_LEDS near the other MAC80211 knobs if present.
+            # Keep both near the other MAC80211 knobs if present. LEDS flips to
+            # y (ath9k select); HWSIM ships as a module in the zoo while the
+            # stock perf fragment hard-negates it.
             if grep -q '^CONFIG_MAC80211=' "$SUN_PERF_CFG"; then
-              sed -i '/^CONFIG_MAC80211=/a CONFIG_MAC80211_LEDS=y' "$SUN_PERF_CFG"
+              sed -i '/^CONFIG_MAC80211=/a CONFIG_MAC80211_LEDS=y\nCONFIG_MAC80211_HWSIM=m' "$SUN_PERF_CFG"
             else
-              echo 'CONFIG_MAC80211_LEDS=y' >> "$SUN_PERF_CFG"
+              printf 'CONFIG_MAC80211_LEDS=y\nCONFIG_MAC80211_HWSIM=m\n' >> "$SUN_PERF_CFG"
             fi
             grep -q '^CONFIG_MAC80211_LEDS=y$' "$SUN_PERF_CFG" || {
               echo "::error::failed to set CONFIG_MAC80211_LEDS=y in sun_perf.config"
               exit 1
             }
-            echo "Aligned sun_perf.config CONFIG_MAC80211_LEDS=y (ath9k select)"
+            grep -q '^CONFIG_MAC80211_HWSIM=m$' "$SUN_PERF_CFG" || {
+              echo "::error::failed to set CONFIG_MAC80211_HWSIM=m in sun_perf.config"
+              exit 1
+            }
+            echo "Aligned sun_perf.config MAC80211_LEDS=y, MAC80211_HWSIM=m"
           else
             echo "::warning::sun_perf.config missing; relying on gki_defconfig only"
           fi
