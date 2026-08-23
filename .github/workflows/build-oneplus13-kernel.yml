@@ -321,6 +321,51 @@ jobs:
           echo "Resolved $KSU_VARIANT ref '$ref' -> $resolved"
           echo "ref=$resolved" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve SUSFS ref
+        id: susfs
+        shell: bash
+        env:
+          SUSFS_BRANCH_INPUT: ${{ inputs.susfs_branch }}
+        run: |
+          set -euo pipefail
+          android_version=$(jq -r '.android_version' "${{ matrix.config }}")
+          kernel_version=$(jq -r '.kernel_version' "${{ matrix.config }}")
+          kernel_key="$android_version-$kernel_version"
+
+          declare -A DEFAULT_SUSFS_BRANCHES=(
+            ["android12-5.10"]="gki-android12-5.10"
+            ["android13-5.15"]="gki-android13-5.15"
+            ["android14-6.1"]="gki-android14-6.1"
+            ["android15-6.6"]="gki-android15-6.6"
+            ["android16-6.12"]="gki-android16-6.12"
+          )
+          default_branch="${DEFAULT_SUSFS_BRANCHES[$kernel_key]:-gki-android15-6.6}"
+          ref="${SUSFS_BRANCH_INPUT:-$default_branch}"
+
+          echo "Resolving SUSFS ref '$ref' for $kernel_key"
+          query="{ project(fullPath: \"simonpunk/susfs4ksu\") { repository { commit(ref: \"$ref\") { sha } } } }"
+
+          resolved=unknown
+          for attempt in 1 2 3; do
+            if response=$(curl -s --fail -G "https://gitlab.com/api/graphql" --data-urlencode "query=$query" 2>/dev/null) && [ -n "$response" ]; then
+              sha=$(jq -r '.data.project.repository.commit.sha // empty' <<< "$response")
+              if [ -n "$sha" ]; then
+                resolved="$sha"
+                break
+              fi
+            fi
+            echo "::warning::GitLab API call failed (attempt $attempt/3); retrying in 5s"
+            sleep 5
+          done
+
+          if [ "$resolved" = unknown ] || [ -z "$resolved" ]; then
+            echo "::error::Could not resolve SUSFS ref '$ref' for $kernel_key"
+            exit 1
+          fi
+
+          echo "Resolved SUSFS ref '$ref' -> $resolved"
+          echo "ref=$resolved" >> "$GITHUB_OUTPUT"
+
       - name: Build kernel
         id: build
         uses: ./.github/actions/build-kernel
@@ -328,7 +373,7 @@ jobs:
           op_config_json: ${{ steps.config.outputs.config_json }}
           ksu_type: ${{ inputs.ksu_variant }}
           ksu_branch_or_hash: ${{ steps.ksu.outputs.ref }}
-          susfs_commit_hash_or_branch: ${{ inputs.susfs_branch }}
+          susfs_commit_hash_or_branch: ${{ steps.susfs.outputs.ref }}
           build_timestamp: ${{ inputs.build_timestamp }}
           optimize_level: ${{ inputs.optimize_level }}
           clean: ${{ inputs.clean_build }}
