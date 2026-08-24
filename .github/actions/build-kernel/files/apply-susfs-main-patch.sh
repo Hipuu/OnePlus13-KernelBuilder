@@ -185,8 +185,17 @@ apply_postpatch() {
 }
 
 # Dry-run the SUSFS main patch. Returns 0 if it would apply.
+#
+# Fuzz: we use patch's default fuzz factor (2) rather than --fuzz=0. This
+# mirrors the upstream WildKernels/OnePlus_KernelSU_SUSFS flow, which applies
+# 50_add_susfs_in_*.patch with a plain `patch -p1 --forward` (default fuzz).
+# Older android15-6.6 patch levels (6.6.66/6.6.30/6.6.56) drift a few context
+# lines around pure-addition hunks (e.g. show_smap in fs/proc/task_mmu.c and
+# the include block in mm/memory.c); default fuzz absorbs that drift, whereas
+# --fuzz=0 rejected those hunks outright. The prepatch still fixes the cases
+# fuzz cannot (declarations the code references, structural if-block shape).
 dry_run_patch() {
-  patch -p1 --dry-run --forward --fuzz=0 < "$PATCH_FILE" >/dev/null 2>&1
+  patch -p1 --dry-run --forward < "$PATCH_FILE" >/dev/null 2>&1
 }
 
 # Main flow.
@@ -201,14 +210,15 @@ main() {
     echo "::endgroup::"
   else
     echo "::error::SUSFS main patch dry-run failed after prepatch; see below for rejected hunk context"
-    # Best-effort: show what failed, then cleanup.
-    patch -p1 --dry-run --forward --fuzz=0 < "$PATCH_FILE" || true
+    # Best-effort: show what failed (same fuzz as the real apply), then cleanup.
+    patch -p1 --dry-run --forward < "$PATCH_FILE" || true
     apply_postpatch
     exit 1
   fi
 
   echo "::group::SUSFS main patch apply"
-  if patch -p1 --forward --fuzz=0 < "$PATCH_FILE"; then
+  # Apply with the same (default) fuzz as the dry-run above; see dry_run_patch.
+  if patch -p1 --forward < "$PATCH_FILE"; then
     echo "SUSFS main patch applied"
     echo "::endgroup::"
   else
