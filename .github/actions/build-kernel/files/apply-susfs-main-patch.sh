@@ -70,6 +70,16 @@ apply_prepatch() {
       log_prepatch "added_nr_subpages_res"
     fi
 
+    # The SUSFS fs/exec.c hunk expects a `#ifndef __GENKSYMS__ / dma-buf.h`
+    # block right after page_size_compat.h. Newer trees (6.6.118) ship it, but
+    # older android15-6.6 patch levels (6.6.89/66/30/56) go straight to
+    # <linux/uaccess.h>, so hunk #1 fails. Insert the block to match context.
+    if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/exec.c; then
+      echo "Prepatch: adding __GENKSYMS__ dma-buf.h block to fs/exec.c for android15-6.6"
+      awk '/#include <linux\/page_size_compat.h>/{print; print ""; print "#ifndef __GENKSYMS__"; print "#include <linux/dma-buf.h>"; print "#endif"; next} {print}' ./fs/exec.c > ./fs/exec.c.tmp && mv ./fs/exec.c.tmp ./fs/exec.c
+      log_prepatch "added_genksyms_dmabuf_exec"
+    fi
+
     # Add missing headers if absent.
     if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
       echo "Prepatch: adding dma-buf.h to fs/proc/base.c"
