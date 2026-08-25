@@ -722,14 +722,26 @@ runs:
         ccache -z
         rm -f "$CCACHE_DIR/ccache.log"
 
-        # Blacklist Risky files from ccache
-        sed -i '1i // CI_RUN_ID: ${{ github.run_id }}' "$COMMON_KERNEL_FOLDER/kernel/configs.c"
-        sed -i '1i // ccache:disable' "$COMMON_KERNEL_FOLDER/kernel/configs.c"
+        # Blacklist Risky files from ccache.
+        #
+        # Make+ccache path only. Prepending a fresh CI_RUN_ID comment each run
+        # busts stale ccache objects for kernel/configs.c. Under the Bazel/DDK
+        # path no ccache exists (Bazel content-addresses actions), so the
+        # per-run mutation only changes the source digest and invalidates the
+        # vmlinux -> modules critical path against the restored disk cache
+        # (run 32800021564: only 90 of 124 spawn actions were cache hits).
+        # Keep the file byte-stable across runs for Bazel.
+        if [ "${OP_DDK:-false}" != "true" ]; then
+          sed -i '1i // CI_RUN_ID: ${{ github.run_id }}' "$COMMON_KERNEL_FOLDER/kernel/configs.c"
+          sed -i '1i // ccache:disable' "$COMMON_KERNEL_FOLDER/kernel/configs.c"
 
-        if head -n 1 "$COMMON_KERNEL_FOLDER/kernel/configs.c" | grep -q "// ccache:disable"; then
-            echo "Success: ccache is disabled for this file!"
+          if head -n 1 "$COMMON_KERNEL_FOLDER/kernel/configs.c" | grep -q "// ccache:disable"; then
+              echo "Success: ccache is disabled for this file!"
+          else
+              echo "Error: Modification failed or line is missing."
+          fi
         else
-            echo "Error: Modification failed or line is missing."
+          echo "DDK build: keeping kernel/configs.c untouched so Bazel disk-cache keys stay stable"
         fi
 
         echo "::endgroup::"
