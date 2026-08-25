@@ -1239,8 +1239,13 @@ runs:
         cd "$KERNEL_PLATFORM_FOLDER"
         echo "Adding BBG..."
         if ! wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main; then
-          echo "::warning::BBG setup script failed, continuing anyway"
+          echo "::warning::BBG setup.sh failed, continuing anyway"
         fi
+        # setup.sh leaves a live git checkout behind. kleaf globs the whole
+        # kernel tree into kernel_build srcs, so .git/index, packed-refs and
+        # packfile names (all clone-time dependent) become action inputs and
+        # bust //common:kernel_aarch64 against the disk cache every run.
+        rm -rf common/security/baseband-guard/.git
         echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
 
@@ -2636,13 +2641,17 @@ runs:
         # in_tree_modules include the cfg80211/mac80211 that the DDK module
         # links against, and the staging step needs them in a depmod-shaped
         # tree to resolve the dependency closure for the modules ZIP.
+        # tee target must live OUTSIDE the kernel tree: kleaf globs all of
+        # common/ into kernel_build srcs, so a build.log inside it would be
+        # captured as an action input and bust //common:kernel_aarch64.
+        DDK_BUILD_LOG="$RUNNER_TEMP/ddk-build.log"
         if ! ./tools/bazel build \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
           "$DDK_MODULE_TARGET" \
-          2>&1 | tee "$COMMON_KERNEL_FOLDER/build.log"; then
-          echo "::error::Bazel build failed; tail of build.log:"
-          tail -n 300 "$COMMON_KERNEL_FOLDER/build.log" || true
+          2>&1 | tee "$DDK_BUILD_LOG"; then
+          echo "::error::Bazel build failed; tail of ddk-build.log:"
+          tail -n 300 "$DDK_BUILD_LOG" || true
           exit 1
         fi
 
@@ -2676,7 +2685,7 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: build-log-${{ env.OP_MODEL }}
-        path: ${{ env.COMMON_KERNEL_FOLDER }}/build.log
+        path: ${{ runner.temp }}/ddk-build.log
         if-no-files-found: ignore
 
     - name: Stage Bazel outputs
