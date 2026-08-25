@@ -2658,6 +2658,7 @@ runs:
           "$DDK_MODULE_TARGET" \
           "//msm-kernel:${OP_DDK_TARGET}" \
           "//common:kernel_aarch64" \
+          "//common:kernel_aarch64_config" \
           2>&1 | tee "$DDK_BUILD_LOG"; then
           echo "::error::Bazel build failed; tail of ddk-build.log:"
           tail -n 300 "$DDK_BUILD_LOG" || true
