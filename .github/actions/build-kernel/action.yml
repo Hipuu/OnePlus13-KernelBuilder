@@ -2645,10 +2645,18 @@ runs:
         # common/ into kernel_build srcs, so a build.log inside it would be
         # captured as an action input and bust //common:kernel_aarch64.
         DDK_BUILD_LOG="$RUNNER_TEMP/ddk-build.log"
+        # //common:kernel_aarch64 and //msm-kernel:<target> are requested
+        # explicitly: on a fully disk-cache-warm build Bazel only
+        # re-materializes outputs belonging to requested targets' default
+        # output sets. Image (common) and modules_staging_dir*.tar.gz (the
+        # vendor kernel) are harvested by later steps via bazel-bin; without
+        # this they stay cache-side and staging fails with "No kernel Image".
         if ! ./tools/bazel build \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
           "$DDK_MODULE_TARGET" \
+          "//msm-kernel:${OP_DDK_TARGET}" \
+          "//common:kernel_aarch64" \
           2>&1 | tee "$DDK_BUILD_LOG"; then
           echo "::error::Bazel build failed; tail of ddk-build.log:"
           tail -n 300 "$DDK_BUILD_LOG" || true
