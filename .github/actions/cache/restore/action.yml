@@ -146,19 +146,29 @@ runs:
               fi
             }
 
+            # Extraction failures must be fatal: a silently failed restore
+            # looks like "Restore complete." and the build proceeds cold (or
+            # with a half-populated cache dir) with no signal.
+            extract_or_die() {
+              if ! extract_cache "$1"; then
+                echo "::error::Cache extraction failed; archive may be corrupt: $FINAL_ARCHIVE"
+                exit 1
+              fi
+            }
+
             if [ "$IS_SPLIT" = "true" ]; then
               PARTS=$(ls "$FINAL_ARCHIVE.part"* | sort | tr '\n' ' ')
               if [ "$COMPRESSED" = "true" ]; then
-                extract_cache "cat $PARTS | tar -I 'zstd -d -T0' -xvf - -C '$EXTRACT_DIR'"
+                extract_or_die "cat $PARTS | tar -I 'zstd -d -T0' -xvf - -C '$EXTRACT_DIR'"
               else
-                extract_cache "cat $PARTS | tar -xvf - -C '$EXTRACT_DIR'"
+                extract_or_die "cat $PARTS | tar -xvf - -C '$EXTRACT_DIR'"
               fi
               rm -f $PARTS
             else
               if [ "$COMPRESSED" = "true" ]; then
-                extract_cache "tar -I 'zstd -d -T0' -xvf '$FINAL_ARCHIVE' -C '$EXTRACT_DIR'"
+                extract_or_die "tar -I 'zstd -d -T0' -xvf '$FINAL_ARCHIVE' -C '$EXTRACT_DIR'"
               else
-                extract_cache "tar -xvf '$FINAL_ARCHIVE' -C '$EXTRACT_DIR'"
+                extract_or_die "tar -xvf '$FINAL_ARCHIVE' -C '$EXTRACT_DIR'"
               fi
               rm -f "$FINAL_ARCHIVE"
             fi

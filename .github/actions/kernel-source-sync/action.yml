@@ -43,6 +43,7 @@ runs:
         import os, shutil
         import time
         import glob
+        import hashlib
         from concurrent.futures import ThreadPoolExecutor
         import requests
 
@@ -82,7 +83,10 @@ runs:
             start_time = time.time()
             MAX_ATTEMPTS = 3
             for attempt in range(1, MAX_ATTEMPTS + 1):
-                shm_workspace = f"/dev/shm/sync_{hash(name) % 1000000}"
+                # hash() is salted per process and can collide across names;
+                # a collision means two parallel threads share (and rmtree)
+                # the same workspace. md5 is deterministic and stable.
+                shm_workspace = f"/dev/shm/sync_{hashlib.md5(name.encode()).hexdigest()[:12]}"
                 if os.path.exists(shm_workspace):
                     shutil.rmtree(shm_workspace, ignore_errors=True)
                 os.makedirs(shm_workspace, exist_ok=True)

@@ -41,6 +41,7 @@ runs:
         TARGET_REPO: "${{ github.repository }}"
       run: |
         # Archive, Split, and Upload Cache
+        set -euo pipefail
         if [ "${{ inputs.debug }}" = "true" ]; then set -x; fi
 
         if [ "${{ inputs.working_dir }}" != "" ]; then
@@ -101,6 +102,18 @@ runs:
 
           FILE_SIZE=$(stat -c%s "$FILENAME")
           echo "Archive created: $FILENAME ($FILE_SIZE bytes)"
+
+          # Verify the archive before uploading. A truncated or corrupt cache
+          # asset silently poisons every later restore (observed on run
+          # 32827336068: zstd "premature end" after tar hit a file that
+          # vanished mid-stream), and restore-side extraction used to swallow
+          # the failure too.
+          if [ "${{ inputs.compression_level }}" -eq 0 ]; then
+            tar -tf "$FILENAME" > /dev/null
+          else
+            zstd -t "$FILENAME"
+          fi
+          echo "Archive integrity verified."
           echo "::endgroup::"
 
           ASSETS_URL="https://github.com/${TARGET_REPO}/releases/expanded_assets/$TAG_NAME"
