@@ -2,7 +2,6 @@ name: Build OnePlus 13 Kernel
 
 permissions:
   contents: write
-  actions: write
 
 on:
   workflow_dispatch:
@@ -369,11 +368,11 @@ jobs:
           fi
 
           echo "Resolving SUSFS ref '$ref' for $kernel_key"
-          query="{ project(fullPath: \"simonpunk/susfs4ksu\") { repository { commit(ref: \"$ref\") { sha } } } }"
+          query='query($ref: String!) { project(fullPath: "simonpunk/susfs4ksu") { repository { commit(ref: $ref) { sha } } } }'
 
           resolved=unknown
           for attempt in 1 2 3; do
-            if response=$(curl -s --fail -G "https://gitlab.com/api/graphql" --data-urlencode "query=$query" 2>/dev/null) && [ -n "$response" ]; then
+            if response=$(curl -s --fail -G "https://gitlab.com/api/graphql" --data-urlencode "query=$query" --data-urlencode "variables={\"ref\":\"$ref\"}" 2>/dev/null) && [ -n "$response" ]; then
               sha=$(jq -r '.data.project.repository.commit.sha // empty' <<< "$response")
               if [ -n "$sha" ]; then
                 resolved="$sha"

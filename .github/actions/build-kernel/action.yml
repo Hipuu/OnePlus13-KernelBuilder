@@ -311,7 +311,7 @@ runs:
         echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
         REPO="/usr/local/bin/repo"
         if [ ! -x "$REPO" ]; then
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
+          curl --fail --show-error --location --proto '=https' https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
           chmod +x "$REPO"
         fi
         echo "REPO=$REPO" >> "$GITHUB_ENV"
@@ -594,7 +594,7 @@ runs:
         if [ -z "$OP_RUST_COMPILER" ]; then
           for base in "$KERNEL_PLATFORM_FOLDER/prebuilts" "$KERNEL_PLATFORM_FOLDER/prebuilts-master"; do
             [ -d "$base/rust/linux-x86" ] || continue
-            latest=$(ls -d "$base/rust/linux-x86/1."* 2>/dev/null | sort -V | head -n1 || true)
+            latest=$(ls -d "$base/rust/linux-x86/1."* 2>/dev/null | sort -V | tail -n1 || true)
             if [ -n "$latest" ] && [ -x "$latest/bin/rustc" ]; then
               RUSTC_BIN="$latest/bin"
               RUSTC_FOUND=true
@@ -1058,6 +1058,7 @@ runs:
         case "$susfs_version" in
           "v1.5.8")
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              cd "$KSUN_FOLDER"
               patch -p1 --forward --fuzz=3 < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
               patch -p1 --forward --fuzz=3 < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/fix_apk_sign.c.patch"
               patch -p1 --forward --fuzz=3 < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/fix_core_hook.c.patch"
@@ -1346,6 +1347,12 @@ runs:
           "_${KERNEL_FULL_VER}.ko"
         )
 
+        OVERLAY_DIR="$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/modules"
+        if [ ! -d "$OVERLAY_DIR" ]; then
+          echo "::error::module overlay directory missing: $OVERLAY_DIR"
+          exit 1
+        fi
+
         while IFS= read -r -d '' file; do
           filename="${file##*/}"
           module_name=""
@@ -1382,7 +1389,7 @@ runs:
             selected_file["$module_name"]="$file"
             selected_priority["$module_name"]="$priority"
           fi
-        done < <(find "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/modules/" -type f -name '*.ko' -print0)
+        done < <(find "$OVERLAY_DIR" -type f -name '*.ko' -print0)
 
         if (( selected_count == 0 )); then
           echo "No matching kernel modules found."
@@ -2366,7 +2373,10 @@ runs:
           exit 1
         fi
         cd "$QCACLD"
-        # Capture dry-run output for debugging, but don't exit on failure yet
+        # Capture dry-run output for debugging, but don't exit on failure yet.
+        # Track the fuzz level that actually applies: the real apply below must
+        # reuse it, not blindly retry --fuzz=3 after that level already failed.
+        APPLY_FUZZ=3
         if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun.log 2>&1; then
           echo "::error::monitor injection patch does not apply to this qcacld revision"
           cat /tmp/inject_dryrun.log | head -50 || true
@@ -2377,8 +2387,9 @@ runs:
             exit 1
           fi
           echo "::warning::patch applies with fuzz=10 but not fuzz=3"
+          APPLY_FUZZ=10
         fi
-        patch -p1 --fuzz=3 < "$QCACLD_PATCH"
+        patch -p1 --fuzz="$APPLY_FUZZ" < "$QCACLD_PATCH"
 
         # Fail loudly if the Tx hook is not actually in place: a silently
         # unpatched driver looks identical until injection is tried on-device.
@@ -2582,6 +2593,10 @@ runs:
 
         KERNEL_TARGET="//msm-kernel:${OP_DDK_TARGET}"
         MODULE_TARGET="//vendor/qcom/opensource/wlan/qcacld-3.0:${OP_DDK_TARGET}_qca_cld_${OP_DDK_CHIPSET}"
+        if [ -z "${OP_DDK_TARGET:-}" ] || [ -z "${OP_DDK_CHIPSET:-}" ]; then
+          echo "::error::OP_DDK_TARGET/OP_DDK_CHIPSET empty; cannot compose Bazel labels"
+          exit 1
+        fi
         echo "DDK_KERNEL_TARGET=$KERNEL_TARGET" >> "$GITHUB_ENV"
         echo "DDK_MODULE_TARGET=$MODULE_TARGET" >> "$GITHUB_ENV"
         echo "Kernel target : $KERNEL_TARGET"
@@ -2621,7 +2636,6 @@ runs:
         echo "EFFECTIVE_BUILD_TIMESTAMP=$KBUILD_BUILD_TIMESTAMP" >> "$GITHUB_ENV"
 
         BUILD_START=$(date +%s)
-        set -o pipefail
 
         # The module's kernel_build is //msm-kernel:<target>, whose base_kernel
         # is //common:kernel_aarch64, so one invocation builds GKI, the vendor
@@ -2672,7 +2686,7 @@ runs:
 
     - name: Upload build.log on failure
       if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: build-log-${{ env.OP_MODEL }}
         path: ${{ runner.temp }}/ddk-build.log
@@ -2829,8 +2843,12 @@ runs:
         fi
 
         # Re-run depmod so the DDK module appears in modules.dep; the ZIP step
-        # resolves its dependency closure from that file.
-        depmod -b "$OUT/install" "$(basename "$UNAME_DIR")" || true
+        # resolves its dependency closure from that file. A failed depmod must
+        # be visible: silently shipping the archive's stale modules.dep would
+        # drop the swept external modules from the ZIP closure.
+        if ! depmod -b "$OUT/install" "$(basename "$UNAME_DIR")"; then
+          echo "::warning::depmod failed; modules.dep may be stale for $(basename "$UNAME_DIR")"
+        fi
 
         # Fail early if AR9271 stack was requested but Kleaf dropped the kos
         # (e.g. undeclared module_outs without --allow_undeclared_modules).
@@ -3491,9 +3509,13 @@ runs:
           if [ -f "$UNAME_DIR/$rel" ]; then
             cp -n -- "$UNAME_DIR/$rel" "$STAGE/"
           else
-            echo "::warning::modules.dep lists $rel but it is not in the install tree"
+            echo "::error::modules.dep lists $rel but it is not in the install tree"
+            FAILED_DEPS=$((FAILED_DEPS+1))
           fi
         done <<< "$WANTED"
+        if [ "${FAILED_DEPS:-0}" -gt 0 ]; then
+          exit 1
+        fi
 
         MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
         echo "Seeded from module dirs: $SEED_COUNT"
@@ -3509,7 +3531,10 @@ runs:
         # two-module ZIP from a green build because the staging tree was flat
         # and every seed directory was missing.
         missing=""
-        if [ "$OP_DDK" = "true" ]; then
+        # The zoo is only built when nethunter is enabled alongside wireless
+        # (see the module-config step's gating); a DDK build with
+        # wireless_modules=true but nethunter=false ships peach + cfg/mac only.
+        if [ "$OP_DDK" = "true" ] && [ "${OP_NETHUNTER:-false}" = "true" ]; then
           # peach + vendor cfg/mac (CRC pair) + the external-driver zoo built
           # on msm-kernel against that same mac80211.
           for m in "qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_')" cfg80211 mac80211 \
