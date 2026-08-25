@@ -2652,7 +2652,7 @@ runs:
         # vendor kernel) are harvested by later steps via bazel-bin; without
         # this they stay cache-side and staging fails with "No kernel Image".
         if ! ./tools/bazel build \
-          --output_group=modules_staging_archive \
+          --output_groups=+modules_staging_archive \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
           "$DDK_MODULE_TARGET" \
