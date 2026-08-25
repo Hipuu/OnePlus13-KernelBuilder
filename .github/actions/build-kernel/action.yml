@@ -2528,6 +2528,29 @@ runs:
           exit 1
         fi
 
+        # Bazel unconditionally writes wall-clock BUILD_TIMESTAMP /
+        # FORMATTED_DATE builtins into bazel-out/volatile-status.txt on every
+        # invocation. kleaf's kernel_env, scmversion, kernel_config,
+        # kernel_build and DDK rules all declare ctx.version_file as an action
+        # input, so every one of those action keys changed between runs and
+        # the whole kernel chain (scmversion -> config -> Image/LTO ->
+        # modules_prepare -> DdkConfig -> KernelModule, 34 spawned actions)
+        # re-executed even against a fully restored disk cache (runs
+        # 32817061683 vs 32827336068: identical fingerprints except this file).
+        # Script-emitted keys override the builtins, so pin both to fixed
+        # values for byte-stable action keys.
+        WS_COMMON="$KERNEL_PLATFORM_FOLDER/build/kernel/kleaf/workspace_status_common.sh"
+        if [ -f "$WS_COMMON" ]; then
+          cat >> "$WS_COMMON" <<'WSFIX'
+# CI cache stability: override Bazel's volatile builtins with constants.
+echo "BUILD_TIMESTAMP 0"
+echo "FORMATTED_DATE Thu Jan 1 00:00:00 UTC 1970"
+WSFIX
+          echo "Pinned workspace status builtins for stable Bazel action keys"
+        else
+          echo "::warning::workspace_status_common.sh not found at $WS_COMMON"
+        fi
+
         # Kleaf's common.bazelrc try-imports %workspace%/user.bazelrc last, so
         # append rather than replace to keep the flags above.
         #
