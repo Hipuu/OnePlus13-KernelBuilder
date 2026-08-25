@@ -2635,6 +2635,17 @@ runs:
         echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
         echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
         echo "BUILD_TIME=$((BUILD_END - BUILD_START))" >> "$GITHUB_ENV"
+        # One-shot diagnostics: Bazel regenerates the workspace status files
+        # unconditionally every run; their digests are the only delta between
+        # consecutive warm runs' action keys for the 34 always-missed kernel
+        # chain actions. Dump their exact contents to identify the churn.
+        echo "::group::Workspace status dump"
+        find "$KERNEL_PLATFORM_FOLDER/out/bazel" \
+          -path '*sandbox*' -prune -o -type f \( \
+            -name 'volatile-status.txt' -o -name 'stable-status.txt' \) \
+          -size -64k -print -exec sh -c 'cat "$1"; echo "--"' _ {} \; 2>/dev/null | head -80
+        echo "::endgroup::"
+
         echo "::endgroup::"
 
     - name: Upload build.log on failure
