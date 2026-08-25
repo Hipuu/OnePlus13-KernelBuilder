@@ -2541,11 +2541,11 @@ runs:
         # values for byte-stable action keys.
         WS_COMMON="$KERNEL_PLATFORM_FOLDER/build/kernel/kleaf/workspace_status_common.sh"
         if [ -f "$WS_COMMON" ]; then
-          cat >> "$WS_COMMON" <<'WSFIX'
-# CI cache stability: override Bazel's volatile builtins with constants.
-echo "BUILD_TIMESTAMP 0"
-echo "FORMATTED_DATE Thu Jan 1 00:00:00 UTC 1970"
-WSFIX
+          {
+            echo '# CI cache stability: override Bazel volatile builtins with constants.'
+            echo 'echo "BUILD_TIMESTAMP 0"'
+            echo 'echo "FORMATTED_DATE Thu Jan 1 00:00:00 UTC 1970"'
+          } >> "$WS_COMMON"
           echo "Pinned workspace status builtins for stable Bazel action keys"
         else
           echo "::warning::workspace_status_common.sh not found at $WS_COMMON"
