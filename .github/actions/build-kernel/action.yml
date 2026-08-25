@@ -2518,10 +2518,19 @@ runs:
 
         # Kleaf's common.bazelrc try-imports %workspace%/user.bazelrc last, so
         # append rather than replace to keep the flags above.
+        #
+        # Bazel disk_cache stores action outputs by content hash. Since Kleaf
+        # uses hermetic toolchains and sandboxed actions, outputs are deterministic
+        # and cacheable across runs. The cache directory will be restored/saved
+        # by separate workflow steps.
+        BAZEL_DISK_CACHE="$RUNNER_TEMP/bazel-disk-cache"
+        mkdir -p "$BAZEL_DISK_CACHE"
+        echo "BAZEL_DISK_CACHE=$BAZEL_DISK_CACHE" >> "$GITHUB_ENV"
         {
           echo ""
           echo "# --- appended by Prepare Bazel/DDK build ---"
           echo "build --jobs=$(nproc --all)"
+          echo "build --disk_cache=$BAZEL_DISK_CACHE"
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
@@ -2538,6 +2547,19 @@ runs:
         echo "Kernel target : $KERNEL_TARGET"
         echo "Module target : $MODULE_TARGET"
         echo "::endgroup::"
+
+    - name: Restore Bazel disk cache
+      id: restore-bazel-disk-cache
+      uses: ./.github/actions/cache/restore
+      if: ${{ env.OP_DDK == 'true' && (inputs.clean == false || inputs.clean == 'false') }}
+      with:
+        cache_path: ${{ env.BAZEL_DISK_CACHE }}
+        cache_key: bazel-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.OP_LTO }}_LTO
+        cache_bucket: "bazel-disk-cache"
+        debug: ${{ inputs.debug }}
+        restore_keys: |
+          bazel-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
+          bazel-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-
 
     - name: Build Kernel and DDK modules with Bazel
       id: build_ddk_step
@@ -3709,18 +3731,38 @@ runs:
 
     - name: 📥 Checkout Code
       uses: actions/checkout@v6
-      if: always() && steps.build_kernel_step.conclusion == 'success'
+      # Needed by both cache-save paths: the save action runs git in
+      # working_dir to create/refresh the release tag.
+      if: always() && (steps.build_kernel_step.conclusion == 'success' || steps.build_ddk_step.conclusion == 'success')
       with:
         path: main-source
         fetch-depth: 1
 
     - name: Save ccache cache
+      # DDK builds never invoke ccache (Kleaf uses its own hermetic clang in
+      # sandboxed actions), so saving here would only re-upload an untouched
+      # stale cache. Gate on the make-based build instead.
       if: always() && steps.build_kernel_step.conclusion == 'success'
       uses: ./.github/actions/cache/save
       with:
         cache_path: ${{ env.CCACHE_DIR }}
         cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_LTO }}_LTO
         cache_bucket: "ccache-cache"
+        debug: ${{ inputs.debug }}
+        github_token: ${{ inputs.github_token }}
+        working_dir: "./main-source"
+        compression_level: 6
+
+    - name: Save Bazel disk cache
+      # Mirror of the ccache save for the Kleaf/DDK path: --disk_cache keeps
+      # action outputs keyed by content hash, so a warm cache turns the 44-min
+      # cold build into an incremental one on the next run.
+      if: always() && steps.build_ddk_step.conclusion == 'success'
+      uses: ./.github/actions/cache/save
+      with:
+        cache_path: ${{ env.BAZEL_DISK_CACHE }}
+        cache_key: bazel-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.OP_LTO }}_LTO
+        cache_bucket: "bazel-disk-cache"
         debug: ${{ inputs.debug }}
         github_token: ${{ inputs.github_token }}
         working_dir: "./main-source"
