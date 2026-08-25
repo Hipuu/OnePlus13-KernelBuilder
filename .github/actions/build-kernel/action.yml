@@ -2566,21 +2566,11 @@ runs:
         BAZEL_DISK_CACHE="$RUNNER_TEMP/bazel-disk-cache"
         mkdir -p "$BAZEL_DISK_CACHE"
         echo "BAZEL_DISK_CACHE=$BAZEL_DISK_CACHE" >> "$GITHUB_ENV"
-        # Diagnostics for cache-miss forensics: explain.txt records why each
-        # action was re-executed instead of being served from the disk cache,
-        # execlog.jsonl lists exactly which actions ran. Small files; uploaded
-        # by the "Upload Bazel Cache Diagnostics" step.
-        BAZEL_DIAG_DIR="$RUNNER_TEMP/bazel-diag"
-        mkdir -p "$BAZEL_DIAG_DIR"
-        echo "BAZEL_DIAG_DIR=$BAZEL_DIAG_DIR" >> "$GITHUB_ENV"
         {
           echo ""
           echo "# --- appended by Prepare Bazel/DDK build ---"
           echo "build --jobs=$(nproc --all)"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
-          echo "build --explain=$BAZEL_DIAG_DIR/explain.txt"
-          echo "build --verbose_explanations"
-          echo "build --execution_log_json_file=$BAZEL_DIAG_DIR/execlog.jsonl"
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
@@ -2677,16 +2667,6 @@ runs:
         echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
         echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
         echo "BUILD_TIME=$((BUILD_END - BUILD_START))" >> "$GITHUB_ENV"
-        # One-shot diagnostics: Bazel regenerates the workspace status files
-        # unconditionally every run; their digests are the only delta between
-        # consecutive warm runs' action keys for the 34 always-missed kernel
-        # chain actions. Dump their exact contents to identify the churn.
-        echo "::group::Workspace status dump"
-        find "$KERNEL_PLATFORM_FOLDER/out/bazel" \
-          -path '*sandbox*' -prune -o -type f \( \
-            -name 'volatile-status.txt' -o -name 'stable-status.txt' \) \
-          -size -64k -print -exec sh -c 'cat "$1"; echo "--"' _ {} \; 2>/dev/null | head -80
-        echo "::endgroup::"
 
         echo "::endgroup::"
 
@@ -3753,15 +3733,6 @@ runs:
         path: ${{ env.DEBUG_ARTIFACTS_FOLDER }}
         compression-level: 9
         retention-days: 90
-
-    - name: Upload Bazel Cache Diagnostics
-      if: ${{ always() && !cancelled() }}
-      uses: actions/upload-artifact@v7
-      with:
-        name: bazel-cache-diag
-        path: ${{ env.BAZEL_DIAG_DIR }}
-        compression-level: 9
-        retention-days: 14
 
     - name: Upload Artifacts
       if: success() && steps.create_zip.conclusion == 'success'
