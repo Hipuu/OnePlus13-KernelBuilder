@@ -2722,11 +2722,12 @@ runs:
           echo "build --jobs=$(nproc --all)"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
           # feat/perf-stack: Hipuu's kernel fork carries a much larger
-          # bazel analysis graph; the 750MB default bazel-server heap is
-          # OOM-killed mid-enumeration (the action runs ~7s of bzl DEBUG
-          # spam then nothing — bazel never reaches the action graph).
-          # 12GB fits the analysis on GitHub's 7-core/16GB runners.
-          echo "build --host_jvm_args=-Xmx12g"
+          # bazel analysis graph; the default ~750MB host heap is OOM-killed
+          # mid-enumeration under set -e (action runs ~7s of bzl DEBUG spam
+          # then nothing — bazel never reaches the action graph).
+          # This Bazel accepts startup flags in .bazelrc as:
+          #   build --host_jvm_size=<heap-size>
+          echo "build --host_jvm_size=12g"
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
