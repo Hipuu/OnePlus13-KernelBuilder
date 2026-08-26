@@ -1331,7 +1331,15 @@ runs:
         fi
 
         echo "Patching module intercept and overlay mechanism"
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+        # feat/perf-stack: the Hipuu fork already carries this mechanism
+        # (kernel/module/module_overlay/*); applying the OnePlusOSS-base
+        # patch again would prompt interactively over existing files and
+        # abort under set -e. Skip when present.
+        if [ -f ./kernel/module/module_overlay/module_intercept.c ]; then
+          echo "Base kernel already carries module_overlay; skipping"
+        else
+          patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+        fi
         if [ -d "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/" ]; then
           chmod +x ./kernel/module/module_overlay/convert_overlay.sh
         elif [ -d "$COMMON_KERNEL_FOLDER/kernel/module_overlay/" ]; then
