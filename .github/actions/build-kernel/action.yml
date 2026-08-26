@@ -2732,11 +2732,11 @@ runs:
           echo "build --jobs=$(nproc --all)"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
           # feat/perf-stack: Hipuu's kernel fork carries a much larger
-          # bazel analysis graph; the default ~750MB host heap is OOM-killed
-          # mid-enumeration (action runs ~7s of bzl DEBUG spam then nothing).
-          # This Bazel rejects --host_jvm_args and --host_jvm_size in
-          # .bazelrc; pass the heap size as a direct --host_jvm_size=
-          # option on the bazel build command instead.
+          # bazel analysis graph; the default host heap is OOM-killed
+          # mid-load (Bazel 7.1.1 per startup-flag dump). Bazel 7+
+          # accepts --host_jvm_args only under `common` in .bazelrc; the
+          # `build` directive returns "Unrecognized option".
+          echo "common --host_jvm_args=-Xmx12g"
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
