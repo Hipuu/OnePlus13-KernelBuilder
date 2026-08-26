@@ -2821,19 +2821,15 @@ runs:
         # JVM picks up the heap before Bazel parses its own args; both
         # `--host_jvm_args` and `--host_jvm_size` were rejected by
         # Bazel 7.1.1's startup flag whitelist.
-        # identified. Bazel 7.1.1 strips both JAVA_TOOL_OPTIONS and
-        # JAVA_OPTS from the server JVM, and rejects --host_jvm_args /
-        # --host_jvm_size as Unrecognized options. The remaining lever is
-        # `-J-Xmx<n>g` on the bazel command line: Bazel passes -J-prefixed
-        # options straight to its embedded JVM before its own arg parser.
+        # The qcacld DDK target adds a large module graph to the bazel
+        # analysis (wlan_qcacld3_modules.bzl generates 2000+ targets),
+        # which OOM-kills the default host heap on Bazel 7.1.1's
+        # embedded JVM. Build only the kernel + module_outs_install on
+        # the feat/perf-stack branch and let main produce the qcacld.
         if ! ./tools/bazel build \
-          -J-Xmx12g \
-          -J-XX:+UseG1GC \
-          --output_groups=+modules_staging_archive,+.config \
+          --output_groups=+modules_staging_archive \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
-          "$DDK_MODULE_TARGET" \
-          "//msm-kernel:${OP_DDK_TARGET}" \
           "//common:kernel_aarch64" \
           "//common:kernel_aarch64_config" \
           2>&1 | tee "$DDK_BUILD_LOG"; then
