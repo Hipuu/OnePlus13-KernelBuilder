@@ -1894,20 +1894,13 @@ runs:
           printf '\n# Re-Kernel\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> drivers/Makefile
         mkdir -p drivers/rekernel
         cp "$RE_DIR"/* drivers/rekernel/
-        # Uncomment the matching version gate in rekernel.h.
-        TARGET="KERNEL_6_6"
-        if grep -q "$TARGET" drivers/rekernel/rekernel.h; then
-          sed -i "s|^[[:space:]]*//[[:space:]]*#define[[:space:]]\+$TARGET|#define $TARGET|" drivers/rekernel/rekernel.h
-          grep -q 'CONFIG_REKERNEL=' arch/arm64/configs/gki_defconfig || \
-            {
-              echo 'CONFIG_REKERNEL=m'
-              echo 'CONFIG_REKERNEL_NETWORK=y'
-            } >> arch/arm64/configs/gki_defconfig
-          echo "✅ Re-Kernel configured for $TARGET"
-        else
-          echo "::error::Re-Kernel does not declare $TARGET for this kernel version"
-          exit 1
-        fi
+        # Re-Kernel v11+ is version-agnostic: no KERNEL_x_y gate to uncomment.
+        grep -q 'CONFIG_REKERNEL=' arch/arm64/configs/gki_defconfig || \
+          {
+            echo 'CONFIG_REKERNEL=m'
+            echo 'CONFIG_REKERNEL_NETWORK=y'
+          } >> arch/arm64/configs/gki_defconfig
+        echo "✅ Re-Kernel wired into drivers/rekernel"
         echo "::endgroup::"
 
     # Nethunter support, ported from nullptr-t-oss/EmberHeart_OnePlus11
