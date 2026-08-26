@@ -1764,6 +1764,112 @@ runs:
         echo "✅ Droidspaces Support applied"
         echo "::endgroup::"
 
+    # Performance stack extras (feat/perf-stack). Sources are pinned by
+    # commit so rebuilds stay reproducible:
+    # - ADIOS I/O scheduler: Hipuu/build_oneplus_sm8750 @ 805b38e4
+    # - zram lz4 1.10.0 / zstd 1.5.7 backports: cctv18/oppo_oplus_realme_sm8750 @ 21db9e7d
+    # - Re-Kernel freeze-notification LKM: Sakion-Team/Re-Kernel @ 6baf1a58
+    #
+    # Conflict notes vs the other tree mutations in this build:
+    # - ADIOS touches block/{Kconfig,Makefile} + new block/adios.c; the
+    #   kernel-fork series does not modify block/ Kconfig/Makefile.
+    # - Re-Kernel adds drivers/rekernel/ and appends one line each to
+    #   drivers/Kconfig and drivers/Makefile; nothing else writes those.
+    # - zram patches touch lib/lz4 and lib/zstd only; the fork's mm/uksm,
+    #   MGLRU and BPF work lives elsewhere. The fork's "zram tracking"
+    #   defconfig commit is config-level, orthogonal to these code patches.
+    - name: Add ADIOS I/O scheduler
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add ADIOS I/O scheduler"
+        cd "$COMMON_KERNEL_FOLDER"
+        if [ -f block/adios.c ]; then
+          echo "ADIOS already present, skipping"
+        else
+          curl --fail --show-error --location --proto '=https' \
+            "https://raw.githubusercontent.com/Hipuu/build_oneplus_sm8750/805b38e473e98cb2cbe02aa15186cd7bf31fd84e/patch/adios_ioscheduler_6.6.patch" \
+            -o /tmp/adios.patch
+          if ! patch -p1 --ignore-whitespace -F 3 < /tmp/adios.patch; then
+            echo "::warning::ADIOS patch needed fuzz fallback; retrying with force"
+            patch -p1 --force --ignore-whitespace < /tmp/adios.patch
+          fi
+          rm -f /tmp/adios.patch
+          grep -q 'CONFIG_MQ_IOSCHED_ADIOS' arch/arm64/configs/gki_defconfig || \
+            {
+              echo 'CONFIG_MQ_IOSCHED_ADIOS=y'
+              echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y'
+            } >> arch/arm64/configs/gki_defconfig
+          test -f block/adios.c || { echo "::error::ADIOS patch applied but block/adios.c missing"; exit 1; }
+          echo "✅ ADIOS I/O scheduler applied"
+        fi
+        echo "::endgroup::"
+
+    - name: Apply zram lz4/zstd backports
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply zram lz4/zstd backports"
+        cd "$COMMON_KERNEL_FOLDER"
+        BASE="https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/21db9e7d547ca625bd5aa734fb5dfc8b94ea48ef/zram_patch"
+        curl --fail --show-error --location --proto '=https' "$BASE/001-lz4.patch" -o /tmp/001-lz4.patch
+        curl --fail --show-error --location --proto '=https' "$BASE/002-zstd.patch" -o /tmp/002-zstd.patch
+        curl --fail --show-error --location --proto '=https' "$BASE/lz4armv8.S" -o lib/lz4armv8.S
+        # Upstream applies these tolerantly (|| true); keep the same
+        # leniency but surface what happened instead of failing the build
+        # on an already-applied hunk.
+        if ! patch -p1 -F 3 < /tmp/001-lz4.patch; then
+          echo "::warning::lz4 backport reported rejects (possibly already applied)"
+        fi
+        if ! patch -p1 -F 3 < /tmp/002-zstd.patch; then
+          echo "::warning::zstd backport reported rejects (possibly already applied)"
+        fi
+        rm -f /tmp/001-lz4.patch /tmp/002-zstd.patch
+        test -f lib/lz4armv8.S
+        echo "✅ zram lz4/zstd backports applied"
+        echo "::endgroup::"
+
+    - name: Add Re-Kernel support
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add Re-Kernel support"
+        cd "$COMMON_KERNEL_FOLDER"
+        RE_SHA=6baf1a58f55ffbc7d8ceb98f5a8877ff6ccd522e
+        if [ ! -f "$GITHUB_WORKSPACE/Re-Kernel/LKM-Source/rekernel.h" ]; then
+          retry_clone_re() {
+            for i in 1 2 3; do
+              git clone --depth 1 "https://github.com/Sakion-Team/Re-Kernel.git" \
+                "$GITHUB_WORKSPACE/Re-Kernel" && return 0
+              echo "clone attempt $i failed"; sleep 5
+            done
+            return 1
+          }
+          retry_clone_re
+        fi
+        RE_DIR="$GITHUB_WORKSPACE/Re-Kernel/LKM-Source"
+        grep -q 'source "drivers/rekernel/Kconfig"' drivers/Kconfig || \
+          sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' drivers/Kconfig
+        grep -q 'obj-$(CONFIG_REKERNEL)' drivers/Makefile || \
+          printf '\n# Re-Kernel\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> drivers/Makefile
+        mkdir -p drivers/rekernel
+        cp "$RE_DIR"/* drivers/rekernel/
+        # Uncomment the matching version gate in rekernel.h.
+        TARGET="KERNEL_6_6"
+        if grep -q "$TARGET" drivers/rekernel/rekernel.h; then
+          sed -i "s|^[[:space:]]*//[[:space:]]*#define[[:space:]]\+$TARGET|#define $TARGET|" drivers/rekernel/rekernel.h
+          grep -q 'CONFIG_REKERNEL=' arch/arm64/configs/gki_defconfig || \
+            {
+              echo 'CONFIG_REKERNEL=m'
+              echo 'CONFIG_REKERNEL_NETWORK=y'
+            } >> arch/arm64/configs/gki_defconfig
+          echo "✅ Re-Kernel configured for $TARGET"
+        else
+          echo "::error::Re-Kernel does not declare $TARGET for this kernel version"
+          exit 1
+        fi
+        echo "::endgroup::"
+
     # Nethunter support, ported from nullptr-t-oss/EmberHeart_OnePlus11
     # (.github/kernel/action.yml "Add Nethunter inline configs"). These are
     # built into the Image; the external wireless drivers are separate and
