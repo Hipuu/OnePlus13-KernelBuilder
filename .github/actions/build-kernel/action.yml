@@ -1449,6 +1449,15 @@ runs:
         set -euo pipefail
         echo "::group::Apply Optimisation patches"
         cd "$COMMON_KERNEL_FOLDER"
+        # feat/perf-stack: the Hipuu fork ships its own optimization series
+        # (optimized string/mem ops among them); WildKernels' patches target
+        # the OnePlusOSS base and reject as already-applied on the fork.
+        # mm/uksm.c exists only in the fork, so use it as the marker.
+        if [ -f ./mm/uksm.c ]; then
+          echo "Fork base carries its own optimization series; skipping WildKernels opt patches"
+          echo "::endgroup::"
+          exit 0
+        fi
         KERNEL_VERSION="${{ env.KERNEL_VER }}"
         MIN_VERSION="5.16"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/optimized_mem_operations.patch"
