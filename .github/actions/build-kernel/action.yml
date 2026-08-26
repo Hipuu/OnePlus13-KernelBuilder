@@ -2721,6 +2721,12 @@ runs:
           echo "# --- appended by Prepare Bazel/DDK build ---"
           echo "build --jobs=$(nproc --all)"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
+          # feat/perf-stack: Hipuu's kernel fork carries a much larger
+          # bazel analysis graph; the 750MB default bazel-server heap is
+          # OOM-killed mid-enumeration (the action runs ~7s of bzl DEBUG
+          # spam then nothing — bazel never reaches the action graph).
+          # 12GB fits the analysis on GitHub's 7-core/16GB runners.
+          echo "build --host_jvm_args=-Xmx12g"
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
