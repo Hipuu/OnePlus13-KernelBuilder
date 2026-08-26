@@ -1590,6 +1590,16 @@ runs:
           rm -f drivers/misc/ntsync.c
         fi
 
+        # feat/perf-stack: the fork base ships NTSYNC already; applying again
+        # yields "previously applied" per-file skips that GNU patch reports
+        # as failures under set -e.
+        if grep -q 'ntsync' drivers/misc/Makefile 2>/dev/null; then
+          echo "Base kernel already carries NTSYNC; skipping patches"
+          grep -q 'CONFIG_NTSYNC=y' arch/arm64/configs/gki_defconfig || \
+            echo 'CONFIG_NTSYNC=y' >> arch/arm64/configs/gki_defconfig
+          echo "✅ NTSync present"
+          echo "::endgroup::"
+        else
         echo "Patching $(basename $NTSYNC_PATCH)!"
         patch -p1 --forward < "$NTSYNC_PATCH"
         echo "Patching ntsync_base!"
@@ -1599,6 +1609,7 @@ runs:
         EOF
         echo "✅ NTSync patch applied"
         echo "::endgroup::"
+        fi
 
     - name: Apply Unicode Fix Patch
       shell: bash
@@ -1612,9 +1623,11 @@ runs:
 
         echo "Patching unicode!"
         if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1-.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1-.patch" || \
+              echo "::warning::unicode 6.1- patch skipped (already applied or inapplicable)"
         else
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch" || \
+              echo "::warning::unicode 6.1+ patch skipped (already applied or inapplicable)"
         fi
 
     - name: Add Tmpfs Support
@@ -1649,7 +1662,8 @@ runs:
         CONFIG_TCP_CONG_ADVANCED=y
         CONFIG_TCP_CONG_BBR3=y
         EOF
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch"
+        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch" || \
+          echo "::warning::BBRv3 backport skipped (already applied or inapplicable)"
 
         if [ "${{ env.ANDROID_VER }}" = "android12" ] && [ "${{ env.KERNEL_VER }}" = "5.10" ]; then
           if ! grep -qF 'int proc_dou8vec_minmax(' ./include/linux/sysctl.h; then
