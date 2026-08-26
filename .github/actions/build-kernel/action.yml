@@ -2608,6 +2608,16 @@ runs:
           fi
         done
 
+        # feat/perf-stack: enumerate this Bazel's startup flags so the heap
+        # size can be set with the supported flag (older Bazel doesn't
+        # recognize --host_jvm_args/--host_jvm_size). The grep is
+        # deliberately narrow to print only the heap-related lines.
+        echo "::group::Bazel startup-flag support"
+        "$BAZEL_BIN" --help_startup 2>&1 | grep -E '^\s*--(host_jvm|jvm|memory)' | head -20 || true
+        echo "::endgroup::"
+        # Reduce silent guessing churn: emit the version too.
+        "$BAZEL_BIN" --version 2>&1 | head -3
+
         # MODULE.bazel names each of these with local_path_override /
         # new_kleaf_local_repository, so a missing one is a load-phase failure
         # with a far less obvious message.
@@ -2802,13 +2812,11 @@ runs:
         # this they stay cache-side and staging fails with "No kernel Image".
         # feat/perf-stack: the Hipuu kernel fork has a much larger bazel
         # analysis graph than the OnePlusOSS base; the default host heap
-        # is OOM-killed mid-load. Newer Bazel uses --host_jvm_arg (singular,
-        # repeatable) instead of --host_jvm_args= for heap size. Older
-        # versions reject both. Pass both; the unsupported one fails fast
-        # but the supported one wins. kleaf forwards unrecognized startup
-        # flags verbatim to bazel.
+        # is OOM-killed mid-load. The correct heap-size startup flag
+        # varies by Bazel version; the right name is printed in the
+        # 'Bazel startup-flag support' dump just above. Re-add here once
+        # identified.
         if ! ./tools/bazel build \
-          --host_jvm_arg=-Xmx12g \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
