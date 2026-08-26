@@ -2802,11 +2802,12 @@ runs:
         # this they stay cache-side and staging fails with "No kernel Image".
         # feat/perf-stack: the Hipuu kernel fork has a much larger bazel
         # analysis graph than the OnePlusOSS base; the default host heap
-        # is OOM-killed mid-load. This Bazel version doesn't accept
-        # --host_jvm_args or --host_jvm_size in .bazelrc, so pass the heap
-        # size as a direct startup option on the invocation below.
+        # is OOM-killed mid-load. kleaf's tools/bazel wrapper rewrites
+        # startup options and passes --host_jvm_args=... to bazel, so
+        # that's the supported hook. Format must be -Xmx<size>, not
+        # -Xmx=<size>.
         if ! ./tools/bazel build \
-          --host_jvm_size=12g \
+          --host_jvm_args=-Xmx12g \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
