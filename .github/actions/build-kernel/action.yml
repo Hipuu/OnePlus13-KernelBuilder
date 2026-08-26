@@ -1340,9 +1340,9 @@ runs:
         else
           patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
         fi
-        if [ -d "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/" ]; then
+        if [ -f "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/convert_overlay.sh" ]; then
           chmod +x ./kernel/module/module_overlay/convert_overlay.sh
-        elif [ -d "$COMMON_KERNEL_FOLDER/kernel/module_overlay/" ]; then
+        elif [ -f "$COMMON_KERNEL_FOLDER/kernel/module_overlay/convert_overlay.sh" ]; then
           chmod +x ./kernel/module_overlay/convert_overlay.sh
         fi
 
