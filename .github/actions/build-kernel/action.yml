@@ -2723,11 +2723,10 @@ runs:
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
           # feat/perf-stack: Hipuu's kernel fork carries a much larger
           # bazel analysis graph; the default ~750MB host heap is OOM-killed
-          # mid-enumeration under set -e (action runs ~7s of bzl DEBUG spam
-          # then nothing — bazel never reaches the action graph).
-          # This Bazel accepts startup flags in .bazelrc as:
-          #   build --host_jvm_size=<heap-size>
-          echo "build --host_jvm_size=12g"
+          # mid-enumeration (action runs ~7s of bzl DEBUG spam then nothing).
+          # This Bazel rejects --host_jvm_args and --host_jvm_size in
+          # .bazelrc; pass the heap size as a direct --host_jvm_size=
+          # option on the bazel build command instead.
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
@@ -2801,7 +2800,13 @@ runs:
         # output sets. Image (common) and modules_staging_dir*.tar.gz (the
         # vendor kernel) are harvested by later steps via bazel-bin; without
         # this they stay cache-side and staging fails with "No kernel Image".
+        # feat/perf-stack: the Hipuu kernel fork has a much larger bazel
+        # analysis graph than the OnePlusOSS base; the default host heap
+        # is OOM-killed mid-load. This Bazel version doesn't accept
+        # --host_jvm_args or --host_jvm_size in .bazelrc, so pass the heap
+        # size as a direct startup option on the invocation below.
         if ! ./tools/bazel build \
+          --host_jvm_size=12g \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
