@@ -2733,10 +2733,12 @@ runs:
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
           # feat/perf-stack: Hipuu's kernel fork carries a much larger
           # bazel analysis graph; the default host heap is OOM-killed
-          # mid-load (Bazel 7.1.1 per startup-flag dump). Bazel 7+
-          # accepts --host_jvm_args only under `common` in .bazelrc; the
-          # `build` directive returns "Unrecognized option".
-          echo "common --host_jvm_args=-Xmx12g"
+          # mid-load (Bazel 7.1.1 per startup-flag dump). The kleaf wrapper
+          # Fortran config swallowed --host_jvm_args even under `common`
+          # (Bazel printed "Inherited 'common' options: --host_jvm_args=-Xmx12g"
+          # then immediately rejected it as Unrecognized option), so set the
+          # heap via JAVA_TOOL_OPTIONS — the embedded JVM reads it before
+          # parsing any Bazel args.
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
@@ -2815,8 +2817,11 @@ runs:
         # is OOM-killed mid-load. The correct heap-size startup flag
         # varies by Bazel version; the right name is printed in the
         # 'Bazel startup-flag support' dump just above. Re-add here once
-        # identified.
-        if ! ./tools/bazel build \
+        # identified. Use JAVA_TOOL_OPTIONS=-Xmx<size> so the embedded
+        # JVM picks up the heap before Bazel parses its own args; both
+        # `--host_jvm_args` and `--host_jvm_size` were rejected by
+        # Bazel 7.1.1's startup flag whitelist.
+        if ! JAVA_TOOL_OPTIONS="-Xmx12g -XX:+UseG1GC" ./tools/bazel build \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
