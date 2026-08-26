@@ -2821,7 +2821,14 @@ runs:
         # JVM picks up the heap before Bazel parses its own args; both
         # `--host_jvm_args` and `--host_jvm_size` were rejected by
         # Bazel 7.1.1's startup flag whitelist.
-        if ! JAVA_TOOL_OPTIONS="-Xmx12g -XX:+UseG1GC" ./tools/bazel build \
+        # identified. Bazel 7.1.1 strips both JAVA_TOOL_OPTIONS and
+        # JAVA_OPTS from the server JVM, and rejects --host_jvm_args /
+        # --host_jvm_size as Unrecognized options. The remaining lever is
+        # `-J-Xmx<n>g` on the bazel command line: Bazel passes -J-prefixed
+        # options straight to its embedded JVM before its own arg parser.
+        if ! ./tools/bazel build \
+          -J-Xmx12g \
+          -J-XX:+UseG1GC \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
