@@ -2821,9 +2821,12 @@ runs:
         # Heap-size workaround lives in a separate prep step; Bazel 7.1.1
         # rejects all heap startup flags. The only env that survives
         # its whitelist is BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE (a percent
-        # of total host RAM). 16GB runner × 75% = 12GB heap — fits the
-        # Hipuu fork's larger qcacld+kernel analysis graph.
-        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=75
+        # of total host RAM). 16GB runner × 95% = ~15GB server heap.
+        # qcacld-3.0's wlan_qcacld3_modules.bzl generates 2000+ targets
+        # and Hipuu's kernel fork adds several hundred more on top; 75%
+        # (12GB) was still OOM-killed at the loading step, so push to 95%
+        # and leave the OS its 5%.
+        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=95
         if ! ./tools/bazel build \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
