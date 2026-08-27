@@ -2818,18 +2818,18 @@ runs:
         # varies by Bazel version; the right name is printed in the
         # 'Bazel startup-flag support' dump just above. Re-add here once
         # identified. Use JAVA_TOOL_OPTIONS=-Xmx<size> so the embedded
-        # JVM picks up the heap before Bazel parses its own args; both
-        # `--host_jvm_args` and `--host_jvm_size` were rejected by
-        # Bazel 7.1.1's startup flag whitelist.
-        # The qcacld DDK target adds a large module graph to the bazel
-        # analysis (wlan_qcacld3_modules.bzl generates 2000+ targets),
-        # which OOM-kills the default host heap on Bazel 7.1.1's
-        # embedded JVM. Build only the kernel + module_outs_install on
-        # the feat/perf-stack branch and let main produce the qcacld.
+        # Heap-size workaround lives in a separate prep step; Bazel 7.1.1
+        # rejects all heap startup flags. The only env that survives
+        # its whitelist is BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE (a percent
+        # of total host RAM). 16GB runner × 75% = 12GB heap — fits the
+        # Hipuu fork's larger qcacld+kernel analysis graph.
+        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=75
         if ! ./tools/bazel build \
-          --output_groups=+modules_staging_archive \
+          --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
           "${DDK_KERNEL_TARGET}_modules_install" \
+          "$DDK_MODULE_TARGET" \
+          "//msm-kernel:${OP_DDK_TARGET}" \
           "//common:kernel_aarch64" \
           "//common:kernel_aarch64_config" \
           2>&1 | tee "$DDK_BUILD_LOG"; then
