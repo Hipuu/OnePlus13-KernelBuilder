@@ -92,7 +92,24 @@ gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder -f ke
 
 # All six variants in parallel
 gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder -f kernel_version=all
+
+# Self-hosted runner (requires a registered runner with labels: self-hosted, linux, X64)
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder -f runner=self-hosted
 ```
+
+### Self-hosted runner requirements
+
+The `runner` dispatch input switches all jobs between `ubuntu-latest` and a self-hosted pool. Self-hosted is required for Bazel/Kleaf DDK builds (`feat/perf-stack`) because the fork kernel graph exceeds the 16 GB RAM ceiling of GitHub-hosted runners during Bazel's loading phase. Minimum specs:
+
+- **RAM**: ≥32 GB (64 GB recommended for `all` matrix runs)
+- **Disk**: ≥250 GB free per concurrent job (kernel source + toolchain + ccache + Bazel output base)
+- **Labels**: register the runner with `self-hosted`, `linux`, `X64`
+- **OS**: Ubuntu 22.04+ (the workflow installs its own deps via `apt-get`)
+- **Persistence**: the workflow wipes `$GITHUB_WORKSPACE` at the start of each `build` job when `runner=self-hosted`; ccache is restored from the release-backed cache action, so persistent runners are safe
+- **Tooling parity**: no preinstalled toolchain is assumed; everything is fetched at runtime
+- **Concurrency**: matrix jobs serialize via a top-level `concurrency:` group keyed on `${{ github.workflow }}-${{ github.run_id }}`. This prevents multiple variants from racing on shared host resources (`/dev/shm`, disk I/O, RAM). GitHub-hosted is unaffected because each matrix job gets its own VM.
+- **Git config isolation**: the workspace-cleanup step unsets global git config keys (`feature.manyFiles`, `core.fsmonitor`, `pack.sparse`) that the build action sets, preventing state leakage between unrelated repos on a persistent host
+- **No sudo required**: the `repo` binary is downloaded to `$RUNNER_TEMP` (not `/usr/local/bin`), and all temp files use `$RUNNER_TEMP` instead of `/tmp`, so the runner user does not need elevated privileges
 
 ### Workflow debug helper
 

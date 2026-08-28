@@ -1,5 +1,12 @@
 name: Build OnePlus 13 Kernel
 
+# Serialize self-hosted matrix jobs: they share one physical host and would
+# collide on /dev/shm, disk I/O, and RAM even with $RUNNER_TEMP isolation.
+# GitHub-hosted is unaffected — each matrix job gets its own VM.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -121,6 +128,14 @@ on:
         required: true
         type: boolean
         default: false
+      runner:
+        description: 'Runner pool: github-hosted (ubuntu-latest, 16 GB) or self-hosted (needs ≥32 GB RAM for Bazel DDK builds)'
+        required: true
+        type: choice
+        options:
+          - github-hosted
+          - self-hosted
+        default: github-hosted
 
 jobs:
   plan:
@@ -128,6 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      runs_on: ${{ steps.plan.outputs.runs_on }}
     steps:
       - name: Checkout builder
         uses: actions/checkout@v6
@@ -173,15 +189,45 @@ jobs:
           echo "matrix={\"config\":$CONFIGS}" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"config\":$CONFIGS}"
 
+          # Self-hosted runners must register with labels: self-hosted, linux, X64.
+          # The plan job always runs on GitHub-hosted (it's cheap), but it resolves
+          # the runner label once so every downstream job uses the same pool.
+          if [ "${{ inputs.runner }}" = "self-hosted" ]; then
+            echo 'runs_on=["self-hosted","linux","X64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: ${{ matrix.config }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
     needs: plan
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
+      - name: Clean workspace (self-hosted only)
+        if: ${{ inputs.runner == 'self-hosted' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Self-hosted runners persist $GITHUB_WORKSPACE across runs. Stale
+          # kernel sources, toolchains, or ccache dirs from a previous variant
+          # can poison the next build (wrong defconfig, leftover .o files,
+          # mismatched modules.dep). Wipe it so every run starts fresh; the
+          # release-backed ccache restore repopulates what matters.
+          echo "Self-hosted runner detected — cleaning workspace"
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          fi
+          # The build action sets global git config (feature.manyFiles,
+          # core.fsmonitor, pack.sparse) that leak between unrelated repos
+          # on a persistent host. Unset them so the next repo gets defaults.
+          for key in feature.manyFiles core.fsmonitor pack.sparse; do
+            git config --global --unset "$key" 2>/dev/null || true
+          done
+
       - name: Checkout builder
         uses: actions/checkout@v6
         with:
@@ -407,7 +453,12 @@ jobs:
 
   firmware:
     name: Nethunter Wireless Firmware
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    # `needs: plan` is mandatory, not ordering sugar: job outputs are only
+    # readable from jobs that declare the producer as a direct dependency.
+    # Without it `needs.plan.outputs.runs_on` is '' and fromJSON('') aborts
+    # the run before any step executes.
+    needs: plan
     if: ${{ inputs.wireless_modules }}
     steps:
       - name: Download latest Nethunter firmware
@@ -448,8 +499,11 @@ jobs:
 
   release:
     name: Create release
-    runs-on: ubuntu-latest
-    needs: [build, firmware]
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    # `plan` is listed explicitly even though build/firmware already depend on
+    # it: GitHub Actions does not surface outputs through transitive needs, so
+    # `needs.plan.outputs.runs_on` would be empty with only [build, firmware].
+    needs: [plan, build, firmware]
     if: ${{ inputs.release_type != 'none' && !cancelled() && needs.build.result == 'success' }}
     steps:
       # v8 is required, not v7: the build job uploads the ZIPs with

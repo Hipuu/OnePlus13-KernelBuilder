@@ -96,10 +96,15 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo '${{ inputs.op_config_json }}' > /tmp/config.json
-        jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' /tmp/config.json >> "$GITHUB_ENV"
+        # $RUNNER_TEMP, not /tmp: on a self-hosted host several runner
+        # processes can share the machine, and each has its own _work/_temp
+        # while /tmp is global. A fixed /tmp path lets one matrix job
+        # overwrite another's config mid-build.
+        CONFIG_JSON="$RUNNER_TEMP/config.json"
+        echo '${{ inputs.op_config_json }}' > "$CONFIG_JSON"
+        jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' "$CONFIG_JSON" >> "$GITHUB_ENV"
         echo "Parsed config:"
-        jq '.' /tmp/config.json
+        jq '.' "$CONFIG_JSON"
 
     - name: Validate Inputs
       shell: bash
@@ -309,19 +314,36 @@ runs:
         echo "Creating folder for configuration: $CONFIG"
         mkdir -p "$CONFIG"
         echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
-        REPO="/usr/local/bin/repo"
+        # $RUNNER_TEMP, not /usr/local/bin: self-hosted runners may not have
+        # passwordless sudo, and writing to a system path pollutes the host
+        # for unrelated repos. Each runner process gets its own _temp dir.
+        REPO="$RUNNER_TEMP/repo"
         if [ ! -x "$REPO" ]; then
           curl --fail --show-error --location --proto '=https' https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
           chmod +x "$REPO"
         fi
+        # Prepend so 'repo' resolves to our copy for the rest of this job.
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
         echo "REPO=$REPO" >> "$GITHUB_ENV"
 
     - name: Configure Swap Space
+      # Only GitHub-hosted runners need this: they ship 16GB RAM and no usable
+      # swap, and the DDK/Bazel path OOMs without it. Self-hosted runners are
+      # required to have >=32GB RAM (see AGENTS.md), where adding a 16GB swap
+      # file is pure disk waste — and the action needs passwordless sudo plus
+      # write access to /, which a locked-down runner host may not grant.
+      # Gated on == 'github-hosted' rather than != 'self-hosted' so that an
+      # empty/absent runner.environment (old GHES) skips rather than runs.
+      if: ${{ runner.environment == 'github-hosted' }}
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 16
 
     - name: Free Disk Space
+      # Same reasoning, and this one is destructive: these paths are
+      # GitHub-hosted image contents. On a self-hosted host, dotnet/android/
+      # julia/powershell may be things the owner actually uses.
+      if: ${{ runner.environment == 'github-hosted' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -337,7 +359,15 @@ runs:
         git config --global feature.manyFiles true
         git config --global core.fsmonitor true
         git config --global pack.sparse true
-        git config --global http.sslVerify false
+        # http.sslVerify=false is a workaround for flaky TLS against the
+        # mirrors the manifests pull from, and it is only acceptable because a
+        # GitHub-hosted VM is destroyed after the run. On a self-hosted runner
+        # `git config --global` persists forever, so setting it there would
+        # permanently disable certificate verification for every future git
+        # operation by that user. Never do that.
+        if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+          git config --global http.sslVerify false
+        fi
 
     - name: Sync Kernel Source
       id: sync-kernel-source
@@ -1827,14 +1857,17 @@ runs:
         if [ -f block/adios.c ]; then
           echo "ADIOS already present, skipping"
         else
+          # $RUNNER_TEMP rather than /tmp: concurrent matrix jobs on one
+          # self-hosted host share /tmp and would clobber each other's patch.
+          ADIOS_PATCH="$RUNNER_TEMP/adios.patch"
           curl --fail --show-error --location --proto '=https' \
             "https://raw.githubusercontent.com/Hipuu/build_oneplus_sm8750/805b38e473e98cb2cbe02aa15186cd7bf31fd84e/patch/adios_ioscheduler_6.6.patch" \
-            -o /tmp/adios.patch
-          if ! patch -p1 --ignore-whitespace -F 3 < /tmp/adios.patch; then
+            -o "$ADIOS_PATCH"
+          if ! patch -p1 --ignore-whitespace -F 3 < "$ADIOS_PATCH"; then
             echo "::warning::ADIOS patch needed fuzz fallback; retrying with force"
-            patch -p1 --force --ignore-whitespace < /tmp/adios.patch
+            patch -p1 --force --ignore-whitespace < "$ADIOS_PATCH"
           fi
-          rm -f /tmp/adios.patch
+          rm -f "$ADIOS_PATCH"
           grep -q 'CONFIG_MQ_IOSCHED_ADIOS' arch/arm64/configs/gki_defconfig || \
             {
               echo 'CONFIG_MQ_IOSCHED_ADIOS=y'
@@ -1852,19 +1885,21 @@ runs:
         echo "::group::Apply zram lz4/zstd backports"
         cd "$COMMON_KERNEL_FOLDER"
         BASE="https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/21db9e7d547ca625bd5aa734fb5dfc8b94ea48ef/zram_patch"
-        curl --fail --show-error --location --proto '=https' "$BASE/001-lz4.patch" -o /tmp/001-lz4.patch
-        curl --fail --show-error --location --proto '=https' "$BASE/002-zstd.patch" -o /tmp/002-zstd.patch
+        LZ4_PATCH="$RUNNER_TEMP/001-lz4.patch"
+        ZSTD_PATCH="$RUNNER_TEMP/002-zstd.patch"
+        curl --fail --show-error --location --proto '=https' "$BASE/001-lz4.patch" -o "$LZ4_PATCH"
+        curl --fail --show-error --location --proto '=https' "$BASE/002-zstd.patch" -o "$ZSTD_PATCH"
         curl --fail --show-error --location --proto '=https' "$BASE/lz4armv8.S" -o lib/lz4armv8.S
         # Upstream applies these tolerantly (|| true); keep the same
         # leniency but surface what happened instead of failing the build
         # on an already-applied hunk.
-        if ! patch -p1 -F 3 < /tmp/001-lz4.patch; then
+        if ! patch -p1 -F 3 < "$LZ4_PATCH"; then
           echo "::warning::lz4 backport reported rejects (possibly already applied)"
         fi
-        if ! patch -p1 -F 3 < /tmp/002-zstd.patch; then
+        if ! patch -p1 -F 3 < "$ZSTD_PATCH"; then
           echo "::warning::zstd backport reported rejects (possibly already applied)"
         fi
-        rm -f /tmp/001-lz4.patch /tmp/002-zstd.patch
+        rm -f "$LZ4_PATCH" "$ZSTD_PATCH"
         test -f lib/lz4armv8.S
         echo "✅ zram lz4/zstd backports applied"
         echo "::endgroup::"
@@ -2516,13 +2551,13 @@ runs:
         # Track the fuzz level that actually applies: the real apply below must
         # reuse it, not blindly retry --fuzz=3 after that level already failed.
         APPLY_FUZZ=3
-        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun.log 2>&1; then
+        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > "$RUNNER_TEMP/inject_dryrun.log" 2>&1; then
           echo "::error::monitor injection patch does not apply to this qcacld revision"
-          cat /tmp/inject_dryrun.log | head -50 || true
+          cat "$RUNNER_TEMP/inject_dryrun.log" | head -50 || true
           # Try with more fuzz as a last resort
-          if ! patch -p1 --fuzz=10 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun2.log 2>&1; then
+          if ! patch -p1 --fuzz=10 --dry-run < "$QCACLD_PATCH" > "$RUNNER_TEMP/inject_dryrun2.log" 2>&1; then
             echo "::error::patch also fails with fuzz=10"
-            cat /tmp/inject_dryrun2.log | head -50 || true
+            cat "$RUNNER_TEMP/inject_dryrun2.log" | head -50 || true
             exit 1
           fi
           echo "::warning::patch applies with fuzz=10 but not fuzz=3"
@@ -2821,12 +2856,29 @@ runs:
         # Heap-size workaround lives in a separate prep step; Bazel 7.1.1
         # rejects all heap startup flags. The only env that survives
         # its whitelist is BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE (a percent
-        # of total host RAM). 16GB runner × 95% = ~15GB server heap.
-        # qcacld-3.0's wlan_qcacld3_modules.bzl generates 2000+ targets
-        # and Hipuu's kernel fork adds several hundred more on top; 75%
-        # (12GB) was still OOM-killed at the loading step, so push to 95%
-        # and leave the OS its 5%.
-        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=95
+        # of total host RAM). qcacld-3.0's wlan_qcacld3_modules.bzl
+        # generates 2000+ targets and Hipuu's kernel fork adds several
+        # hundred more on top; 75% (12GB on a 16GB runner) was still
+        # OOM-killed at the loading step.
+        #
+        # The percentage is computed, not hard-coded, because this action now
+        # also runs on self-hosted runners with 32-64GB+ of RAM. A flat 95%
+        # there would hand the JVM ~60GB and leave the OS, the Clang
+        # subprocesses and the linker fighting over the remaining ~3GB —
+        # Bazel's analysis graph does not need more than ~24GB even for the
+        # fork. So: take 95% of host RAM, clamp to a 24GB ceiling, and convert
+        # back to the percentage the env var expects.
+        MEM_TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+        MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))
+        HEAP_CEILING_MB=24576
+        HEAP_TARGET_MB=$(( MEM_TOTAL_MB * 95 / 100 ))
+        if [ "$HEAP_TARGET_MB" -gt "$HEAP_CEILING_MB" ]; then
+          HEAP_TARGET_MB=$HEAP_CEILING_MB
+        fi
+        HEAP_PCT=$(( HEAP_TARGET_MB * 100 / MEM_TOTAL_MB ))
+        [ "$HEAP_PCT" -lt 1 ] && HEAP_PCT=1
+        echo "Host RAM: ${MEM_TOTAL_MB}MB; Bazel server heap target: ${HEAP_TARGET_MB}MB (${HEAP_PCT}%)"
+        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=$HEAP_PCT
         if ! ./tools/bazel build \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
@@ -3547,7 +3599,7 @@ runs:
         if ! zip -r9 "$ZIP_NAME" ./* \
              -x "*.git*" \
              -x "$ZIP_NAME" \
-             -x "README.md" 2>&1 | tee /tmp/zip.log; then
+             -x "README.md" 2>&1 | tee "$RUNNER_TEMP/zip.log"; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi

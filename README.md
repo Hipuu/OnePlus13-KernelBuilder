@@ -142,6 +142,7 @@ gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
 | `clean_build` | Build without ccache restore | `false` |
 | `release_type` | `none`, `prerelease`, or `release` | `none` |
 | `debug` | Build modules and upload debug artifacts | `false` |
+| `runner` | Runner pool: `github-hosted` (ubuntu-latest, 16 GB) or `self-hosted` (needs ≥32 GB RAM for Bazel DDK builds) | `github-hosted` |
 
 ### Artifacts
 
