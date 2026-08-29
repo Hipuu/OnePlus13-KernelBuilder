@@ -54,6 +54,7 @@ build_artifacts/
 
 # Agent research handoffs (not build artifacts)
 *RESEARCH.md
+.firecrawl/
 
 # Local module/kernel artifact dumps
 kernel_modules_*.zip/

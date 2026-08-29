@@ -1575,6 +1575,27 @@ runs:
           echo "::warning::tasktrack source directory not found; skipping A1 patch"
         fi
 
+        # Battery-focused power patches (unconditional on every base).
+        # --forward tolerates already-applied / fork-shipped variants so the
+        # step is idempotent and never hard-fails a build.
+        cd "$COMMON_KERNEL_FOLDER"
+        for p in \
+          add_timeout_wakelocks_globally \
+          avoid_extra_s2idle_wake_attempts \
+          minimise_wakeup_time \
+          reduce_freeze_timeout \
+          reduce_pci_pme_wakeups \
+          silence_irq_cpu_logspam \
+          silence_system_logspam \
+          increase_ext4_default_commit_age \
+          f2fs_enlarge_min_fsync_blocks
+        do
+          echo "Patching $p.patch"
+          patch -p1 --forward < "$BATTERY_PATCHES/$p.patch" || {
+            echo "::warning::$p.patch did not apply cleanly; may be already applied or fork-shipped"
+          }
+        done
+
         echo "✅ Battery optimization patches applied"
         echo "::endgroup::"
 
@@ -3189,6 +3210,34 @@ runs:
         echo "✅ Image and modules agree on $KREL"
         echo "::endgroup::"
 
+    - name: Prepare ThinLTO cache dir
+      if: ${{ env.OP_DDK != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ThinLTO backend artifacts (imported bitcode + codegen output) live in a
+        # cache dir passed to ld.lld via --thinlto-cache-dir. Persisting it across
+        # runs skips re-importing/re-optimizing unchanged modules on the next link.
+        LDCACHE_DIR="$GITHUB_WORKSPACE/ldcache_${KERNEL_FULL_VER}"
+        mkdir -p "$LDCACHE_DIR"
+        echo "LDCACHE_DIR=$LDCACHE_DIR" >> "$GITHUB_ENV"
+        echo "ThinLTO cache dir: $LDCACHE_DIR"
+
+    - name: Restore ThinLTO cache
+      uses: ./.github/actions/cache/restore
+      # Release-backed mirror of the ccache restore, but only meaningful for
+      # thin LTO (full/none either don't emit backend caches or don't benefit).
+      # DDK/Kleaf path never goes through ld-wrapper, so gate it to make-based.
+      if: ${{ env.OP_DDK != 'true' && env.OP_LTO == 'thin' && (inputs.clean == false || inputs.clean == 'false') }}
+      with:
+        cache_path: ${{ env.LDCACHE_DIR }}
+        cache_key: lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-thin
+        cache_bucket: "lto-cache"
+        debug: ${{ inputs.debug }}
+        restore_keys: |
+          lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
+
     - name: Build Kernel
       id: build_kernel_step
       if: ${{ env.OP_DDK != 'true' }}
@@ -3229,12 +3278,14 @@ runs:
         set -u
 
         # ld-wrapper is only needed for thin LTO to spread work across cores
+        # and to persist the backend cache across runs. nproc/2 keeps the
+        # memory-hungry ThinLTO backend from OOMing on shared runners.
         if [ "${{ env.OP_LTO }}" = "thin" ]; then
           echo '#!/bin/bash' > "$COMMON_KERNEL_FOLDER/ld-wrapper"
-          echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
+          echo "ld.lld \"\$@\" --thinlto-cache-dir=${LDCACHE_DIR} --thinlto-jobs=\$(( $(nproc --all) / 2 ))" >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
           chmod +x "$COMMON_KERNEL_FOLDER/ld-wrapper"
           LD_CMD="$COMMON_KERNEL_FOLDER/ld-wrapper"
-          echo "Using ld-wrapper for thin LTO"
+          echo "Using ld-wrapper for thin LTO (cache=$LDCACHE_DIR, jobs=$(nproc --all)/2)"
         else
           LD_CMD="ld.lld"
           echo "Using ld.lld directly (LTO=${{ env.OP_LTO }})"
@@ -4056,6 +4107,22 @@ runs:
         github_token: ${{ inputs.github_token }}
         working_dir: "./main-source"
         compression_level: 6
+
+    - name: Save ThinLTO cache
+      # Persist ld.lld's ThinLTO backend cache so the next run skips
+      # re-importing/re-optimizing unchanged modules during linking. Only thin
+      # LTO and the make-based path use ld-wrapper / the cache dir.
+      if: always() && steps.build_kernel_step.conclusion == 'success' && env.OP_LTO == 'thin'
+      uses: ./.github/actions/cache/save
+      with:
+        cache_path: ${{ env.LDCACHE_DIR }}
+        cache_key: lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-thin
+        cache_bucket: "lto-cache"
+        debug: ${{ inputs.debug }}
+        github_token: ${{ inputs.github_token }}
+        working_dir: "./main-source"
+        compression_level: 6
+        delete_after_upload: true
 
     - name: Save Bazel disk cache
       # Mirror of the ccache save for the Kleaf/DDK path: --disk_cache keeps
