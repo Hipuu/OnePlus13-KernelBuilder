@@ -1180,6 +1180,34 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
+          "v2.3.0")
+            # v2.3.0 synced with tiann/KernelSU main at 34a82ab7 (see the
+            # upstream "Bump version to 2.3.0" commit); verified to apply
+            # cleanly to KSU main HEAD 932014ab (one commit past the sync
+            # point). KSUN still rejects upstream hunks here; WildKernels
+            # fix patches only go up to v2.2.0, so the KSUN branch keeps
+            # the v2.2.0 fix set against the newer base patch.
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              cd "$KSUN_FOLDER"
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              # Prefer version-matched fixes, fall back to the newest
+              # published set (v2.2.0) when upstream has not caught up.
+              KSUS_FIXES="$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version"
+              [ -d "$KSUS_FIXES" ] || KSUS_FIXES="$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/v2.2.0"
+              [ -d "$KSUS_FIXES" ] || { echo "::error::No KSUN susfs fix patches found"; exit 1; }
+              for file in $(find ./kernel -maxdepth 2 -name "*.rej" -exec basename {} .rej \;); do
+                echo "Patching file: $file with fix_$file.patch"
+                patch -p1 --forward < "$KSUS_FIXES/fix_$file.patch"
+              done
+              echo "Patching Hook Mode!"
+              patch -p1 --forward < "$KSUS_FIXES/overwrite_hook_mode.patch"
+              echo "Patching KSU_TOOLKIT Support for SusFS kernel!"
+              patch -p1 --forward < "$KSUS_FIXES/ksu_toolkit.patch"
+            else
+              cd "$KSU_FOLDER"
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+            fi
+            ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
@@ -1187,6 +1215,20 @@ runs:
         esac
 
         cd "$COMMON_KERNEL_FOLDER"
+        if [ "${{ inputs.ksu_type }}" = "KSU" ] && [ -d "$KSU_FOLDER" ]; then
+          # A half-applied SUSFS->KernelSU patch leaves the module un-buildable
+          # (succeeded hunks drop Kbuild entries whose callers still exist),
+          # then Bazel dies at link with confusing errors an hour later.
+          # Detect rejects here at minute ~3 instead: fail fast with the list.
+          if REJ_LIST=$(find "$KSU_FOLDER" -name '*.rej' -type f | sort); then
+            if [ -n "$REJ_LIST" ]; then
+              echo "::error::SUSFS KernelSU patch left rejects; KSU/SUSFS drifted apart:"
+              echo "$REJ_LIST"
+              echo "Fix: update .github/compatible-commits.json to matching refs"
+              exit 1
+            fi
+          fi
+        fi
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
             sed -i '/#include <trace\/hooks\/blk.h>/a #include <trace\/hooks\/fs.h>' ./fs/namespace.c
@@ -1560,9 +1602,16 @@ runs:
         # A2: upstream hrtimer redundant-reprogram fix (stable ece8be21d8c93)
         cd "$COMMON_KERNEL_FOLDER"
         echo "Patching 0001-hrtimer-avoid-pointless-reprogramming.patch"
-        patch -p1 --forward < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
-          echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
-        }
+        if grep -qF 'new_base->cpu_base->in_hrtirq' kernel/time/hrtimer.c; then
+          # The Hipuu fork already ships this fix (with its own divergent
+          # context around enqueue_hrtimer), so the patch's hunk cannot
+          # match; that is the desired end-state, not a warning.
+          echo "ℹ️ hrtimer reprogram fix already present in this base; skipping"
+        else
+          patch -p1 --forward < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
+            echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
+          }
+        fi
 
         # A1: gate task-tracker hrtimer on tasktrack_enable (vendor module)
         # The patch path is cpu/sched/sched_info/osi_tasktrack.c home-relative,
@@ -1580,8 +1629,12 @@ runs:
         fi
 
         # Battery-focused power patches (unconditional on every base).
-        # --forward tolerates already-applied / fork-shipped variants so the
-        # step is idempotent and never hard-fails a build.
+        # The stock OnePlusOSS bases genuinely need these; the Hipuu fork
+        # already ships its own (stronger) versions of several of them, so
+        # --forward reports "Reversed (or previously applied)" there. That
+        # outcome is success, not a warning: separate it from genuine hunk
+        # failures so the log stays actionable (the warnings were pure noise
+        # on 6.6.118 while still catching real regressions elsewhere).
         cd "$COMMON_KERNEL_FOLDER"
         for p in \
           add_timeout_wakelocks_globally \
@@ -1595,9 +1648,44 @@ runs:
           f2fs_enlarge_min_fsync_blocks
         do
           echo "Patching $p.patch"
-          patch -p1 --forward < "$BATTERY_PATCHES/$p.patch" || {
+          PATCH_LOG="$RUNNER_TEMP/battery-$p.log"
+          # patch exits non-zero both for genuine rejects and for
+          # --forward's reversed-detection skip, so classify by log content:
+          # "Reversed (or previously applied)" without any "FAILED" hunk means
+          # the base already carries the change (the Hipuu fork ships stronger
+          # variants of several of these) — success, not a warning.
+          if patch -p1 --forward < "$BATTERY_PATCHES/$p.patch" >"$PATCH_LOG" 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          # Per-patch "already present" markers, used when hunks FAIL because
+          # the base ships its own (textually divergent) variant of the same
+          # change — e.g. the Hipuu fork's alarmtimer and freezer tweaks.
+          # Marker logic must be per-patch: the freeze-timeout one matches
+          # any non-stock value because the fork ships a shorter timeout
+          # than the patch's own 1s.
+          fork_shipped=false
+          case "$p" in
+            minimise_wakeup_time)
+              grep -qF 'ktime_to_ms(min) + 1' kernel/time/alarmtimer.c && fork_shipped=true ;;
+            reduce_freeze_timeout)
+              grep -qF 'freeze_timeout_msecs' kernel/power/process.c \
+                && ! grep -qF 'freeze_timeout_msecs = 20 * MSEC_PER_SEC' kernel/power/process.c \
+                && fork_shipped=true ;;
+          esac
+          if [ "$fork_shipped" = true ]; then
+            echo "ℹ️ $p.patch already present in this base (fork-shipped variant); skipping"
+          elif grep -q "FAILED" "$PATCH_LOG"; then
             echo "::warning::$p.patch did not apply cleanly; may be already applied or fork-shipped"
-          }
+            cat "$PATCH_LOG"
+          elif grep -qE "Reversed \(or previously applied\)" "$PATCH_LOG"; then
+            echo "ℹ️ $p.patch already present in this base; skipping"
+          elif [ "$rc" -ne 0 ]; then
+            # Non-zero exit with neither marker: unexpected, surface it.
+            echo "::warning::$p.patch exited with status $rc"
+            cat "$PATCH_LOG"
+          fi
         done
 
         echo "✅ Battery optimization patches applied"
@@ -1717,8 +1805,16 @@ runs:
         CONFIG_TCP_CONG_ADVANCED=y
         CONFIG_TCP_CONG_BBR3=y
         EOF
-        patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch" || \
-          echo "::warning::BBRv3 backport skipped (already applied or inapplicable)"
+        # The Hipuu fork already carries the BBRv3 backport; applying the
+        # external patch on top only produces reject noise ("tcp_bbr3.c
+        # already exists", reversed hunks). Skip it when the fork ships it;
+        # stock OnePlusOSS bases (no tcp_bbr3.c) still get the full backport.
+        if [ -f net/ipv4/tcp_bbr3.c ]; then
+          echo "ℹ️ BBRv3 already present in this base; skipping backport patch"
+        else
+          patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch" || \
+            echo "::warning::BBRv3 backport skipped (already applied or inapplicable)"
+        fi
 
         if [ "${{ env.ANDROID_VER }}" = "android12" ] && [ "${{ env.KERNEL_VER }}" = "5.10" ]; then
           if ! grep -qF 'int proc_dou8vec_minmax(' ./include/linux/sysctl.h; then
@@ -1910,6 +2006,17 @@ runs:
         echo "::group::Apply zram lz4/zstd backports"
         cd "$COMMON_KERNEL_FOLDER"
         BASE="https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/21db9e7d547ca625bd5aa734fb5dfc8b94ea48ef/zram_patch"
+        # The Hipuu common fork already ships both backports (lib/lz4/lz4.c,
+        # lib/zstd/common/allocations.h), so on that base every hunk reports
+        # "Reversed (or previously applied)" and the old step printed pure-noise
+        # warnings. Detect the fork-shipped state up front and skip the whole
+        # download+patch; stock OnePlusOSS bases (no lib/lz4/lz4.c) still apply.
+        if [ -f lib/lz4/lz4.c ] && [ -f lib/zstd/common/allocations.h ]; then
+          echo "ℹ️ zram lz4/zstd backports already present in this base; skipping"
+          echo "✅ zram lz4/zstd backports applied"
+          echo "::endgroup::"
+          exit 0
+        fi
         LZ4_PATCH="$RUNNER_TEMP/001-lz4.patch"
         ZSTD_PATCH="$RUNNER_TEMP/002-zstd.patch"
         curl --fail --show-error --location --proto '=https' "$BASE/001-lz4.patch" -o "$LZ4_PATCH"
@@ -2789,7 +2896,25 @@ runs:
         {
           echo ""
           echo "# --- appended by Prepare Bazel/DDK build ---"
-          echo "build --jobs=$(nproc --all)"
+          # Cap --jobs to the cgroup CPU quota: nproc reports the host's
+          # cores, but container/VM runners (ezycloudx etc.) are often
+          # quota-limited below that. Oversubscribing the quota makes the
+          # 500+ action burst after analysis starve the long single-threaded
+          # config action (observed 23+ min for //common:kernel_aarch64_
+          # config while the sibling sun_perf_config took ~8 s).
+          if [ -r /sys/fs/cgroup/cpu.max ]; then
+            read -r CG_QUOTA CG_PERIOD < /sys/fs/cgroup/cpu.max
+            if [ "$CG_QUOTA" = "max" ]; then
+              CG_CPUS=$(nproc)
+            else
+              CG_CPUS=$(( (CG_QUOTA + CG_PERIOD - 1) / CG_PERIOD ))
+              [ "$CG_CPUS" -gt "$(nproc)" ] && CG_CPUS=$(nproc)
+              [ "$CG_CPUS" -lt 1 ] && CG_CPUS=1
+            fi
+          else
+            CG_CPUS=$(nproc)
+          fi
+          echo "build --jobs=$CG_CPUS"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
           # feat/perf-stack: Hipuu's kernel fork carries a much larger
           # bazel analysis graph; the default host heap is OOM-killed
@@ -2904,6 +3029,19 @@ runs:
         [ "$HEAP_PCT" -lt 1 ] && HEAP_PCT=1
         echo "Host RAM: ${MEM_TOTAL_MB}MB; Bazel server heap target: ${HEAP_TARGET_MB}MB (${HEAP_PCT}%)"
         export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=$HEAP_PCT
+        # Build the GKI config target alone first: it is the dependency-
+        # root of everything else (Image, modules_prepare, the DDK module),
+        # so when the common tree moves to a new revision this one action
+        # is the whole cold-cache cost. Building it separately (1) makes
+        # its wall time visible as its own step in the Actions log instead
+        # of a frozen "[576 / 593]" line, (2) persists its output to the
+        # disk cache even if the full build below is cancelled, and (3) is
+        # trivially retryable on self-hosted hosts without redoing analysis.
+        if ! ./tools/bazel build "//common:kernel_aarch64_config" 2>&1 | tee "$DDK_BUILD_LOG"; then
+          echo "::error::Bazel config build failed; tail of ddk-build.log:"
+          tail -n 300 "$DDK_BUILD_LOG" || true
+          exit 1
+        fi
         if ! ./tools/bazel build \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
@@ -4131,8 +4269,15 @@ runs:
     - name: Save Bazel disk cache
       # Mirror of the ccache save for the Kleaf/DDK path: --disk_cache keeps
       # action outputs keyed by content hash, so a warm cache turns the 44-min
-      # cold build into an incremental one on the next run.
-      if: always() && steps.build_ddk_step.conclusion == 'success'
+      # cold build into an incremental one on the next run. Saved even when
+      # the build fails or is cancelled: the cache key already versions by
+      # kernel revision, so partial progress (e.g. a completed config action
+      # on a new tree revision) is directly reusable and a later-step
+      # failure no longer throws away hours of compilation. Runs even when
+      # the job is cancelled mid-build (the most common outcome for the
+      # self-hosted DDK variant), because the split config build above has
+      # usually completed by then and is the expensive part to redo.
+      if: always() && steps.build_ddk_step.conclusion != 'skipped'
       uses: ./.github/actions/cache/save
       with:
         cache_path: ${{ env.BAZEL_DISK_CACHE }}
