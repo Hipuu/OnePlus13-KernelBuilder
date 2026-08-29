@@ -110,6 +110,7 @@ The `runner` dispatch input switches all jobs between `ubuntu-latest` and a self
 - **Concurrency**: matrix jobs serialize via a top-level `concurrency:` group keyed on `${{ github.workflow }}-${{ github.run_id }}`. This prevents multiple variants from racing on shared host resources (`/dev/shm`, disk I/O, RAM). GitHub-hosted is unaffected because each matrix job gets its own VM.
 - **Git config isolation**: the workspace-cleanup step unsets global git config keys (`feature.manyFiles`, `core.fsmonitor`, `pack.sparse`) that the build action sets, preventing state leakage between unrelated repos on a persistent host
 - **No sudo required**: the `repo` binary is downloaded to `$RUNNER_TEMP` (not `/usr/local/bin`), and all temp files use `$RUNNER_TEMP` instead of `/tmp`, so the runner user does not need elevated privileges
+- **Disk housekeeping**: the workspace-cleanup step prunes Bazel output bases (`~/.cache/bazel`) untouched for 7 days — they grow unbounded across runs and are the #1 ENOSPC cause on persistent hosts (see failed run 33241700491). A "Check free disk space" step then hard-fails self-hosted jobs below 100 GiB free (hosted runners only warn; their ~35-45 GiB is historically sufficient).
 
 ### Workflow debug helper
 

@@ -227,6 +227,40 @@ jobs:
           for key in feature.manyFiles core.fsmonitor pack.sparse; do
             git config --global --unset "$key" 2>/dev/null || true
           done
+          # Bazel's output base ($HOME/.cache/bazel) grows unbounded across
+          # runs and lives outside the workspace, so the wipe above never
+          # touches it. Run 33241700491 died with ENOSPC exactly because of
+          # this. Prune output bases not touched in the last 7 days; the
+          # release-backed disk cache makes the content recoverable.
+          if [ -d "$HOME/.cache/bazel" ]; then
+            find "$HOME/.cache/bazel" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+      - name: Check free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail fast with an actionable message instead of dying mid-build
+          # with ENOSPC (which also kills the runner's own log writer and
+          # produces an undebuggable run — see run 33241700491).
+          df -h
+          avail_kb=$(df -Pk "${GITHUB_WORKSPACE:-.}" | awk 'NR==2 {print $4}')
+          avail_gib=$((avail_kb / 1024 / 1024))
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            # Hosted VMs ship ~35-45 GiB free and that has been enough; only
+            # warn so a shrinking image never hard-breaks the default path.
+            if [ "$avail_gib" -lt 30 ]; then
+              echo "::warning::Only ${avail_gib} GiB free on hosted runner — builds have worked at this level, but watch for ENOSPC."
+            fi
+          else
+            # Self-hosted: AGENTS.md requires >=250 GiB per job (DDK fork
+            # needs source + toolchain + ccache + Bazel output base at once).
+            if [ "$avail_gib" -lt 100 ]; then
+              echo "::error::Only ${avail_gib} GiB free — need 100 GiB. Prune on the host: ~/.cache/bazel, old _work dirs, docker leftovers."
+              exit 1
+            fi
+          fi
 
       - name: Checkout builder
         uses: actions/checkout@v6
