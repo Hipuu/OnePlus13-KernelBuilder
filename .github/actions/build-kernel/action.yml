@@ -1565,8 +1565,12 @@ runs:
         }
 
         # A1: gate task-tracker hrtimer on tasktrack_enable (vendor module)
+        # The patch path is cpu/sched/sched_info/osi_tasktrack.c home-relative,
+        # so it must run from the vendor oplus-kernel root (the parent of cpu/),
+        # not from inside the sched_info dir: -p1 would resolve to
+        # sched_info/sched_info/osi_tasktrack.c and silently never apply.
         if [ -d "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info" ]; then
-          cd "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info"
+          cd "$CONFIG_FOLDER/vendor/oplus/kernel"
           echo "Patching 0001-oplus-gate-tasktracker-timer-on-enable.patch"
           patch -p1 --forward < "$BATTERY_PATCHES/0001-oplus-gate-tasktracker-timer-on-enable.patch" || {
             echo "::warning::tasktrack timer gate patch did not apply; source may differ"

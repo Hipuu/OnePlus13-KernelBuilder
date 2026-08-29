@@ -17,7 +17,7 @@ Research: BATTERY_OPTIMIZATION_RESEARCH.md candidate A1.
 diff --git a/cpu/sched/sched_info/osi_tasktrack.c b/cpu/sched/sched_info/osi_tasktrack.c
 --- a/cpu/sched/sched_info/osi_tasktrack.c
 +++ b/cpu/sched/sched_info/osi_tasktrack.c
-@@ -771,7 +771,9 @@ void tasktrack_init(void)
+@@ -771,8 +771,9 @@ void tasktrack_init(void)
  	tasktrack_timer.function = tasktrack_timer_handler;
  
  	jank_update_task_status = jankinfo_update_task_status_cb;
