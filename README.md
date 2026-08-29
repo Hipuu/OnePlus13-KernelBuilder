@@ -1,348 +1,198 @@
-# OnePlus 13 Kernel Builder
+# OnePlus13-KernelBuilder
 
-[![Build OnePlus 13 Kernel](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/workflows/build-oneplus13-kernel.yml/badge.svg)](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/workflows/build-oneplus13-kernel.yml)
+A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for the **OnePlus 13** (Qualcomm SM8750, codename `sun`). For each variant it produces:
 
-GitHub Actions workflow that builds custom **OnePlus 13** (SM8750 / "sun") kernels with KernelSU / KernelSU-Next, SUSFS, and NetHunter wireless drivers.
+- A flashable **AnyKernel3 ZIP** (`AK3_*.zip`)
+- A raw ARM64 **`Image`**
+- A **wireless/CAN modules pack** (`kernel_modules_*.zip`) plus a **firmware passthrough ZIP**
 
-Built on the [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS) pipeline, vendored at a pinned commit and specialized to a single device. Produces a flashable AnyKernel3 ZIP, a raw kernel `Image`, and a loadable wireless-module pack.
+The pipeline is a single-device fork of [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS), pinned to a specific commit and reduced to the OnePlus 13 `sun` platform only. It builds from a pinned `repo`-style manifest, applies a curated series of patches (KernelSU/SUSFS, NetHunter, scheduler and power tweaks, battery optimizations), and packages the results without constructing any boot/vendor/DLKM images.
+
+> **This repository intentionally produces no `boot.img`, `vendor_boot.img`, `vendor_dlkm.img`, or `system_dlkm.img`.**
+
+---
 
 ## Features
 
-| | |
-|---|---|
-| **Root** | KernelSU-Next (`KSUN`) or KernelSU (`KSU`), ref resolved to a commit SHA before build |
-| **SUSFS** | Version auto-detected from the branch (`v2.2.0` on `gki-android15-6.6`), with upstream patch/rej-fix logic |
-| **Wireless** | External Wi-Fi adapters as loadable modules, with a dependency-resolving loader script |
-| **NetHunter** | Bluetooth (HCIBTUSB, BCM203X, BPA10X, BFUSB), SDR (AirSpy, HackRF), full CAN stack, USB serial (CH341, FTDI, PL2303) |
-| **Scheduler** | HMBIRD (Fengchi) patches for SM8750 |
-| **Networking** | BBR, BBRv3, TTL target, IP_SET |
-| **Other patches** | NTSync, Unicode fix, Droidspaces, module intercept/overlay, vendor-module debloat, memory/VFS/scheduler optimizations |
-| **Toolchain** | Pinned ZyC Clang 19 or manifest Clang; `O2`/`O3`; `thin`/`full`/`none` LTO |
-| **CI** | Six kernel variants buildable in parallel, ccache-accelerated, artifact / prerelease / release publishing |
+- **Root**: KernelSU-Next (KSUN, `dev` branch default) or KernelSU (KSU, `main` branch default), resolved to a concrete commit SHA before building.
+- **SUSFS** (optional, default on) with the simonpunk patch set and the fork-specific kernel compat fixes.
+- **NetHunter**: inline configs (Bluetooth, SDR/AirSpy/HackRF, CAN bus, USB-serial) **plus** external Wi-Fi adapter drivers (`ath9k_htc`/AR9271, `ath10k_usb`, `carl9170`, `rtl8187`, `rtl8xxxu`, `rtw88`, `rt2x00`, `zd1211rw`, `p54`, `mt76`) shipped as loadable modules.
+- **`feat/perf-stack` kernel series** (via the Hipuu common-kernel fork): MGLRU rework + workingset/refault fixes, `af_unix` GC rewrite (Tarjan SCC), BPF optimizations, `f2fs` GC/sparse-read/deadlock fixes, THP `__GFP_THISNODE` reclaim fix, cpufreq/sched `NEED_UPDATE_LIMITS` fixes, workqueue/videobuf2 tweaks, `zsmalloc` enabled + zram tracking, UKSM + HMBIRD hardening, migration vendor hooks + ZTE symbols.
+- **Perf-stack extras**: **ADIOS** I/O scheduler, **zram lz4/zstd backports**, and **Re-Kernel** freeze-notification LKM, each pinned by commit.
+- **Battery optimizations**: see [Battery & power tweaks](#battery--power-tweaks).
+- **Networking**: BBR / BBRv3, TTL target, IP_SET & IPv6 NAT, qdisc schedulers (FQ/CAKE/PIE), NTSync, TMPFS xattr/ACL.
+- **Feature toggles**: `use_susfs`, `nethunter`, `wireless_modules`, `use_opt_patches`, `hmbird`/`ds`/`bbg`/`ttl`/`ip_set`/`ntsync` (per-config), plus per-run `lto` (none/thin/full) and `optimize_level` (O2/O3).
+- **DDK / Bazel-Kleaf builds** (6.6.118 A16): builds `qca_cld3_<chipset>.ko` against the vendor kernel, with an optional **monitor-mode frame-injection patch** for the internal Wi-Fi; stripped `--strip-debug`, `--jobs`/heap computed for the host, and a Bazel disk cache.
 
-### Wireless adapter support
-
-Drivers are built as modules and shipped in `kernel_modules_*.zip`:
-
-| Vendor | Drivers |
-|--------|---------|
-| Atheros | `ath9k_htc`, `ath10k_usb`, `carl9170` |
-| Realtek | `rtl8187`, `rtl8xxxu`, `rtw88` (out-of-tree, [lwfinger/rtw88](https://github.com/lwfinger/rtw88)) |
-| Ralink | `rt2500usb`, `rt73usb`, `rt2800usb` |
-| MediaTek | `mt7601u`, `mt76x0u`, `mt76x2u`, `mt7921u` |
-| Zydas / Intersil | `zd1211rw`, `p54usb` |
-| Virtual | `mac80211_hwsim` |
-
-## Not included
-
-- **No boot.img / vendor_boot / DLKM images.** Output is a raw `Image`, an AnyKernel3 ZIP, and a modules ZIP.
-- **No other devices.** OnePlus 13 only.
-- **DDK build ships internal peach + the full USB zoo.** Same external-adapter coverage as non-DDK variants, built on the vendor kernel; only the out-of-tree rtw88 replacement stays non-DDK (in-tree `rtw88_*_usb` chips are covered). See [DDK build](#ddk-build).
-
-## DDK build
-
-`OP13-6.6.118` builds with Bazel/Kleaf instead of `make`, and additionally
-produces OnePlus's own Wi-Fi driver, `qca_cld3_peach_v2.ko`, as a DDK
-(`ddk_module`) external module. Because it is compiled against the same
-`Module.symvers` as the shipped `Image`, it passes the CRC check that the
-stock module fails on a patched kernel — which is what makes monitor mode on
-the **internal** Wi-Fi possible.
-
-Monitor mode itself needs no patch: `CONFIG_FEATURE_MONITOR_MODE_SUPPORT`,
-`CONFIG_QCA_MONITOR_PKT_SUPPORT` and `CONFIG_WIFI_MONITOR_SUPPORT` are already
-enabled in the stock `sun_gki_peach-v2_defconfig` and gated at runtime by the
-`con_mode` module parameter. Injection does require a patch; see
-[monitor-mode injection](#monitor-mode-injection).
-
-> [!IMPORTANT]
-> DDK cannot ship a *second* GKI-built `cfg80211`/`mac80211` pair.
-> `msm-kernel` already declares those among its in-tree modules, and a mixed
-> build that also enables them on `//common` fails modpost with
-> `'wiphy_new_nm' exported twice`. Peach is CRC-matched to the vendor pair, so
-> that pair stays authoritative.
->
-> The full USB zoo (and AR9271) on DDK is built *on the vendor kernel* (driver
-> configs on msm-kernel `gki_defconfig`) so every driver links against the same
-> mac80211 peach uses. The modules ZIP ships peach, vendor cfg/mac, the ath9k
-> stack, and the whole external-driver zoo. Loading any external driver via
-> `nethunter-wifi.sh` displaces peach only; reboot or `restore` brings internal
-> Wi-Fi back.
-
-The module pack on this variant contains `qca_cld3_peach_v2.ko`, the platform
-`cfg80211`/`mac80211`/`rfkill` it links against, `ath9k_htc` (+ deps), the same
-external USB Wi-Fi drivers as the non-DDK variants (`rtl8xxxu`, `rt2800usb`,
-`rtw88_*_usb`, `mt76*`, …), the full dependency closure that `modules.dep`
-resolves, and the CAN and USB-serial drivers. The build fails if the shipped
-modules' `vermagic` does not match the `Image`, since a mismatch makes them
-unloadable.
-
-### Monitor-mode injection
-
-`ddk_injection` patches `wlan_mon_drv_ops` with a `.ndo_start_xmit` handler
-that strips the radiotap header, accepts management frames, and transmits them
-through a firmware-only STA helper vdev on the monitor channel. The helper
-waits for the real firmware `VDEV_START` and advertised `PEER_CREATE`
-responses; its vdev and peer responses bypass the normal object-manager path
-because it intentionally has no host objects. WMI management-TX completions
-own the DMA buffer lifetime. Upstream omits Tx from monitor mode entirely —
-the comment reads *"does not Tx and most of operations"* — so without this a
-radiotap frame written to the monitor interface is dropped before the driver
-sees it.
-
-> [!WARNING]
-> Monitor mode itself is confirmed working on a OnePlus 13 — see
-> [internal Wi-Fi monitor mode](#internal-wi-fi-monitor-mode-conmode). The
-> repaired injection path still needs on-device validation against the shipped
-> firmware. Only management frames are accepted. Radiotap Tx flags (rate,
-> retries, `TX_NOACK`) are parsed only far enough to locate the 802.11 frame and
-> are otherwise ignored. The 20 dBm world regulatory cap and the `no IR` flag
-> on channels 12–14 still apply.
-
+---
 
 ## Supported variants
 
-| Model | Kernel | OS | Build | Manifest |
-|-------|--------|----|-------|----|
-| `OP13-6.6.89` | 6.6.89 | A16 | make | `oneplus_13_6.6.89_w.xml` |
-| `OP13-6.6.118` | 6.6.118 | A16 | **Bazel + DDK** | `oneplus_13_6.6.118_w.xml` |
-| `OP13-6.6.66` | 6.6.66 | A15 | make | `oneplus_13_6.6.66_v.xml` |
-| `OP13-6.6.30` | 6.6.30 | A15 | make | `oneplus_13_6.6.30_v.xml` |
-| `OP13-CPH-6.6.89` | 6.6.89 | A15 (global) | make | `oneplus_13_global_6.6.89_v.xml` |
-| `OP13-CPH-6.6.56` | 6.6.56 | A15 (global) | make | `oneplus_13_global_6.6.56_v.xml` |
+All six share the same SoC (`SM8750`), Android generation (`android15`), and manifest branch (`wild/sm8750`); they differ in kernel version and OxygenOS generation.
 
-All share the same SoC (Snapdragon 8 Elite / SM8750), Android version (`android15`), and manifest branch (`wild/sm8750`). Only `OP13-6.6.118` carries the Kleaf/Bazel projects in its manifest; see [DDK build](#ddk-build).
+| Config | Kernel | OS | Manifest |
+|---|---|---|---|
+| `configs/OP13-6.6.89.json` | 6.6.89 | A16 | `manifests/a16/oneplus_13_6.6.89_w.xml` |
+| `configs/OP13-6.6.118.json` | 6.6.118 | A16 | `manifests/a16/oneplus_13_6.6.118_w.xml` |
+| `configs/OP13-6.6.66.json` | 6.6.66 | A15 | `manifests/a15/oneplus_13_6.6.66_v.xml` |
+| `configs/OP13-6.6.30.json` | 6.6.30 | A15 | `manifests/a15/oneplus_13_6.6.30_v.xml` |
+| `configs/OP13-CPH-6.6.89.json` | 6.6.89 | A15 global | `manifests/a15/oneplus_13_global_6.6.89_v.xml` |
+| `configs/OP13-CPH-6.6.56.json` | 6.6.56 | A15 global | `manifests/a15/oneplus_13_global_6.6.56_v.xml` |
 
-## Usage
+---
 
-Open the **Actions** tab, select **Build OnePlus 13 Kernel**, and click **Run workflow**. Or from the CLI:
+## Running a build
 
-```bash
-gh workflow run "Build OnePlus 13 Kernel" -f kernel_version="6.6.118 A16"
-```
-
-### Inputs
-
-| Input | Description | Default |
-|-------|-------------|---------|
-| `kernel_version` | Variant to build; `all` builds every variant in parallel | `6.6.89 A16` |
-| `ksu_variant` | `KSUN` or `KSU` | `KSUN` |
-| `ksu_branch` | KernelSU branch/tag/commit (empty = known-good commit from `compatible-commits.json`, else branch `dev` for KSUN / `main` for KSU) | empty |
-| `use_susfs` | Enable SUSFS | `true` |
-| `susfs_branch` | SUSFS branch/commit (empty = known-good commit from `compatible-commits.json`, else branch `gki-android15-6.6`) | empty |
-| `nethunter` | Enable NetHunter inline configs | `true` |
-| `wireless_modules` | Build and package wireless kernel modules | `true` |
-| `optimize_level` | `O2` or `O3` | `O2` |
-| `lto` | `thin`, `full`, or `none` | `thin` |
-| `compiler` | Pinned ZyC Clang 19 or manifest Clang | `zycromerz-19` |
-| `use_opt_patches` | Apply optimization patches | `true` |
-| `ddk` | Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (`6.6.118 A16` only) | `true` |
-| `ddk_injection` | Patch qcacld for frame injection in monitor mode (experimental; requires `ddk`) | `true` |
-| `kernel_uname` | uname suffix | `OP-WILD` |
-| `build_timestamp` | Custom uname timestamp (empty = current UTC) | empty |
-| `clean_build` | Build without ccache restore | `false` |
-| `release_type` | `none`, `prerelease`, or `release` | `none` |
-| `debug` | Build modules and upload debug artifacts | `false` |
-| `runner` | Runner pool: `github-hosted` (ubuntu-latest, 16 GB) or `self-hosted` (needs ≥32 GB RAM for Bazel DDK builds) | `github-hosted` |
-
-### Artifacts
-
-| File | Contents |
-|------|----------|
-| `AK3_<MODEL>_<OS>_<KERNEL>_<KSU>_<VER>.zip` | AnyKernel3 flashable package |
-| `kernel_modules_<MODEL>_<OS>_<KERNEL>.zip` | Wireless/CAN modules, `modules.dep`, `nethunter-wifi.sh` |
-| `Nethunter-Wireless-Firmware-<VER>.zip` | Firmware blobs (passthrough) |
-| `Image_<MODEL>_<KERNEL>` | Raw ARM64 kernel image |
-
-## Installation
-
-1. Flash the AnyKernel3 ZIP via custom recovery, KernelSU, APatch, or another flasher.
-2. Reboot and install the matching manager app — [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases) or [KernelSU](https://github.com/tiann/KernelSU/releases).
-
-## Wireless modules
-
-> [!IMPORTANT]
-> Modules are built with `CONFIG_MODVERSIONS=y`. A module pack loads **only** on the exact kernel build it shipped with — matching base versions is not sufficient.
-
-Extract `kernel_modules_*.zip` on the device, extract the firmware ZIP, and run the bundled loader as root. Run it with no arguments for an interactive menu:
+Builds are only triggered through GitHub Actions (`workflow_dispatch`). There is no local build script.
 
 ```bash
-./nethunter-wifi.sh                 # interactive menu
+# Default build (6.6.89 A16, KSUN + SUSFS + NetHunter + wireless modules)
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder
+
+# A single non-default variant
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f kernel_version="6.6.118 A16"
+
+# All six variants in parallel
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f kernel_version=all
+
+# Self-hosted runner pool (requires labels: self-hosted, linux, X64)
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f runner=self-hosted
 ```
 
-```
-==============================================
- nethunter-wifi -- internal Wi-Fi: sta (normal Wi-Fi)
-==============================================
-  1) internal Wi-Fi -> monitor mode
-  2) internal Wi-Fi -> normal (sta)
-  3) load an external adapter driver
-  4) external adapter -> monitor mode
-  5) external adapter -> managed mode
-  6) status
-  7) list drivers in this pack
-  8) restore platform Wi-Fi stack
-  9) help
-  0) quit
-```
+### Key dispatch inputs
 
-The header shows the live mode and refreshes after every action. Each entry maps onto a subcommand that also works directly:
+| Input | Options / default | Notes |
+|---|---|---|
+| `kernel_version` | one of the six, or `all` | The build matrix. |
+| `ksu_variant` | `KSUN` (default), `KSU` | Root implementation. |
+| `ksu_branch` | free text, empty = default | Empty uses `main` for KSU, `dev` for KSUN (falling back to a pinned compatible commit when recorded). |
+| `use_susfs` | `true` (default) | SUSFS feature set. |
+| `susfs_branch` | free text, empty = auto | Empty selects the GKI branch / pinned compatible commit for the tree. |
+| `nethunter` / `wireless_modules` | `true` (default) | Inline configs / external driver modules. |
+| `ddk` / `ddk_injection` | `true` (default) | Bazel-Kleaf build + qcacld monitor injection (6.6.118 A16 only; ignored elsewhere). |
+| `optimize_level` | `O2` (default), `O3` | Compiler optimization. |
+| `lto` | `thin` (default), `full`, `none` | Link-time optimization. `thin` enables the persistent ThinLTO cache. |
+| `compiler` | `zycromerz-19` (default), `manifest` | Toolchain source. |
+| `release_type` | `none` (default), `prerelease`, `release` | Publish the build to a GitHub release. |
+| `runner` | `github-hosted` (default), `self-hosted` | Runner pool. |
+
+---
+
+## Self-hosted runner requirements
+
+The `self-hosted` pool is required for the DDK/Bazel variant (`feat/perf-stack`): the fork kernel graph exceeds the 16 GB RAM ceiling of GitHub-hosted runners during Bazel's loading phase. Register a runner with labels `self-hosted`, `linux`, `X64`.
+
+- **RAM**: ≥ 32 GB (64 GB recommended for `all` matrix runs).
+- **Disk**: ≥ 250 GB free per concurrent job. The workspace is wiped at the start of every `build` job; a variant-aware "Check free disk space" step hard-fails below 50 GiB free (150 GiB for the Bazel DDK variant, whose output base alone can exceed a 100 GB disk).
+- **OS**: Ubuntu 22.04+; the workflow installs its own dependencies via `apt-get`.
+- **No sudo required**: the `repo` binary and all temp files live under `$RUNNER_TEMP`; the workspace cleanup also prunes stale `~/.cache/bazel` output bases.
+- **Concurrency**: matrix jobs serialize via a top-level `concurrency:` group, since they share the physical host (`/dev/shm`, disk I/O, RAM). GitHub-hosted is unaffected (each job gets its own VM).
+
+Swap is only configured for GitHub-hosted runners (16 GB, via `pierotofy/set-swap-space`); self-hosted hosts are expected to have sufficient physical RAM instead.
+
+---
+
+## Build caches
+
+Caches are stored in **GitHub Releases** via the custom `cache/restore` and `cache/save` composite actions, not the `actions/cache` service.
+
+| Cache | Bucket | Gating |
+|---|---|---|
+| ccache | `ccache-cache` | make-based, non-clean builds |
+| Bazel disk cache | `bazel-disk-cache` | DDK (`OP_DDK`) builds |
+| **ThinLTO cache** | `lto-cache` | make-based + `lto=thin`, non-clean builds |
+
+**ThinLTO cache** (`ld-cache`): on make-based thin-LTO builds, `ld-wrapper` invokes `ld.lld "$@" --thinlto-cache-dir=… --thinlto-jobs=$((nproc/2))`, so unchanged modules skip re-importing/re-optimizing between runs. The cache dir (`ldcache_<KERNEL_FULL_VER>` under the workspace) is restored and saved with both a primary key and `restore_keys` fallbacks; the saved side uses `delete_after_upload` so it does not bloat the disk. DDK/Kleaf builds never use `ld-wrapper` and skip this cache.
+
+Version keys include the KernelSU variant, model, OS version, full kernel version, and Clang fingerprint, so caches never cross-link across toolchains or variants.
+
+---
+
+## Artifacts
+
+- `AK3_<MODEL>_<OS>_<KERNEL>_<KSU>_<VER>[_SuSFS_<ver>].zip` — flashable AnyKernel3 package.
+- `Image` — raw ARM64 kernel image.
+- `kernel_modules_<MODEL>_<OS>_<KERNEL>.zip` — external Wi-Fi/CAN modules, a flattened `modules.dep`, and the `nethunter-wifi.sh` loader.
+- `Nethunter-Wireless-Firmware-<VER>.zip` — re-published unmodified from `nullptr-t-oss/Nethunter-Wireless-Firmware`.
+- `qca_cld3_peach_v2.ko` (DDK builds) — the vendor Wi-Fi module as a standalone artifact.
+- Debug artifacts when `debug=true` (build/install logs, `vmlinux`, `Module.symvers`, modules tree).
+
+Modules are built with `CONFIG_MODVERSIONS=y`, so a modules ZIP loads **only** on the exact kernel build it shipped with.
+
+### Using wireless modules on-device
 
 ```bash
-./nethunter-wifi.sh load            # load default driver (ath9k_htc)
-./nethunter-wifi.sh load mt76x2u    # or any driver in the pack
-./nethunter-wifi.sh list            # list available drivers
-./nethunter-wifi.sh status          # resident modules, PHYs, regdomain
-./nethunter-wifi.sh monitor         # monitor mode, auto-detected interface
-./nethunter-wifi.sh monitor "" 6    # monitor mode on channel 6
-./nethunter-wifi.sh managed         # leave monitor mode
-./nethunter-wifi.sh conmode monitor 6   # internal Wi-Fi -> monitor, channel 6
-./nethunter-wifi.sh conmode sta     # internal Wi-Fi -> normal
-./nethunter-wifi.sh conmode         # show the current mode
-./nethunter-wifi.sh restore         # unload and restore internal Wi-Fi
-./nethunter-wifi.sh install         # autoload at boot (KernelSU/Magisk)
-./nethunter-wifi.sh uninstall       # remove boot service
+# from the extracted module pack, as root
+./nethunter-wifi.sh            # interactive menu
+./nethunter-wifi.sh load       # ath9k_htc by default
+./nethunter-wifi.sh status
+./nethunter-wifi.sh restore
+./nethunter-wifi.sh conmode monitor 6   # internal Wi-Fi -> monitor mode
+./nethunter-wifi.sh conmode sta         # back to normal
 ```
 
-With no arguments and no terminal attached — piped, or run from a boot service — it prints this help instead of opening a menu it could not read.
+The loader displaces the platform Wi-Fi stack only when a loaded driver actually needs `mac80211`; a reboot (or `restore`) brings the internal Wi-Fi back. See the scroll header inside `nethunter-wifi.sh` for the full rationale.
 
-`load` walks the shipped `modules.dep` to resolve dependency order, displaces the platform Wi-Fi stack when the driver requires `mac80211`, and points the firmware loader at the directory holding the NetHunter blobs.
+---
 
-### Internal Wi-Fi monitor mode (`conmode`)
+## Battery & power tweaks
 
-`monitor`/`managed` retype an external adapter's netdev in place. The internal Qualcomm chip cannot be retyped that way — qcacld fixes its role at load time from the `con_mode` module parameter, which is read-only in sysfs. `conmode` reloads the driver with the value you ask for:
+A dedicated `Apply battery optimization patches` step (`.github/actions/build-kernel/files/battery/`) applies an idempotent, `--forward`-safe series on every base:
 
-| `con_mode` | Mode |
-|-----------|------|
-| `0` | STA — normal Wi-Fi (default) |
-| `1` | AP |
-| `4` | Monitor |
-| `5` | FTM (factory test) |
-| `6` | EPPING |
+- **Wakelock entropy**: a **global 500 ms timeout** on newly-created wakelocks (`kernel/power/wakelock.c`), so stray locks like `tx_swr_ctrl` cannot pin the CPU awake.
+- **s2idle wakeups**: only wake once from s2idle (`pm_system_wakeup`).
+- **Freeze timeout**: reduced to 1 s for Android, and made non-tunable from userspace.
+- **ext4/f2fs commit windows**: larger default commit age / `min_fsync_blocks` so writes batch and the CPU stays idle longer.
+- **`alarmtimer` wakeup**: minimized wake timeout to the nearest timer expiration.
+- **PCI PME checks**: `PME_TIMEOUT` 1000 → 4000 ms.
+- **Log spam**: silence `devkmsg` and IRQ-affinity log spam.
+- **hrtimer**: avoid pointless reprogramming when the hrtimer tick is already running (upstream stable commit).
+- **Vendor tasktracker (A1)**: gate the `oplus_bsp_schedinfo` periodic hrtimer on `tasktrack_enable` so it cannot fire ~7.5×/s when disabled. The corresponding patch targets the vendor tree and is applied from `vendor/oplus/kernel` (the parent of the `cpu/sched/...` path).
 
-Verified on a OnePlus 13 running the DDK build: `wlan0` becomes `ARPHRD_IEEE80211_RADIOTAP` (type `803`) and `tcpdump -i wlan0 -e -nn` captures beacons, data frames, RTS/CTS and block-ACKs from all nearby networks with radiotap RSSI and rate annotations.
+> These are battery/performance trade-offs: the global wakelock timeout and the reduced freeze timeout change how aggressively the device can suspend. If any breaks a vendor feature you rely on, disable just that patch (they are independent files).
 
-> [!WARNING]
-> `conmode` power-cycles the WLAN chip over PCIe/MHI, and the link occasionally fails to come back — `cnss2` logs `MHI power up returns timeout` / `Failed to start MHI, err = -110`, and `wlan0` stays gone until you reboot. The script detects this and says so. It is intermittent, not every switch.
-
-### Behavior to expect
-
-- **Loading a `mac80211` driver disables the internal Wi-Fi.** This is unavoidable on this device — see [why the drivers are not built in](#why-the-drivers-are-not-built-in). Drivers that do not pull in `mac80211` (for example `slcan`) leave it alone.
-- **`restore` reloads the platform modules, but Android's `WifiService` usually stays latched in a failed state.** Reboot to get internal Wi-Fi back reliably.
-- **`install` costs the internal Wi-Fi on every boot.** Undo with `uninstall`.
-- **The radio runs in the world regulatory domain.** See [regulatory database](#regulatory-database).
-
-### Tested adapters
-
-| Adapter | USB ID | Driver | Result |
-|---------|--------|--------|--------|
-| Atheros AR9271 | `040d:3801` | `ath9k_htc` | Firmware load, `phy0`, managed + **monitor** + AP modes, frame capture confirmed |
-
-Verified against the 6.6.118 A16 build. Reported PHY capabilities: IBSS, managed, AP, AP/VLAN, monitor, P2P-client, P2P-GO.
-
-### Regulatory database
-
-Android ships no `regulatory.db`, so `cfg80211` logs `failed to load regulatory.db` and falls back to the world domain (`country 00`):
-
-- 20 dBm cap on all channels
-- Channels 12–14 flagged `no IR` — injection and beaconing blocked there
-- 5 GHz entirely `PASSIVE-SCAN`
-- `iw reg set <CC>` is accepted but has no effect
-
-Channels 1–11 remain fully usable, injection included.
-
-To lift the restriction, install `regulatory.db` and `regulatory.db.p7s` from [wireless-regdb](https://git.kernel.org/pub/scm/linux/kernel/git/sforshee/wireless-regdb.git) into a directory `ueventd` searches. A KernelSU/Magisk module overlaying `system/etc/firmware/` is the practical route — the same mechanism the NetHunter firmware ZIP uses.
-
-<details>
-<summary>Why setting <code>firmware_class/parameters/path</code> is not enough</summary>
-
-A direct kernel load from `/data` fails with `-2` under SELinux (`shell_data_file` is not readable by the firmware loader). Such loads only succeed because ueventd's usermode helper subsequently searches its own fixed list, defined in `/system/etc/ueventd.rc`:
-
-```
-/etc/firmware/  /odm/firmware/  /data/vendor/firmware/update/  /vendor/firmware/
-/firmware/image/  /vendor/firmware_mnt/image/qca6490/  /data/oplus/fw_update/
-/mnt/vendor/persist/copy/  /mnt/vendor/persist/  /odm/etc/wifi/  /vendor/firmware_mnt/image/
-```
-
-The blob must land in one of those paths.
-</details>
-
-### Why the drivers are not built in
-
-`ath9k_htc` is `depends on USB && MAC80211`, and Kconfig forbids a built-in driver depending on a modular provider. `CONFIG_ATH9K_HTC=y` therefore forces `CONFIG_MAC80211=y`, `CONFIG_CFG80211=y` and `CONFIG_RFKILL=y`.
-
-That is fatal on this device. OnePlus builds its own `cfg80211` in a separate tree with different symbol CRCs — the bundled `mac80211` already refuses to load against the platform one (`disagrees about version of symbol wiphy_new_nm`). With `cfg80211` compiled into the Image, `/vendor/lib/modules/cfg80211.ko` cannot load at all, `qca_cld3_peach_v2` fails its CRC check on every boot, and the internal Wi-Fi is permanently dead.
-
-Keeping the drivers modular confines that cost to the moment the loader runs, and a reboot undoes it.
-
-<details>
-<summary>Manual load procedure (what the loader automates)</summary>
-
-Both `cfg80211.ko` **and** `mac80211.ko` must come from the pack — the platform pair is CRC-incompatible with these drivers.
-
-```bash
-# Turn Wi-Fi off in Settings first, then unload the stock stack
-rmmod qca_cld3_peach_v2
-rmmod cfg80211
-
-# Load the bundled stack
-insmod ./cfg80211.ko
-insmod ./mac80211.ko
-
-# Load the driver chain (example: ath9k_htc)
-insmod ./ath.ko
-insmod ./ath9k_hw.ko
-insmod ./ath9k_common.ko
-insmod ./ath9k_htc.ko
-```
-
-See EmberHeart's `docs/drivers.md` for per-driver dependency chains.
-</details>
-
-## How it works
-
-The OnePlus 13 kernel needs WildKernels' manifest fork, pinned source/toolchain revisions, and a specific patch ordering. Rather than reimplement ~2400 lines of that pipeline and risk drift, this repository vendors it from commit `bfe12144` (with `WildKernels/kernel_patches` pinned to `24865a0`) and changes only what standalone single-device operation requires:
-
-- Internal sub-action references point at this repository's copies.
-- Source sync pulls pinned Clang, kernel build-tools and AnyKernel3 from WildKernels' public `toolchain-cache` release, so no per-repository toolchain mirror is needed.
-- A thin workflow exposes only OnePlus 13 options.
-- The KernelSU ref is resolved to a commit SHA before building. KernelSU-Next's `setup.sh` checks out the *latest tag* when given no argument, and that tag lags the SUSFS patch set — `10_enable_susfs_for_ksu.patch` expects a `kernel/Kconfig` that only exists on `dev`, leaving an unfixable `kernel/Kconfig.rej`.
-- When no explicit ref is supplied, KernelSU/SUSFS default to the known-good commits in `.github/compatible-commits.json` instead of raw branch HEADs. SUSFS patches must match the KernelSU checkout; upstream HEADs can drift apart and fail mid-patch. After verifying a build passes with newer commits, record them in the JSON.
-
-See [TESTING.md](TESTING.md) for validation, build profiles, and debugging.
+---
 
 ## Repository layout
 
 ```
 .github/
-  workflows/build-oneplus13-kernel.yml    # multi-version matrix workflow
-  compatible-commits.json                 # known-good KSU/SUSFS commit defaults
+  workflows/build-oneplus13-kernel.yml   # Top-level workflow (workflow_dispatch)
+  compatible-commits.json                # Pinned, verified SUSFS/KSUN commits
   actions/
-    build-kernel/                         # vendored build pipeline + NetHunter extensions
-      files/nethunter-wifi.sh             # on-device module loader
-    kernel-source-sync/                   # vendored source/toolchain sync
-    cache/{restore,save}/                 # release-backed ccache helpers
-configs/
-  OP13-6.6.{89,118,66,30}.json            # device configs (A16, A15)
-  OP13-CPH-6.6.{89,56}.json               # global device configs (A15)
-manifests/
-  a16/oneplus_13_6.6.{89,118}_w.xml       # pinned manifests (OxygenOS 16)
-  a15/oneplus_13_6.6.{66,30}_v.xml        # pinned manifests (OxygenOS 15)
-  a15/oneplus_13_global_6.6.{89,56}_v.xml # pinned global manifests (OxygenOS 15)
-validate_workflow.sh                      # local static validation
+    build-kernel/action.yml              # The actual build (patches, make/Kleaf, packaging)
+    build-kernel/files/                  # battery/*.patch, ddk/*, nethunter-wifi.sh, apply-susfs-main-patch.sh
+    kernel-source-sync/action.yml        # Downloads pinned sources/toolchains from the manifest
+    cache/restore|save/action.yml        # Release-backed ccache / Bazel / ThinLTO caches
+configs/                                 # JSON device configs (one per variant)
+manifests/                               # XML repo manifests (one per variant)
+README.md                                # This file
 ```
 
-## Credits
+---
 
-- Build pipeline, patches, manifest and toolchain cache — [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS), [WildKernels/kernel_patches](https://github.com/WildKernels/kernel_patches)
-- NetHunter wireless drivers, module packaging, firmware passthrough, and workflow controls — [nullptr-t-oss/EmberHeart_OnePlus11](https://github.com/nullptr-t-oss/EmberHeart_OnePlus11)
-- Out-of-tree rtw88 drivers — [lwfinger/rtw88](https://github.com/lwfinger/rtw88)
-- NetHunter Wireless Firmware — [nullptr-t-oss/Nethunter-Wireless-Firmware](https://github.com/nullptr-t-oss/Nethunter-Wireless-Firmware)
-- [KernelSU](https://github.com/tiann/KernelSU) · [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next) · [SUSFS](https://gitlab.com/simonpunk/susfs4ksu) · [AnyKernel3](https://github.com/osm0sis/AnyKernel3) · [OnePlusOSS](https://github.com/OnePlusOSS)
+## Development
 
-## License
+### Local validation
 
-Workflow configuration is provided as-is. Kernel source and patches retain their upstream licenses (Linux kernel GPL-2.0, KernelSU GPL-3.0, SUSFS GPL-2.0).
+```bash
+SKIP_NETWORK=1 bash validate_workflow.sh
+```
 
-## Security
+(omit `SKIP_NETWORK` to also check pinned toolchain-cache assets are reachable). The validator checks YAML/JSON/XML parseability, DDK **and** battery patch hunk counts, workflow/action structure, config↔manifest alignment, full-SHA pins, absence of boot-image construction, and POSIX/LF conformance of the on-device loader.
 
-Never commit personal access tokens. Releases use the automatically provided `GITHUB_TOKEN`. If you pasted a PAT anywhere while setting this up, revoke it at https://github.com/settings/tokens.
+### Debug helper
+
+```bash
+./debug_workflow.sh [status|logs|failed|watch|rerun|artifacts|download] [run_id]
+```
+
+### Notes
+
+- Comments, docs, and commit messages are in English.
+- `.sh` files keep **LF** line endings (enforced by `.gitattributes`); the on-device loader is POSIX `sh`.
+- Do not loosen SHA pinning on manifests or the pinned perf-stack commits — rebuilds depend on reproducibility.
+- This repo does **not** build boot images by design; do not add `mkbootimg`/`avbtool`/`boot.img`/DLKM construction commands.
