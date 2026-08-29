@@ -237,31 +237,6 @@ jobs:
               -exec rm -rf {} + 2>/dev/null || true
           fi
 
-      - name: Check free disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Fail fast with an actionable message instead of dying mid-build
-          # with ENOSPC (which also kills the runner's own log writer and
-          # produces an undebuggable run — see run 33241700491).
-          df -h
-          avail_kb=$(df -Pk "${GITHUB_WORKSPACE:-.}" | awk 'NR==2 {print $4}')
-          avail_gib=$((avail_kb / 1024 / 1024))
-          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
-            # Hosted VMs ship ~35-45 GiB free and that has been enough; only
-            # warn so a shrinking image never hard-breaks the default path.
-            if [ "$avail_gib" -lt 30 ]; then
-              echo "::warning::Only ${avail_gib} GiB free on hosted runner — builds have worked at this level, but watch for ENOSPC."
-            fi
-          else
-            # Self-hosted: AGENTS.md requires >=250 GiB per job (DDK fork
-            # needs source + toolchain + ccache + Bazel output base at once).
-            if [ "$avail_gib" -lt 100 ]; then
-              echo "::error::Only ${avail_gib} GiB free — need 100 GiB. Prune on the host: ~/.cache/bazel, old _work dirs, docker leftovers."
-              exit 1
-            fi
-          fi
-
       - name: Checkout builder
         uses: actions/checkout@v6
         with:
@@ -278,6 +253,41 @@ jobs:
             libxml2-utils rsync unzip dwarves file python3 python-is-python3 python3-requests \
             ccache jq bc dos2unix kmod libdw-dev elfutils pigz zstd
           sudo apt-get clean
+
+      - name: Check free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail fast with an actionable message instead of dying mid-build
+          # with ENOSPC (which also kills the runner's own log writer and
+          # produces an undebuggable run — see run 33241700491).
+          df -h
+          avail_kb=$(df -Pk "${GITHUB_WORKSPACE:-.}" | awk 'NR==2 {print $4}')
+          avail_gib=$((avail_kb / 1024 / 1024))
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            # Hosted VMs ship ~35-45 GiB free and that has been enough; only
+            # warn so a shrinking image never hard-breaks the default path.
+            if [ "$avail_gib" -lt 30 ]; then
+              echo "::warning::Only ${avail_gib} GiB free on hosted runner — builds have worked at this level, but watch for ENOSPC."
+            fi
+            exit 0
+          fi
+          # Self-hosted: thresholds are variant-aware. Non-DDK variants peak
+          # around 50 GiB (source + toolchain + ccache + outputs). The Bazel
+          # DDK fork (6.6.118) needs ~150 GiB on top of that — a 100 GB disk
+          # physically cannot fit one, so reject it up front with the reason
+          # instead of burning an hour and dying in a cryptic ENOSPC.
+          if [ "$(jq -r '.ddk // false' "$GITHUB_WORKSPACE/${{ matrix.config }}")" = "true" ]; then
+            min_gib=150
+            hint="DDK variant needs ~150 GiB free (Bazel output base dominates). Expand the host volume or build this variant on github-hosted."
+          else
+            min_gib=50
+            hint="Prune on the host: ~/.cache/bazel, old _work dirs, docker leftovers."
+          fi
+          if [ "$avail_gib" -lt "$min_gib" ]; then
+            echo "::error::Only ${avail_gib} GiB free — need ${min_gib} GiB. ${hint}"
+            exit 1
+          fi
 
       - name: Configure ccache
         shell: bash
