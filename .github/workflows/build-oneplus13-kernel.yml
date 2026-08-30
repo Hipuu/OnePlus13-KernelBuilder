@@ -427,6 +427,7 @@ jobs:
         shell: bash
         env:
           SUSFS_BRANCH_INPUT: ${{ inputs.susfs_branch }}
+          KSU_VARIANT: ${{ inputs.ksu_variant }}
         run: |
           set -euo pipefail
           android_version=$(jq -r '.android_version' "${{ matrix.config }}")
@@ -445,8 +446,15 @@ jobs:
           # Prefer the last known-good commit for this GKI version so builds stay
           # green when upstream SUSFS introduces incompatible changes. The mapping
           # lives in .github/compatible-commits.json and can be updated whenever a
-          # newer compatible commit is verified.
-          compatible_commit=$(jq -r --arg key "$kernel_key" '.susfs[$key] // empty' .github/compatible-commits.json)
+          # newer compatible commit is verified. Pins are keyed by KSU variant:
+          # the susfs patch set must match the flavor it patches (KSU main is
+          # synced at v2.3.0; KSUN dev + WildKernels fix sets target v2.2.0).
+          # A plain-string pin is still honored for both variants.
+          compatible_commit=$(jq -r --arg key "$kernel_key" --arg variant "$KSU_VARIANT" '
+            .susfs[$key] as $pin |
+            if ($pin | type) == "object" then ($pin[$variant] // "")
+            elif ($pin | type) == "string" then $pin
+            else "" end' .github/compatible-commits.json)
           if [ -n "$SUSFS_BRANCH_INPUT" ]; then
             ref="$SUSFS_BRANCH_INPUT"
           elif [ -n "${compatible_commit:-}" ]; then

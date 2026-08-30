@@ -1184,29 +1184,19 @@ runs:
             # v2.3.0 synced with tiann/KernelSU main at 34a82ab7 (see the
             # upstream "Bump version to 2.3.0" commit); verified to apply
             # cleanly to KSU main HEAD 932014ab (one commit past the sync
-            # point). KSUN still rejects upstream hunks here; WildKernels
-            # fix patches only go up to v2.2.0, so the KSUN branch keeps
-            # the v2.2.0 fix set against the newer base patch.
+            # point). KSUN is NOT supported on this susfs version yet:
+            # upstream hunks still reject there and WildKernels' fix sets
+            # only go up to v2.2.0, so mixing a v2.3.0 base patch with the
+            # v2.2.0 fix set leaves the module half-patched (that is exactly
+            # what failed run 33287059782). Fail loudly instead. KSUN builds
+            # resolve the v2.2.0 ref via the variant-keyed pin in
+            # .github/compatible-commits.json.
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-              cd "$KSUN_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-              # Prefer version-matched fixes, fall back to the newest
-              # published set (v2.2.0) when upstream has not caught up.
-              KSUS_FIXES="$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version"
-              [ -d "$KSUS_FIXES" ] || KSUS_FIXES="$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/v2.2.0"
-              [ -d "$KSUS_FIXES" ] || { echo "::error::No KSUN susfs fix patches found"; exit 1; }
-              for file in $(find ./kernel -maxdepth 2 -name "*.rej" -exec basename {} .rej \;); do
-                echo "Patching file: $file with fix_$file.patch"
-                patch -p1 --forward < "$KSUS_FIXES/fix_$file.patch"
-              done
-              echo "Patching Hook Mode!"
-              patch -p1 --forward < "$KSUS_FIXES/overwrite_hook_mode.patch"
-              echo "Patching KSU_TOOLKIT Support for SusFS kernel!"
-              patch -p1 --forward < "$KSUS_FIXES/ksu_toolkit.patch"
-            else
-              cd "$KSU_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              echo "::error::SUSFS v2.3.0 does not support KernelSU-Next yet (WildKernels fix patches stop at v2.2.0). Use ksu_variant=KSU, or pin susfs_branch to a v2.2.0 commit."
+              exit 1
             fi
+            cd "$KSU_FOLDER"
+            patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
@@ -2010,9 +2000,22 @@ runs:
         # lib/zstd/common/allocations.h), so on that base every hunk reports
         # "Reversed (or previously applied)" and the old step printed pure-noise
         # warnings. Detect the fork-shipped state up front and skip the whole
-        # download+patch; stock OnePlusOSS bases (no lib/lz4/lz4.c) still apply.
+        # download+patch.
+        # The stock OnePlusOSS bases, meanwhile, LACK the fs/f2fs/lz4armv8/
+        # sources this patch renames into lib/lz4/lz4armv8/. There the rename
+        # hunks fail, but the include/linux/lz4.h hunk succeeds, leaving lz4.h
+        # including a directory that was never created — the build dies at
+        # "'lz4armv8/lz4accel.h' file not found" (run 33286475512). So the
+        # backport is only applicable when the source layout it expects
+        # exists; otherwise keep the base's stock lz4/zstd, which builds fine.
         if [ -f lib/lz4/lz4.c ] && [ -f lib/zstd/common/allocations.h ]; then
           echo "ℹ️ zram lz4/zstd backports already present in this base; skipping"
+          echo "✅ zram lz4/zstd backports applied"
+          echo "::endgroup::"
+          exit 0
+        fi
+        if [ ! -d fs/f2fs/lz4armv8 ] || [ ! -f fs/f2fs/lz4armv8/lz4accel.c ]; then
+          echo "ℹ️ base lacks fs/f2fs/lz4armv8 (patch's rename source); keeping stock lz4/zstd"
           echo "✅ zram lz4/zstd backports applied"
           echo "::endgroup::"
           exit 0

@@ -1,11 +1,14 @@
 {
-  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit.",
+  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit. The susfs pins are keyed per KSU variant because each flavor tracks the susfs sync at a different point: tiann/KernelSU main matches v2.3.0 (eba2a88a), while KernelSU-Next dev needs the v2.2.0-era patch that WildKernels' fix sets still target.",
   "susfs": {
-    "android12-5.10": "",
-    "android13-5.15": "",
-    "android14-6.1": "",
-    "android15-6.6": "eba2a88a5ba303e3d79d08e0717b956e9cf784a1",
-    "android16-6.12": ""
+    "android12-5.10": { "KSU": "", "KSUN": "" },
+    "android13-5.15": { "KSU": "", "KSUN": "" },
+    "android14-6.1": { "KSU": "", "KSUN": "" },
+    "android15-6.6": {
+      "KSU": "eba2a88a5ba303e3d79d08e0717b956e9cf784a1",
+      "KSUN": "be7b7ef49a1e1b189c3abf00eacaa7ebdb4168c1"
+    },
+    "android16-6.12": { "KSU": "", "KSUN": "" }
   },
   "ksu": {
     "main": "",
