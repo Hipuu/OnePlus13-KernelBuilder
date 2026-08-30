@@ -20,6 +20,7 @@ on:
         options:
           - 6.6.89 A16
           - 6.6.118 A16
+          - 6.6.142 A16
           - 6.6.66 A15
           - 6.6.30 A15
           - 6.6.89 CPH A15
@@ -60,12 +61,12 @@ on:
         type: boolean
         default: true
       ddk:
-        description: 'Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (6.6.118 A16 only; ignored elsewhere)'
+        description: 'Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (6.6.118/6.6.142 A16 only; ignored elsewhere)'
         required: false
         type: boolean
         default: true
       ddk_injection:
-        description: 'Patch qcacld for frame injection in monitor mode (experimental; requires ddk, so 6.6.118 A16 only)'
+        description: 'Patch qcacld for frame injection in monitor mode (experimental; requires ddk, so 6.6.118/6.6.142 A16 only)'
         required: false
         type: boolean
         default: true
@@ -165,6 +166,9 @@ jobs:
             "6.6.118 A16")
               CONFIGS='["configs/OP13-6.6.118.json"]'
               ;;
+            "6.6.142 A16")
+              CONFIGS='["configs/OP13-6.6.142.json"]'
+              ;;
             "6.6.66 A15")
               CONFIGS='["configs/OP13-6.6.66.json"]'
               ;;
@@ -178,7 +182,7 @@ jobs:
               CONFIGS='["configs/OP13-CPH-6.6.56.json"]'
               ;;
             "all")
-              CONFIGS='["configs/OP13-6.6.89.json","configs/OP13-6.6.118.json","configs/OP13-6.6.66.json","configs/OP13-6.6.30.json","configs/OP13-CPH-6.6.89.json","configs/OP13-CPH-6.6.56.json"]'
+              CONFIGS='["configs/OP13-6.6.89.json","configs/OP13-6.6.118.json","configs/OP13-6.6.142.json","configs/OP13-6.6.66.json","configs/OP13-6.6.30.json","configs/OP13-CPH-6.6.89.json","configs/OP13-CPH-6.6.56.json"]'
               ;;
             *)
               echo "::error::Unknown kernel_version choice: $CHOICE"
@@ -274,7 +278,7 @@ jobs:
           fi
           # Self-hosted: thresholds are variant-aware. Non-DDK variants peak
           # around 50 GiB (source + toolchain + ccache + outputs). The Bazel
-          # DDK fork (6.6.118) needs ~150 GiB on top of that — a 100 GB disk
+          # DDK variants (6.6.118/142) need ~150 GiB on top of that — a 100 GB disk
           # physically cannot fit one, so reject it up front with the reason
           # instead of burning an hour and dying in a cryptic ENOSPC.
           if [ "$(jq -r '.ddk // false' "$GITHUB_WORKSPACE/${{ matrix.config }}")" = "true" ]; then
@@ -335,8 +339,8 @@ jobs:
 
           # The DDK inputs can only turn a variant's DDK build off, never on:
           # only manifests carrying the Kleaf/Bazel projects can build it, and
-          # only OP13-6.6.118 does today. Forcing it on elsewhere would fail
-          # during Bazel's load phase with a far less obvious error.
+          # only OP13-6.6.118/OP13-6.6.142 do today. Forcing it on elsewhere
+          # would fail during Bazel's load phase with a far less obvious error.
           config_ddk=$(jq -r '.ddk // false' "${{ matrix.config }}")
           if [ "$config_ddk" != "true" ]; then
             ddk=false
