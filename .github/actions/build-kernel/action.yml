@@ -2784,6 +2784,28 @@ runs:
         BAZEL_BIN="$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel"
         HERMETIC_PYTHON="$KERNEL_PLATFORM_FOLDER/prebuilts/build-tools/path/linux-x86/python3"
 
+        # SUBLEVEL sync: the Hipuu common fork is a 6.6.142 tree while the
+        # pinned OnePlusOSS msm-kernel is 6.6.118 (no 6.6.142 msm-kernel
+        # exists upstream — verified across all OSS branches and forks).
+        # Kleaf detects the skew but only warns and then renames the staging
+        # dir to the base kernel's release, so every vendor/DDK module ships
+        # with 6.6.118 vermagic next to a 6.6.142 Image (caught 11 minutes
+        # later by the packaging vermagic guard — run 33305088242). Align the
+        # vendor tree's SUBLEVEL to the common fork instead: KMI identity is
+        # android15-8 either way, and vendor modules link against common's
+        # Module.symvers, so this is branding, not ABI.
+        COMMON_SUBLEVEL=$(sed -n 's/^SUBLEVEL = //p' "$COMMON_KERNEL_FOLDER/Makefile" | head -1)
+        MSM_SUBLEVEL=$(sed -n 's/^SUBLEVEL = //p' "$MSM_KERNEL_FOLDER/Makefile" | head -1)
+        if [ -n "$COMMON_SUBLEVEL" ] && [ -n "$MSM_SUBLEVEL" ] \
+           && [ "$COMMON_SUBLEVEL" != "$MSM_SUBLEVEL" ]; then
+          echo "ℹ️ Syncing msm-kernel SUBLEVEL $MSM_SUBLEVEL -> $COMMON_SUBLEVEL (common fork is 6.6.$COMMON_SUBLEVEL)"
+          sed -i "s/^SUBLEVEL = .*/SUBLEVEL = $COMMON_SUBLEVEL/" "$MSM_KERNEL_FOLDER/Makefile"
+          grep -q "^SUBLEVEL = $COMMON_SUBLEVEL$" "$MSM_KERNEL_FOLDER/Makefile" || {
+            echo "::error::failed to set msm-kernel SUBLEVEL to $COMMON_SUBLEVEL"
+            exit 1
+          }
+        fi
+
         MISSING=0
         for f in "$BAZEL_LAUNCHER" "$BAZEL_BIN" "$HERMETIC_PYTHON" \
                  "$KERNEL_PLATFORM_FOLDER/MODULE.bazel" \
@@ -3250,11 +3272,14 @@ runs:
         fi
 
         # Re-run depmod so the DDK module appears in modules.dep; the ZIP step
-        # resolves its dependency closure from that file. A failed depmod must
-        # be visible: silently shipping the archive's stale modules.dep would
-        # drop the swept external modules from the ZIP closure.
+        # resolves its dependency closure from that file. A failed depmod
+        # must be visible: silently shipping the archive's stale modules.dep
+        # would drop the swept external modules from the ZIP closure, and
+        # the ZIP step's "absent → re-run depmod" fallback would not trigger.
+        # Remove the stale map on failure so the ZIP step hard-fails instead.
         if ! depmod -b "$OUT/install" "$(basename "$UNAME_DIR")"; then
-          echo "::warning::depmod failed; modules.dep may be stale for $(basename "$UNAME_DIR")"
+          echo "::warning::depmod failed; removing stale modules.dep.* for $(basename "$UNAME_DIR")"
+          rm -f "$OUT/install/lib/modules/$(basename "$UNAME_DIR")"/modules.dep.*
         fi
 
         # Fail early if AR9271 stack was requested but Kleaf dropped the kos
@@ -3325,6 +3350,17 @@ runs:
         if [ "$OP_SUSFS" = "true" ]; then
           assert_config "CONFIG_KSU_SUSFS=y"
         fi
+        # UKSM: the pinned KSM/UKSM values exist so kleaf's syncconfig never
+        # sees a (NEW) symbol — an unset UKSM reintroduces the interactive
+        # prompt loop that hung "Creating kernel config" for 20+ min (the
+        # ints have no Kconfig defaults, so a dropped KSM selection makes
+        # them NEW again). Assert the choice survived the vendor-fragment
+        # merge instead of assuming it did.
+        if grep -q "config UKSM" "$COMMON_KERNEL_FOLDER/mm/Kconfig"; then
+          assert_config "CONFIG_UKSM=y"
+          assert_config "CONFIG_UKSM_CPU_GOVERNOR=4"
+          assert_config "CONFIG_UKSM_SLEEP_MS=100"
+        fi
         if [ "$OP_NTSYNC" = "true" ]; then
           assert_config "CONFIG_NTSYNC=y"
         fi
@@ -3346,8 +3382,16 @@ runs:
         # modules had been built from msm-kernel's own defconfig and carried a
         # different vermagic (run 31045666257). A module whose vermagic differs
         # from the kernel is refused at load, so this is the check that matters.
+        # KREL comes from the Image itself, not the staging dir name: Kleaf
+        # rewrites kernel.release to the base kernel's value on sublevel skew,
+        # so the directory name can lie about what the Image actually is
+        # (run 33305088242).
         IMG="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
-        KREL="$(basename "$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+        KREL="$(tr -d '\0' < "$IMG" | grep -ao 'Linux version [^ ]*' | head -1 | cut -d' ' -f3)"
+        if [ -z "$KREL" ]; then
+          echo "::error::cannot read kernel release from $IMG"
+          exit 1
+        fi
         MISMATCH=0
         KO_CHECK="qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_') cfg80211 mac80211"
         if [ "${OP_WIRELESS_MODULES:-false}" = "true" ] && [ "${OP_NETHUNTER:-false}" = "true" ]; then
