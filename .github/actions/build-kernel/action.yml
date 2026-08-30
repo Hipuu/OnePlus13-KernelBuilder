@@ -2491,6 +2491,23 @@ runs:
       run: |
         set -euo pipefail
         echo "Add Build based configs"
+        # UKSM (Hipuu fork): the choice/int symbols have no defaults, so any
+        # config evaluation that sees them as (NEW) — e.g. kleaf's syncconfig
+        # after merging vendor fragments — prompts interactively. Under CI
+        # (stdin at EOF) conf enters an error-retry loop at 100% CPU that
+        # looks like a hung "Creating kernel config" action (runs 33255886913
+        # and 33294720160 both burned 20+ min in it). Pin the choice and the
+        # int values explicitly so nothing is ever (NEW); 4 = the "android"
+        # UKSM governor. Bases without the UKSM Kconfig ignore these lines.
+        if grep -q "config UKSM" "$COMMON_KERNEL_FOLDER/mm/Kconfig"; then
+          cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_KSM=y
+        CONFIG_UKSM=y
+        CONFIG_KSM_LEGACY=n
+        CONFIG_UKSM_CPU_GOVERNOR=4
+        CONFIG_UKSM_SLEEP_MS=100
+        EOF
+        fi
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
         CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n
