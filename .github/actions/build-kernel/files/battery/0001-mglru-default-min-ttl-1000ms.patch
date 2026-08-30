@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hipuu <hipuu@users.noreply.github.com>
+Date: Mon, 31 Aug 2026 00:00:00 +0000
+Subject: [PATCH] mm/mglru: default lru_gen_min_ttl to 1000 ms
+
+The MGLRU kernel documentation (Documentation/admin-guide/mm/multigen_lru.rst)
+recommends N=1000 ms to protect the working set from being evicted under
+reclaim pressure, "based on the average human detectable lag (~100ms)". The
+kernel default is 0, which lets kswapd evict pages of the current working
+set the moment memory pressure appears — the refault storm that follows
+burns CPU (zram decompression) and flash I/O both. The fork's
+workingset/refault fixes reduce the damage but the working set is still
+unprotected by default.
+
+There is no Kconfig symbol for this value and no boot hook in this
+pipeline, so set the compile-time default. Runtime override stays
+available: write 0 to /sys/kernel/mm/lru_gen/min_ttl_ms.
+
+Context is identical in both common bases (Hipuu 6.6.142 fork and
+OnePlusOSS 6.6.118); the change only takes effect under CONFIG_LRU_GEN
+(enabled in both).
+---
+ mm/vmscan.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -5018 +5018 @@
+-static unsigned long lru_gen_min_ttl __read_mostly;
++static unsigned long lru_gen_min_ttl __read_mostly = msecs_to_jiffies(1000);

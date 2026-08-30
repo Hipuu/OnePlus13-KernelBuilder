@@ -1635,7 +1635,12 @@ runs:
           silence_irq_cpu_logspam \
           silence_system_logspam \
           increase_ext4_default_commit_age \
-          f2fs_enlarge_min_fsync_blocks
+          f2fs_enlarge_min_fsync_blocks \
+          0001-mglru-default-min-ttl-1000ms \
+          0001-alarmtimer-fix-forward-arg-order \
+          0001-cpuidle-teo-drop-target-residency-check \
+          0001-cpuidle-menu-residency-threshold-polling \
+          0001-cpuidle-menu-tick-stopped-timer-check
         do
           echo "Patching $p.patch"
           PATCH_LOG="$RUNNER_TEMP/battery-$p.log"
@@ -1821,12 +1826,17 @@ runs:
       run: |
         set -euo pipefail
         echo "Enable Important Net Schedulers (qdisc)"
+        # DEFAULT_FQ: BBR-family congestion control requires pacing; without
+        # fq as the default qdisc each socket spins its own high-res pacing
+        # timer instead of sharing one. Both bases build FQ but leave the
+        # default as pfifo_fast (net/sched/Kconfig choice default).
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_NET_SCH_FQ=y
         CONFIG_NET_SCH_FQ_CODEL=y
         CONFIG_NET_SCH_CAKE=y
         CONFIG_NET_SCH_PIE=y
         CONFIG_NET_SCH_FQ_PIE=y
+        CONFIG_DEFAULT_FQ=y
         EOF
 
     - name: Add TTL Target Support
@@ -2515,6 +2525,7 @@ runs:
         CONFIG_FRAME_WARN=0
         CONFIG_TRACEPOINTS=y
         CONFIG_LRU_GEN_ENABLED=y
+        CONFIG_SCHED_CLUSTER=y
         EOF
 
     - name: Add RUST build configs
