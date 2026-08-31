@@ -58,13 +58,24 @@ INSTALL_DIR=/data/adb/nethunter-wifi
 # Modules the platform stack owns. Displacing these is what costs internal
 # Wi-Fi, so it happens only when a requested driver actually needs mac80211.
 #
-# DDK packs ship peach + vendor cfg/mac + ath9k_htc all CRC-matched together.
-# ath9k links against the same mac80211 peach uses, so only peach is unloaded
-# and the already-resident cfg/mac stay. Non-DDK packs ship a GKI cfg/mac pair
-# that must replace the platform pair (different CRCs).
-PLATFORM_MODULES_FULL="qca_cld3_peach_v2 mac80211 cfg80211"
-PLATFORM_MODULES_DDK="qca_cld3_peach_v2"
+# BOTH DDK and non-DDK packs replace the whole resident pair (peach +
+# mac80211 + cfg80211). The vendor mac80211 is built without
+# CONFIG_MAC80211_LEDS: its symbol table lacks
+# __ieee80211_create_tpt_led_trigger and __ieee80211_get_{tx,rx,assoc,radio}_
+# led_name, so every LED-using driver (ath9k_htc, mt76, rt2x00, rtl8187,
+# carl9170, p54, mac80211_hwsim) dies with "Unknown symbol" while the
+# resident pair stays (on-device test of run 33367477018's pack). The pack's
+# cfg/mac pair is CRC-matched against this Image, so peach reloads fine
+# against it and "restore" brings internal Wi-Fi back.
+WIFI_SWAP_MODULES="qca_cld3_peach_v2 mac80211 cfg80211"
 PLATFORM_DIR=/vendor/lib/modules
+# /system/lib/modules preloads an older CAN core whose can.ko lacks
+# can_sock_destruct, so pack can-raw can only load against the pack's
+# can.ko. Displace the platform CAN core -- and vcan/slcan, which pin
+# can-dev -- only when a requested driver actually needs it (can-raw is
+# the only known consumer of the missing export).
+CAN_SWAP_MODULES="can-gw can-bcm vcan slcan can-dev can"
+SYSTEM_MODULES_DIR=/system/lib/modules
 
 # The internal Qualcomm Wi-Fi driver. Its operating mode is fixed at insmod time
 # by the con_mode module parameter, which qcacld declares read-only in sysfs
@@ -211,28 +222,33 @@ load_closure() {
   return "$_rc"
 }
 
-# True if $1 needs mac80211, i.e. loading it displaces the platform stack.
-needs_mac80211() {
-  in_list mac80211 $(closure_of "$1")
-}
-
 wifi_cmd() { cmd wifi "$@" >/dev/null 2>&1; }
 
-# Modules to unload before loading an external mac80211 driver.
-platform_displace_list() {
-  if have_module qca_cld3_peach_v2; then
-    echo "$PLATFORM_MODULES_DDK"
-  else
-    echo "$PLATFORM_MODULES_FULL"
-  fi
-}
-
+# Modules to unload before loading an external mac80211 driver: the whole
+# resident pair plus peach. See the WIFI_SWAP_MODULES comment for why the
+# vendor cfg/mac can no longer stay resident.
 unload_platform_stack() {
   echo "=== displacing platform Wi-Fi stack ==="
   echo "  (internal Wi-Fi stops working until you reboot or run: $0 restore)"
   wifi_cmd set-wifi-enabled disabled
   sleep 2
-  for m in $(platform_displace_list); do
+  for m in $WIFI_SWAP_MODULES; do
+    if resident "$m"; then
+      if rmmod "$m" 2>"$ERR"; then
+        echo "  unloaded $m"
+      else
+        echo "  could not unload $m: $(cat "$ERR" 2>/dev/null)"
+      fi
+    fi
+  done
+}
+
+# Same for the platform CAN core when a requested driver needs can-raw: the
+# /system can.ko predates can_sock_destruct, so the pack's can.ko must take
+# over (and can-dev/vcan/slcan are pinned by it in both directions).
+unload_can_stack() {
+  echo "=== displacing platform CAN core ==="
+  for m in $CAN_SWAP_MODULES; do
     if resident "$m"; then
       if rmmod "$m" 2>"$ERR"; then
         echo "  unloaded $m"
@@ -252,11 +268,15 @@ cmd_load() {
     have_module "$d" || die "no $d.ko in this pack (try: $0 list)"
   done
 
-  swap=0
-  for d in $drivers; do
-    needs_mac80211 "$d" && swap=1
+  clos=$(closure_of $drivers)
+  wifi_swap=0
+  can_swap=0
+  for m in $clos; do
+    [ "$m" = mac80211 ] && wifi_swap=1
+    [ "$m" = can-raw ] && can_swap=1
   done
-  [ "$swap" = 1 ] && unload_platform_stack
+  [ "$wifi_swap" = 1 ] && unload_platform_stack
+  [ "$can_swap" = 1 ] && unload_can_stack
 
   echo "=== firmware ==="
   set_firmware_path
@@ -300,18 +320,28 @@ cmd_restore() {
     echo "  nothing recorded as loaded"
   fi
 
-  echo "=== restoring platform Wi-Fi stack ==="
-  # Prefer pack copies when present (DDK peach matches this Image's CRCs).
-  for m in cfg80211 mac80211 qca_cld3_peach_v2; do
+  echo "=== restoring platform Wi-Fi + CAN stacks ==="
+  # Prefer pack copies when present: the pack pair is CRC-matched against
+  # this Image, and the CAN core from the pack exports can_sock_destruct.
+  # Order matters: cfg80211 before mac80211 before peach; can before can-dev
+  # before vcan/slcan.
+  for m in qca_cld3_peach_v2 cfg80211 mac80211 can can-dev vcan slcan; do
     if resident "$m"; then
       echo "  $m already resident"
-    elif [ -f "$DIR/$m.ko" ]; then
-      insmod "$DIR/$m.ko" 2>"$ERR" \
-        && echo "  restored $m (pack)" \
-        || echo "  $m: $(cat "$ERR" 2>/dev/null)"
-    elif [ -f "$PLATFORM_DIR/$m.ko" ]; then
-      insmod "$PLATFORM_DIR/$m.ko" 2>"$ERR" \
-        && echo "  restored $m (vendor)" \
+      continue
+    fi
+    src=""
+    for dir in "$DIR" "$PLATFORM_DIR" "$SYSTEM_MODULES_DIR"; do
+      if [ -f "$dir/$m.ko" ]; then src="$dir/$m.ko"; break; fi
+    done
+    if [ -n "$src" ]; then
+      case "$src" in
+        "$DIR"/*) origin="pack" ;;
+        "$PLATFORM_DIR"/*) origin="vendor" ;;
+        *) origin="system" ;;
+      esac
+      insmod "$src" 2>"$ERR" \
+        && echo "  restored $m ($origin)" \
         || echo "  $m: $(cat "$ERR" 2>/dev/null)"
     fi
   done

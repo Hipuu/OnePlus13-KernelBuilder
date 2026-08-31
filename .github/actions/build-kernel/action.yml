@@ -4013,17 +4013,42 @@ runs:
           exit 1
         fi
 
-        # Close the seed set over modules.dep. Each line is
-        #   kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/rfkill.ko ...
-        WANTED=$(awk -v seeds="$SEEDS" '
+        # depmod's modules.dep is not a trustworthy closure source: on the DDK
+        # tree it dropped the rtl8187 -> eeprom_93cx6 edge even though kbuild
+        # recorded "depends=eeprom_93cx6" in the module itself, so rtl8187.ko
+        # shipped without its dependency and failed to insmod on-device with
+        # "Unknown symbol eeprom_93cx6_read". The authoritative record is the
+        # modules' own .modinfo depends= line, so resolve the closure from
+        # modinfo instead and use modules.dep only as a sanity reference.
+        MODINFO_BIN=""
+        for cand in "${CLANG_BIN_PATH:-}/llvm-modinfo" "$(command -v modinfo || true)"; do
+          [ -n "$cand" ] && [ -x "$cand" ] && MODINFO_BIN="$cand" && break
+        done
+        [ -n "$MODINFO_BIN" ] || MODINFO_BIN=modinfo
+        DEP_MAP="$RUNNER_TEMP/modinfo-deps.txt"
+        : > "$DEP_MAP"
+        while IFS= read -r ko; do
+          [ -n "$ko" ] || continue
+          deps=$("$MODINFO_BIN" -F depends "$ko" 2>/dev/null | tr ',' ' ')
+          printf '%s: %s\n' "$(basename "$ko" .ko)" "$deps" >> "$DEP_MAP"
+        done < <(find "$UNAME_DIR" -type f -name '*.ko')
+
+        # Close the seed set over the modinfo depends map. Each line is
+        #   <basename>: <dep-basename> ...
+        WANTED=$(awk -v seeds="$SEEDS" -v depmap="$DEP_MAP" '
           BEGIN {
             n = split(seeds, s, "\n")
-            for (i = 1; i <= n; i++) if (s[i] != "") want[s[i]] = 1
-          }
-          {
-            key = $1
-            sub(/:$/, "", key)
-            for (i = 2; i <= NF; i++) dep[key] = dep[key] " " $i
+            for (i = 1; i <= n; i++) {
+              p = s[i]; sub(/^.*\//, "", p); sub(/\.ko$/, "", p)
+              if (p != "") want[p] = 1
+            }
+            while ((getline line < depmap) > 0) {
+              key = line; sub(/:.*/, "", key)
+              rest = line; sub(/^[^:]*:[ ]?/, "", rest)
+              n2 = split(rest, d, " ")
+              for (i = 1; i <= n2; i++) if (d[i] != "") dep[key] = dep[key] " " d[i]
+            }
+            close(depmap)
           }
           END {
             changed = 1
@@ -4038,15 +4063,16 @@ runs:
               for (a in add) { want[a] = 1; changed = 1 }
             }
             for (m in want) print m
-          }' "$DEP_FILE" | sort)
+          }' | sort)
 
         STAGE=$(mktemp -d)
-        while IFS= read -r rel; do
-          [ -n "$rel" ] || continue
-          if [ -f "$UNAME_DIR/$rel" ]; then
-            cp -n -- "$UNAME_DIR/$rel" "$STAGE/"
+        while IFS= read -r mod; do
+          [ -n "$mod" ] || continue
+          hit="$(find "$UNAME_DIR" -type f -name "$mod.ko" -print -quit)"
+          if [ -n "$hit" ]; then
+            cp -n -- "$hit" "$STAGE/"
           else
-            echo "::error::modules.dep lists $rel but it is not in the install tree"
+            echo "::error::closure wants $mod.ko but it is not in the install tree"
             FAILED_DEPS=$((FAILED_DEPS+1))
           fi
         done <<< "$WANTED"
@@ -4071,12 +4097,16 @@ runs:
         # The zoo is only built when nethunter is enabled alongside wireless
         # (see the module-config step's gating); a DDK build with
         # wireless_modules=true but nethunter=false ships peach + cfg/mac only.
+        # eeprom_93cx6 is the canary for the depmod-closure gap that shipped
+        # rtl8187.ko without its dependency (the pack now closes over
+        # modinfo depends= instead, but keep the canary so a regression
+        # fails here loudly instead of on-device).
         if [ "$OP_DDK" = "true" ] && [ "${OP_NETHUNTER:-false}" = "true" ]; then
           # peach + vendor cfg/mac (CRC pair) + the external-driver zoo built
           # on msm-kernel against that same mac80211.
           for m in "qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_')" cfg80211 mac80211 \
                    ath9k_htc ath9k_hw ath9k_common ath \
-                   carl9170 rtl8xxxu rt2800usb zd1211rw p54usb mt7921u; do
+                   carl9170 rtl8xxxu rt2800usb zd1211rw p54usb mt7921u eeprom_93cx6; do
             [ -n "$(find "$STAGE" -name "$m.ko" -print -quit)" ] || missing="$missing $m.ko"
           done
         else
@@ -4089,35 +4119,35 @@ runs:
           exit 1
         fi
 
-        # Ship a flattened modules.dep next to the .ko files. The install-tree
-        # copy uses paths ("kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/
-        # rfkill.ko"), but the ZIP is flat, so rewrite every entry to bare
-        # module names and keep only modules actually in the pack. This is what
-        # nethunter-wifi.sh walks to insmod a driver's dependencies in order.
-        awk '
+        # cc770_isa probes ISA I/O ports, which do not exist on arm64: insmod
+        # fails with EINVAL on every device (on-device test, run 33367477018's
+        # pack). Drop it rather than shipping a module that can never load;
+        # the cc770 core and platform variants stay.
+        if [ -f "$STAGE/cc770_isa.ko" ]; then
+          rm -f "$STAGE/cc770_isa.ko"
+          echo "Dropped cc770_isa.ko from the pack (ISA probing is impossible on arm64)"
+        fi
+
+        # Ship a flattened modules.dep next to the .ko files. The ZIP is flat,
+        # so every entry is rewritten to bare module names. Generate it from
+        # the modinfo depends map (same source as the closure) filtered to the
+        # staged set, NOT from depmod's modules.dep: the depmod file already
+        # proved lossy (it dropped the rtl8187 -> eeprom_93cx6 edge), and the
+        # loader walks this file to insmod dependencies in order.
+        # File 1 = staged basenames (populates have[]), file 2 = dep map.
+        awk -v depmap="$DEP_MAP" '
+          NR == FNR { key = $1; sub(/\.ko$/, "", key); have[key] = 1; next }
           {
             key = $1; sub(/:$/, "", key)
-            gsub(/^.*\//, "", key); sub(/\.ko$/, "", key)
+            if (!(key in have)) next
+            rest = $0; sub(/^[^:]*:[ ]?/, "", rest)
+            n = split(rest, d, " ")
             line = key ":"
-            for (i = 2; i <= NF; i++) {
-              d = $i
-              gsub(/^.*\//, "", d); sub(/\.ko$/, "", d)
-              line = line " " d
-            }
+            for (i = 1; i <= n; i++) if (d[i] != "" && d[i] in have) line = line " " d[i]
             print line
-          }' "$DEP_FILE" > "$STAGE/modules.dep.all"
-
-        awk 'NR == FNR { have[$1] = 1; next }
-             {
-               key = $1; sub(/:$/, "", key)
-               if (!(key in have)) next
-               line = key ":"
-               for (i = 2; i <= NF; i++) if ($i in have) line = line " " $i
-               print line
-             }' \
+          }' \
           <(cd "$STAGE" && find . -name '*.ko' -printf '%f\n' | sed 's/\.ko$//') \
-          "$STAGE/modules.dep.all" > "$STAGE/modules.dep"
-        rm -f "$STAGE/modules.dep.all"
+          "$DEP_MAP" > "$STAGE/modules.dep"
 
         DEP_LINES=$(wc -l < "$STAGE/modules.dep")
         echo "modules.dep entries: $DEP_LINES"
