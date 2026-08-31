@@ -323,27 +323,29 @@ cmd_restore() {
   echo "=== restoring platform Wi-Fi + CAN stacks ==="
   # Prefer pack copies when present: the pack pair is CRC-matched against
   # this Image, and the CAN core from the pack exports can_sock_destruct.
-  # Order matters: cfg80211 before mac80211 before peach; can before can-dev
-  # before vcan/slcan.
-  for m in qca_cld3_peach_v2 cfg80211 mac80211 can can-dev vcan slcan; do
-    if resident "$m"; then
-      echo "  $m already resident"
-      continue
-    fi
-    src=""
-    for dir in "$DIR" "$PLATFORM_DIR" "$SYSTEM_MODULES_DIR"; do
-      if [ -f "$dir/$m.ko" ]; then src="$dir/$m.ko"; break; fi
+  # Dependencies: cfg80211 <- mac80211 <- peach; can <- can-dev <- vcan/slcan.
+  # Instead of hardcoding one dependency-ordered pass, iterate: insmod fails
+  # harmlessly while a dependency is still missing, and later passes fill in.
+  pass=0
+  while [ "$pass" -lt 6 ]; do
+    progress=0
+    for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
+      resident "$m" && continue
+      src=""
+      for dir in "$DIR" "$PLATFORM_DIR" "$SYSTEM_MODULES_DIR"; do
+        if [ -f "$dir/$m.ko" ]; then src="$dir/$m.ko"; break; fi
+      done
+      [ -n "$src" ] || continue
+      if insmod "$src" 2>"$ERR"; then
+        echo "  restored $m ($(basename "$(dirname "$src")"))"
+        progress=1
+      fi
     done
-    if [ -n "$src" ]; then
-      case "$src" in
-        "$DIR"/*) origin="pack" ;;
-        "$PLATFORM_DIR"/*) origin="vendor" ;;
-        *) origin="system" ;;
-      esac
-      insmod "$src" 2>"$ERR" \
-        && echo "  restored $m ($origin)" \
-        || echo "  $m: $(cat "$ERR" 2>/dev/null)"
-    fi
+    [ "$progress" = 0 ] && break
+    pass=$((pass + 1))
+  done
+  for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
+    resident "$m" || echo "  $m: not restored ($(cat "$ERR" 2>/dev/null))"
   done
   wifi_cmd set-wifi-enabled enabled
 
