@@ -1,14 +1,26 @@
 {
-  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit. The susfs pins are keyed per KSU variant because each flavor tracks the susfs sync at a different point: tiann/KernelSU main matches v2.3.0 (eba2a88a), while KernelSU-Next dev needs the v2.2.0-era patch that WildKernels' fix sets still target.",
+  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit. The susfs pins are keyed per KSU variant because each flavor tracks the susfs sync at a different point. android15-6.6 KSU pin 937215c (susfs sync 'KernelSU: Sync with the official main repo') is dry-run-verified against KSU main 3497a56; the previous sync eba2a88 broke against 3497a56's allowlist refactor (run 33350609755, caught by the .rej fail-fast at minute 3).",
   "susfs": {
-    "android12-5.10": { "KSU": "", "KSUN": "" },
-    "android13-5.15": { "KSU": "", "KSUN": "" },
-    "android14-6.1": { "KSU": "", "KSUN": "" },
+    "android12-5.10": {
+      "KSU": "",
+      "KSUN": ""
+    },
+    "android13-5.15": {
+      "KSU": "",
+      "KSUN": ""
+    },
+    "android14-6.1": {
+      "KSU": "",
+      "KSUN": ""
+    },
     "android15-6.6": {
-      "KSU": "eba2a88a5ba303e3d79d08e0717b956e9cf784a1",
+      "KSU": "937215cb3a1b1f333d764c366c7a49972fa8e7a0",
       "KSUN": "be7b7ef49a1e1b189c3abf00eacaa7ebdb4168c1"
     },
-    "android16-6.12": { "KSU": "", "KSUN": "" }
+    "android16-6.12": {
+      "KSU": "",
+      "KSUN": ""
+    }
   },
   "ksu": {
     "main": "",
