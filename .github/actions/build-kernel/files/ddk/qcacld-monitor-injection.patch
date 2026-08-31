@@ -820,7 +820,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8072,306 @@
+@@ -7306,11 +8072,315 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -927,11 +927,20 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	}
 +
 +	hdr = (struct ieee80211_hdr *)skb->data;
-+	if (!ieee80211_is_mgmt(hdr->frame_control)) {
-+		hdd_err("Injection: non-mgmt frame (fc=0x%04x), dropping",
-+			hdr->frame_control);
++	if (skb->len < 16) {
++		hdd_err("Injection: frame too short (%u), dropping",
++			(uint32_t)skb->len);
 +		goto drop;
 +	}
++
++	/*
++	 * Management, data and control frames all ride the ghost-vdev
++	 * WMI path: the firmware validates the frame type internally
++	 * (60 of 67 types inject on peach-v2). Data frames were
++	 * previously dropped by a management-only gate here, which
++	 * blocked WEP replay, reaver/bully EAPOL and mdk4 floods -- the
++	 * non-capture half of wifite.
++	 */
 +
 +	/*
 +	 * Snapshot helper state under the lock.  The WMI handle is NOT
