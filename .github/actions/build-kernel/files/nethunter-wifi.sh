@@ -36,6 +36,9 @@
 #   ./nethunter-wifi.sh conmode sta|monitor [ch]
 #                                           switch the *internal* Wi-Fi between
 #                                           normal and monitor (reloads qcacld)
+#   ./nethunter-wifi.sh wifite [args...]    monitor the internal chip and run
+#                                           wifite2 on wlan0 (needs setup, see
+#                                           wifite-setup.sh in this pack)
 #   ./nethunter-wifi.sh install [driver ...]  autoload at every boot (KernelSU)
 #   ./nethunter-wifi.sh uninstall           undo install
 #
@@ -622,6 +625,84 @@ cmd_uninstall() {
   echo "Reboot to get the internal Wi-Fi back."
 }
 
+# ---------------------------------------------------------------------------
+# Wifite support.
+#
+# wifite2 (kimocoder fork) drives aircrack-ng with a monitor interface. On
+# this device the monitor interface is the internal chip's own wlan0 after a
+# con_mode=4 driver reload -- there is no separate mon0 and no adapter to
+# airmon-ng. This wrapper:
+#   1. finds a usable Python 3 + wifite2 (Termux prefix or NetHunter chroot),
+#   2. switches the internal chip to monitor mode via cmd_conmode,
+#   3. launches wifite pointed at wlan0, passing any extra arguments through.
+# On exit it flips the chip back to sta so the phone regains its Wi-Fi even
+# after Ctrl-C.
+#
+# wifite2's own interface detection expects interface names like wlan0mon;
+# the kimocoder fork also accepts plain monitor-mode interfaces, and --iface
+# (or -i) pins it explicitly, so wlan0 is handed to it directly.
+# ---------------------------------------------------------------------------
+WIFITE_DIRS="/data/data/com.termux/files/usr/bin /root/nethunter/bin /usr/local/bin /usr/bin"
+WIFITE_IFACE=wlan0
+
+find_wifite() {
+  for d in $WIFITE_DIRS; do
+    [ -x "$d/wifite" ] && { echo "$d/wifite"; return 0; }
+  done
+  # chroot layouts: search the common NetHunter/Kali roots via the termux
+  # proot paths too, but only report executables that exist.
+  return 1
+}
+
+find_python_for_wifite() {
+  if [ -x /data/data/com.termux/files/usr/bin/python3 ]; then
+    echo /data/data/com.termux/files/usr/bin/python3
+    return 0
+  fi
+  command -v python3 2>/dev/null && return 0
+  return 1
+}
+
+cmd_wifite() {
+  need_root
+  WIFITE_BIN=$(find_wifite) || die "wifite not found.
+  Install it in Termux (recommended):
+      pkg install root-repo && pkg install git python
+      git clone https://github.com/kimocoder/wifite2 && cd wifite2 && python3 setup.py install
+  or inside the NetHunter chroot: apt install wifite.
+  Then re-run: $0 wifite"
+
+  PYTHON=$(find_python_for_wifite) || die "python3 not found"
+
+  # Internal chip: switch to con_mode=4 unless it is already there. External
+  # adapters loaded via 'load' keep working untouched.
+  _cur=$(conmode_now)
+  if [ "$_cur" != "$CONMODE_MONITOR" ]; then
+    cmd_conmode monitor || true
+    _cur=$(conmode_now)
+    [ "$_cur" = "$CONMODE_MONITOR" ] || die "internal chip did not enter monitor mode; fix conmode first ($0 conmode monitor)"
+  fi
+  ip link set "$WIFITE_IFACE" up 2>/dev/null
+
+  echo "=== launching wifite on $WIFITE_IFACE ==="
+  # TERM is needed by wifite's curses-free output; PATH additions cover the
+  # Termux toolchain (aircrack-ng, iw, ...) when run from adb shell su.
+  TERM=${TERM:-dumb}
+  if [ -d /data/data/com.termux/files/usr/bin ]; then
+    PATH="/data/data/com.termux/files/usr/bin:$PATH"
+    export PATH TERM PREFIX=/data/data/com.termux/files/usr TMPDIR=/data/data/com.termux/files/usr/tmp
+  fi
+  "$PYTHON" "$WIFITE_BIN" -i "$WIFITE_IFACE" "$@"
+  _rc=$?
+
+  # Regain normal Wi-Fi even on Ctrl-C: wifite cannot restore what it did
+  # not set up (it never touched the con_mode state machine).
+  echo
+  echo "=== returning internal chip to sta ==="
+  cmd_conmode sta || echo "  restore failed; run: $0 conmode sta"
+  return "$_rc"
+}
+
 cmd_help() {
   # Print the usage comment block: from the "Usage" heading up to the last
   # line before the first non-comment line, dropping that line itself.
@@ -660,7 +741,8 @@ cmd_menu() {
     echo "  6) status"
     echo "  7) list drivers in this pack"
     echo "  8) restore platform Wi-Fi stack"
-    echo "  9) help"
+    echo "  9) wifite on the internal chip"
+    echo "  h) help"
     echo "  0) quit"
     echo
     printf 'choice: '
@@ -694,7 +776,8 @@ cmd_menu() {
       6) cmd_status ;;
       7) cmd_list ;;
       8) cmd_restore ;;
-      9) cmd_help ;;
+      9) cmd_wifite ;;
+      h|H) cmd_help ;;
       0|q|quit|exit) return 0 ;;
       "") ;;
       *) echo "  no such choice: $_sel" ;;
@@ -728,6 +811,7 @@ case "$action" in
   monitor)   cmd_monitor "$@" ;;
   managed)   cmd_managed "$@" ;;
   conmode)   cmd_conmode "$@" ;;
+  wifite)    cmd_wifite "$@" ;;
   install)   cmd_install "$@" ;;
   uninstall) cmd_uninstall ;;
   -h|--help|help)
