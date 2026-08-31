@@ -283,7 +283,7 @@ jobs:
           # instead of burning an hour and dying in a cryptic ENOSPC.
           if [ "$(jq -r '.ddk // false' "$GITHUB_WORKSPACE/${{ matrix.config }}")" = "true" ]; then
             min_gib=150
-            hint="DDK variant needs ~150 GiB free (Bazel output base dominates). Expand the host volume or build this variant on github-hosted."
+            hint="DDK variant needs ~150 GiB free (Bazel output base dominates). Expand the host volume or use a larger runner."
           else
             min_gib=50
             hint="Prune on the host: ~/.cache/bazel, old _work dirs, docker leftovers."

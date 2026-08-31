@@ -18,10 +18,9 @@ be wasted more often than it allows any energy to be saved, so drop it
 and let the governor use the teo_find_shallower_state() return value as
 the new candidate idle state index.
 
-The Hipuu 6.6.142 fork already carries this fix; this patch targets the
-stock OnePlusOSS 6.6.118 base (the guard in action.yml checks for the
-upstream form `idx = teo_find_shallower_state(drv, dev, idx, duration_ns, false);`
-to skip the fork).
+The Hipuu 6.6.142 fork already carries this fix, so the patch reports
+"Reversed (or previously applied)" there and the battery loop's
+classification skips it; no explicit marker guard is needed.
 
 Fixes: 21d28cd2fa5f ("cpuidle: teo: Do not call tick_nohz_get_sleep_length() upfront")
 Cc: All applicable <stable@vger.kernel.org>

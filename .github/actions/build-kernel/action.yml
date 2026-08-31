@@ -714,7 +714,9 @@ runs:
     - name: Restore ccache cache
       id: restore-ccache-cache
       uses: ./.github/actions/cache/restore
-      if: ${{ inputs.clean == false || inputs.clean == 'false' }}
+      # The DDK path builds through Bazel's own disk cache and never runs
+      # ccache; restoring its bucket there only burns 1-2GB of hosted disk.
+      if: ${{ (inputs.clean == false || inputs.clean == 'false') && env.OP_DDK != 'true' }}
       with:
         cache_path: ${{ env.CCACHE_DIR }}
         cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_LTO }}_LTO
@@ -3074,12 +3076,22 @@ runs:
         MEM_TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
         MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))
         HEAP_CEILING_MB=24576
-        HEAP_TARGET_MB=$(( MEM_TOTAL_MB * 95 / 100 ))
+        # Leave 6GB for the OS, the 4 clang jobs, the bazel client and the
+        # runner: on a 16GB hosted box the old 95% (~15.5GB) put the JVM
+        # at ~17GB RSS and OOM-killed the run even with the 16GB swap
+        # (33037783258 'lost communication' at 95 min). On big self-hosted
+        # hosts the 24GB ceiling still applies.
+        HEAP_FLOOR_MB=8192
+        HEAP_TARGET_MB=$(( MEM_TOTAL_MB - 6144 ))
         if [ "$HEAP_TARGET_MB" -gt "$HEAP_CEILING_MB" ]; then
           HEAP_TARGET_MB=$HEAP_CEILING_MB
         fi
+        if [ "$HEAP_TARGET_MB" -lt "$HEAP_FLOOR_MB" ]; then
+          HEAP_TARGET_MB=$HEAP_FLOOR_MB
+        fi
         HEAP_PCT=$(( HEAP_TARGET_MB * 100 / MEM_TOTAL_MB ))
         [ "$HEAP_PCT" -lt 1 ] && HEAP_PCT=1
+        [ "$HEAP_PCT" -gt 95 ] && HEAP_PCT=95
         echo "Host RAM: ${MEM_TOTAL_MB}MB; Bazel server heap target: ${HEAP_TARGET_MB}MB (${HEAP_PCT}%)"
         export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=$HEAP_PCT
         # Build the GKI config target alone first: it is the dependency-
