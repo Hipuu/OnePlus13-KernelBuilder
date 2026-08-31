@@ -13,7 +13,9 @@ workingset/refault fixes reduce the damage but the working set is still
 unprotected by default.
 
 There is no Kconfig symbol for this value and no boot hook in this
-pipeline, so set the compile-time default. Runtime override stays
+pipeline, so set the compile-time default. HZ (jiffies per second) is
+the exact constant for 1000 ms — msecs_to_jiffies() is a runtime
+evaluation and cannot initialize a static variable. Runtime override stays
 available: write 0 to /sys/kernel/mm/lru_gen/min_ttl_ms.
 
 Context is identical in both common bases (Hipuu 6.6.142 fork and
@@ -28,4 +30,4 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -5018 +5018 @@
 -static unsigned long lru_gen_min_ttl __read_mostly;
-+static unsigned long lru_gen_min_ttl __read_mostly = msecs_to_jiffies(1000);
++static unsigned long lru_gen_min_ttl __read_mostly = HZ;

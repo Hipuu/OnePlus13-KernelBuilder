@@ -3410,7 +3410,7 @@ runs:
         # bases ship 0). A skipped/failed patch means no working-set
         # protection on device — fail here rather than ship silent default.
         if grep -q "lru_gen_min_ttl" "$COMMON_KERNEL_FOLDER/mm/vmscan.c" \
-           && ! grep -q "lru_gen_min_ttl __read_mostly = msecs_to_jiffies(1000);" "$COMMON_KERNEL_FOLDER/mm/vmscan.c"; then
+           && ! grep -q "lru_gen_min_ttl __read_mostly = HZ;" "$COMMON_KERNEL_FOLDER/mm/vmscan.c"; then
           echo "::error::MGLRU min_ttl patch not in effect (working-set protection missing)"
           exit 1
         fi
