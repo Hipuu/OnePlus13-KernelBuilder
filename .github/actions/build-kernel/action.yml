@@ -4144,6 +4144,9 @@ runs:
         if [ -f "$STAGE/cc770_isa.ko" ]; then
           rm -f "$STAGE/cc770_isa.ko"
           echo "Dropped cc770_isa.ko from the pack (ISA probing is impossible on arm64)"
+          # Recount: the modules.dep consistency check below compares the
+          # post-drop file count against post-drop dep lines.
+          MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
         fi
 
         # Ship a flattened modules.dep next to the .ko files. The ZIP is flat,
