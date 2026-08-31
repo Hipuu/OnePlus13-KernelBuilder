@@ -350,6 +350,7 @@ cmd_restore() {
   for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
     resident "$m" || echo "  $m: not restored ($(cat "$ERR" 2>/dev/null))"
   done
+  echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
   wifi_cmd set-wifi-enabled enabled
 
   echo
@@ -569,6 +570,14 @@ cmd_conmode() {
     || echo "  warning: asked for con_mode=$_want but driver reports ${_got:-unset}"
 
   if [ "$_want" = "$CONMODE_MONITOR" ]; then
+    # Block system suspend while the ghost STA vdev is up: peach-v2 firmware
+    # asserts (cmnos_assert -> MHI ramdump) when PMO suspends the target with
+    # a monitor+ghost vdev active, and the driver teardown race after that
+    # death took the whole kernel down (SYSTEM_LAST_KMSG: timer softirq oops
+    # in __run_timers on a freed WLAN object). A wake_lock is cheap here --
+    # pentest sessions are short and deliberate.
+    echo nethunter-inject > /sys/power/wake_lock 2>/dev/null \
+      && echo "  suspend blocked (wake_lock: nethunter-inject)"
     ip link set wlan0 up 2>/dev/null
     if [ -n "$_chan" ] && command -v iw >/dev/null 2>&1; then
       iw dev wlan0 set channel "$_chan" 2>"$ERR" \
@@ -582,6 +591,7 @@ cmd_conmode() {
     echo "Back to normal: $0 conmode sta"
   else
     wifi_cmd set-wifi-enabled enabled
+    echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
     echo "  Wi-Fi re-enabled; reconnection takes a few seconds"
   fi
 }
