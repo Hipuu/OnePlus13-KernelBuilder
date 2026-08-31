@@ -4032,6 +4032,10 @@ runs:
           deps=$("$MODINFO_BIN" -F depends "$ko" 2>/dev/null | tr ',' ' ')
           printf '%s: %s\n' "$(basename "$ko" .ko)" "$deps" >> "$DEP_MAP"
         done < <(find "$UNAME_DIR" -type f -name '*.ko')
+        # The install tree holds duplicates (tar-staged + swept-flat copies of
+        # the same module); keep the first map entry per module name so the
+        # shipped modules.dep has exactly one line per staged module.
+        awk '!seen[$1]++' "$DEP_MAP" > "$DEP_MAP.dedup" && mv "$DEP_MAP.dedup" "$DEP_MAP"
 
         # Close the seed set over the modinfo depends map. Each line is
         #   <basename>: <dep-basename> ...
