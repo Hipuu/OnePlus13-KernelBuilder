@@ -7,12 +7,23 @@ Subject: [PATCH] hrtimer: Avoid pointless reprogramming in
 Much like hrtimer_reprogram(), skip programming if the cpu_base is running
 the hrtimer interrupt.
 
-The hunk is a pure single-line anchor (the enqueue_hrtimer call) with no
-trailing context so it applies across every pinned base: 6.6.30's
-__hrtimer_start_range_ns uses an unbraced `if (!force_local) return
-first;` while newer trees use a braced block, and the Hipuu fork passes
-an extra was_armed argument to enqueue_hrtimer. The fork pre-ships the
-fix and is skipped by the in_hrtirq marker guard in action.yml.
+Scope note: 6.6.30 is the ONLY pinned base that still needs this patch.
+Every other tree already ends in the same behavior by other means: 6.6.66,
+6.6.89 (A15/A16/global) and 6.6.118 carry the newer upstream CSD-kick
+rework of this region (hrtimer_base_is_online + smp_call_function_single_
+async via hrtimer_base_csd) - a superset of this fix - and the Hipuu
+6.6.142 fork pre-ships the in_hrtirq early-return itself. action.yml
+therefore skips on either marker and applies this hunk with --fuzz=0.
+
+The hunk is anchored to 6.6.30's exact region with real trailing context
+(`if (!force_local)` / `return first;`) so the application is
+self-verifying: with --fuzz=0, line drift or a wrong base fails loudly
+instead of blindly inserting at the recorded line number. The first run
+of this file carried only a single context line, and 6.6.118's build
+wedged it into the middle of a stock comment at fuzz 1, failing to
+compile hrtimer.c (run 33361879790). Blank context lines carry an
+explicit space prefix: unprefixed empty lines are tolerated by GNU patch
+but rejected by this repo's hunk-count validator.
 
 Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
 Signed-off-by: Thomas Gleixner <tglx@kernel.org>
@@ -26,7 +37,11 @@ Link: https://patch.msgid.link/20260224163429.069535561@kernel.org
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
-@@ -1303 +1303,8 @@
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -1261,6 +1261,14 @@
+ 	}
+ 
  	first = enqueue_hrtimer(timer, new_base, mode);
 +
 +	/*
@@ -35,3 +50,7 @@ diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
 +	 */
 +	if (new_base->cpu_base->in_hrtirq)
 +		return false;
++
+ 	if (!force_local)
+ 		return first;
+ 

@@ -1594,13 +1594,23 @@ runs:
         # A2: upstream hrtimer redundant-reprogram fix (stable ece8be21d8c93)
         cd "$COMMON_KERNEL_FOLDER"
         echo "Patching 0001-hrtimer-avoid-pointless-reprogramming.patch"
-        if grep -qF 'new_base->cpu_base->in_hrtirq' kernel/time/hrtimer.c; then
-          # The Hipuu fork already ships this fix (with its own divergent
-          # context around enqueue_hrtimer), so the patch's hunk cannot
-          # match; that is the desired end-state, not a warning.
+        # Skip when the base already ships this fix in either form: the Hipuu
+        # fork carries the upstream in_hrtirq early-return, and every 6.6.y
+        # base newer than 6.6.30 carries the newer CSD-kick rework, which is a
+        # superset of this fix. In practice only 6.6.30 receives the patch;
+        # its hunk is pinned to 6.6.30's exact region with trailing context,
+        # and --fuzz=0 keeps that application self-verifying — at default
+        # fuzz GNU patch can drop context and blind-apply at the recorded
+        # line number (6.6.118's first run wedged the block into the middle
+        # of a stock comment and failed to compile hrtimer.c).
+        if grep -qF 'new_base->cpu_base->in_hrtirq' kernel/time/hrtimer.c \
+           || grep -qF 'hrtimer_base_csd' kernel/time/hrtimer.c; then
+          # Both forms end in the same behavior (skip the pointless
+          # reprogram), so a skip here is the desired end-state, not a
+          # warning.
           echo "ℹ️ hrtimer reprogram fix already present in this base; skipping"
         else
-          patch -p1 --forward < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
+          patch -p1 --forward --fuzz=0 < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
             echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
           }
         fi
@@ -1832,7 +1842,12 @@ runs:
         # fq as the default qdisc each socket spins its own high-res pacing
         # timer instead of sharing one. Both bases build FQ but leave the
         # default as pfifo_fast (net/sched/Kconfig choice default).
+        # NET_SCH_DEFAULT must be set for the choice to exist at all: the
+        # DEFAULT_* choice members live under "if NET_SCH_DEFAULT", so a
+        # bare CONFIG_DEFAULT_FQ=y is silently dropped by olddefconfig
+        # otherwise (run 33361889651's defconfig assert caught exactly that).
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_NET_SCH_DEFAULT=y
         CONFIG_NET_SCH_FQ=y
         CONFIG_NET_SCH_FQ_CODEL=y
         CONFIG_NET_SCH_CAKE=y
@@ -3387,6 +3402,9 @@ runs:
         # Battery round: FQ (BBR pacing) and SCHED_CLUSTER are appended for
         # every variant, but the DDK vendor-fragment merge can drop symbols;
         # assert both survived so a silent drop fails here, not on-device.
+        # DEFAULT_FQ additionally needs NET_SCH_DEFAULT=y (appended in the
+        # qdisc step) — without that gate the choice member is not visible
+        # and kconfig discards the line before the merge even runs.
         assert_config "CONFIG_DEFAULT_FQ=y"
         assert_config "CONFIG_SCHED_CLUSTER=y"
         if [ "$OP_NTSYNC" = "true" ]; then
