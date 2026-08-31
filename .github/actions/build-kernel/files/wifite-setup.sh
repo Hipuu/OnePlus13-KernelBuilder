@@ -100,6 +100,34 @@ build_from_git hcxdumptool https://github.com/ZerBea/hcxdumptool.git
 build_from_git hcxtools     https://github.com/ZerBea/hcxtools.git
 build_from_git bully        https://github.com/aircrack-ng/bully.git
 
+# hostapd: wifite2's evil-twin fake AP. Not packaged for Termux, and the
+# default defconfig builds a useless no-driver binary, so enable the nl80211
+# driver against libnl from the Termux repo and cross-build for the prefix.
+if ! have hostapd && [ -n "$PKG" ]; then
+    note "building hostapd from source (not packaged for Termux)"
+    pkg install -y libnl >/dev/null 2>&1 || warn "libnl install failed"
+    _hver=2.11
+    _hdir="$HOME/hostapd-$_hver"
+    if [ ! -x "$_hdir/hostapd/hostapd" ]; then
+        curl -sL "https://w1.fi/releases/hostapd-$_hver.tar.gz" \
+            | tar xz -C "$HOME" 2>/dev/null || warn "hostapd tarball fetch failed"
+    fi
+    if [ -d "$_hdir/hostapd" ]; then
+        (
+            cd "$_hdir/hostapd" || exit 1
+            cp defconfig .config
+            sed -i -e 's/^#CONFIG_DRIVER_NL80211=y/CONFIG_DRIVER_NL80211=y/' \
+                   -e 's/^#CONFIG_LIBNL32=y/CONFIG_LIBNL32=y/' .config
+            printf 'CFLAGS += -I%s/include -I%s/include/libnl3\nLDFLAGS += -L%s/lib\n' \
+                "$PREFIX" "$PREFIX" "$PREFIX" >> .config
+            make -j4 CC=clang BINDIR="$PREFIX/bin" >/dev/null 2>&1 \
+                && make install BINDIR="$PREFIX/bin" >/dev/null 2>&1
+        ) && ok "hostapd installed" || warn "hostapd build failed (evil-twin AP unavailable)"
+    else
+        warn "hostapd source missing; evil-twin AP unavailable"
+    fi
+fi
+
 # --- 3. wifite2 itself ------------------------------------------------------
 
 if ! have wifite && ! [ -x "$HOME/wifite2/wifite.py" ]; then
