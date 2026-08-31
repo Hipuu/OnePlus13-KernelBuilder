@@ -3372,6 +3372,11 @@ runs:
           assert_config "CONFIG_UKSM_CPU_GOVERNOR=4"
           assert_config "CONFIG_UKSM_SLEEP_MS=100"
         fi
+        # Battery round: FQ (BBR pacing) and SCHED_CLUSTER are appended for
+        # every variant, but the DDK vendor-fragment merge can drop symbols;
+        # assert both survived so a silent drop fails here, not on-device.
+        assert_config "CONFIG_DEFAULT_FQ=y"
+        assert_config "CONFIG_SCHED_CLUSTER=y"
         if [ "$OP_NTSYNC" = "true" ]; then
           assert_config "CONFIG_NTSYNC=y"
         fi
@@ -3387,6 +3392,16 @@ runs:
         # and ath9k_htc is asserted from the staged modules ZIP / Stage step.
         [ "$FAILED" -eq 0 ] || exit 1
         echo "✅ defconfig assertions passed"
+
+        # MGLRU working-set patch: min_ttl must be non-zero in the source the
+        # Image was built from (the battery patch sets it to 1000 ms; both
+        # bases ship 0). A skipped/failed patch means no working-set
+        # protection on device — fail here rather than ship silent default.
+        if grep -q "lru_gen_min_ttl" "$COMMON_KERNEL_FOLDER/mm/vmscan.c" \
+           && ! grep -q "lru_gen_min_ttl __read_mostly = msecs_to_jiffies(1000);" "$COMMON_KERNEL_FOLDER/mm/vmscan.c"; then
+          echo "::error::MGLRU min_ttl patch not in effect (working-set protection missing)"
+          exit 1
+        fi
 
         # Compare the shipped artifacts, not a config file. The previous check
         # read GKI's .config, found the branding, and passed -- while the vendor
