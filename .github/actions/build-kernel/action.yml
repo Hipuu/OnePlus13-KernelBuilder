@@ -4066,14 +4066,28 @@ runs:
           }' | sort)
 
         STAGE=$(mktemp -d)
+        # Modules the phone's vendor partition provides and loads at boot
+        # (/vendor/lib/modules: cnss*, ipam, rmnet_mem, ...). peach's modinfo
+        # depends= lists them, but depmod-based packs never shipped them and
+        # peach loads fine against the on-device copies, so a missing one is
+        # not a pack defect. On cold builds the sweep stages them anyway.
+        PLATFORM_PROVIDED="cnss2 cnss_nl cnss_utils cnss_prealloc cnss_plat_ipc_qmi_svc ipam rmnet_mem gsim smem-mailbox wlan_firmware_service"
         while IFS= read -r mod; do
           [ -n "$mod" ] || continue
           hit="$(find "$UNAME_DIR" -type f -name "$mod.ko" -print -quit)"
           if [ -n "$hit" ]; then
             cp -n -- "$hit" "$STAGE/"
           else
-            echo "::error::closure wants $mod.ko but it is not in the install tree"
-            FAILED_DEPS=$((FAILED_DEPS+1))
+            provided=0
+            for p in $PLATFORM_PROVIDED; do
+              [ "$p" = "$mod" ] && provided=1
+            done
+            if [ "$provided" = 1 ]; then
+              echo "[INFO] closure wants $mod.ko: not staged; the vendor partition provides it at boot"
+            else
+              echo "::error::closure wants $mod.ko but it is not in the install tree"
+              FAILED_DEPS=$((FAILED_DEPS+1))
+            fi
           fi
         done <<< "$WANTED"
         if [ "${FAILED_DEPS:-0}" -gt 0 ]; then
