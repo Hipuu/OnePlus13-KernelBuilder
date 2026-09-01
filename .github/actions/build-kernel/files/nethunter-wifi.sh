@@ -696,13 +696,7 @@ cmd_wifite() {
     [ -n "$CPID" ] || die "container 'idk' is not running; start it (Droidspaces app or $DS_BIN start)"
     _wifite_mode=container
   else
-    WIFITE_BIN=$(find_wifite) || die "wifite not found.
-  Install it in Termux (recommended):
-      pkg install root-repo && pkg install git python
-      git clone https://github.com/kimocoder/wifite2 && cd wifite2 && python3 setup.py install
-  or inside the NetHunter chroot: apt install wifite.
-  Or install the Droidspaces Ubuntu container and: apt install wifite
-  Then re-run: $0 wifite"
+    WIFITE_BIN=$(find_wifite) || die "wifite not found; install it with wifite-setup.sh (in this pack), then re-run: $0 wifite"
     PYTHON=$(find_python_for_wifite) || die "python3 not found"
     _wifite_mode=host
   fi
