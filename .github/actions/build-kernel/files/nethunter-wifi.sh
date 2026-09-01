@@ -500,15 +500,43 @@ cmd_conmode() {
     echo "  con_mode: ${_cur:-unset} -> $(conmode_name "$_cur")"
     [ -n "$_cur" ] && ip link show wlan0 2>/dev/null | head -1
     echo
-    echo "usage: $0 conmode sta|monitor [channel]"
+    echo "usage: $0 conmode sta|monitor|dualsta [channel]"
     return 0
   fi
 
   case "$_mode" in
-    sta|managed|normal|0) _want=$CONMODE_STA ;;
-    monitor|mon|4)        _want=$CONMODE_MONITOR ;;
-    *) die "unknown mode '$_mode' (want: sta | monitor)" ;;
+    sta|managed|normal|0)    _want=$CONMODE_STA ;;
+    monitor|mon|4)           _want=$CONMODE_MONITOR ;;
+    dualsta|assoc|sta-mon)   _want=dualsta ;;
+    *) die "unknown mode '$_mode' (want: sta | monitor | dualsta)" ;;
   esac
+
+  # dualsta = Path B: keep the driver in mission mode (no reload, Wi-Fi stays
+  # up and associated), create a second monitor netdev via the stock
+  # cfg80211 add-interface path, and set its channel. Requires the ini knob
+  # monitor_mode_concurrency=1 (STA_SCAN_MON), which our qcacld patch sets
+  # as the default. No MHI reload, no ghost vdev: injected frames carry the
+  # STA vdev id, so the firmware sees them against a live session -- the
+  # only context its deauth dispatcher accepts without asserting.
+  if [ "$_want" = dualsta ]; then
+    command -v iw >/dev/null 2>&1 || die "iw not found"
+    if ! ip link show mon0 >/dev/null 2>&1; then
+      PHY=$(iw dev wlan0 info | grep -o 'wiphy [0-9]*' | cut -d' ' -f2)
+      [ -n "$PHY" ] || die "wlan0 is not up (associate first)"
+      iw phy "$PHY" interface add mon0 type monitor || die "failed to create mon0 (sta+mon concurrency unsupported or firmware busy)"
+    fi
+    ip link set mon0 up 2>/dev/null
+    if [ -n "$_chan" ]; then
+      iw dev mon0 set channel "$_chan" 2>"$ERR" \
+        || echo "  channel $_chan rejected (must match wlan0's channel while associated)"
+    fi
+    echo nethunter-inject > /sys/power/wake_lock 2>/dev/null \
+      && echo "  suspend blocked (wake_lock: nethunter-inject)"
+    echo "  mon0 up on $(iw dev mon0 info | grep channel | head -1)"
+    echo "  wlan0 stays associated; inject/airodump on mon0."
+    echo "  Remove with: ip link del mon0; echo nethunter-inject > /sys/power/wake_unlock"
+    return 0
+  fi
 
   _ko=$(qcacld_ko)
   [ -f "$_ko" ] || die "no $QCACLD.ko in this pack or $PLATFORM_DIR"

@@ -1199,3 +1199,15 @@ diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
  	wma_debug("status: %s wmi_desc_id: %d",
  		  wma_get_status_str(status), desc_id);
  
+diff --git a/components/mlme/dispatcher/inc/cfg_mlme_generic.h b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
+--- a/components/mlme/dispatcher/inc/cfg_mlme_generic.h
++++ b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
+@@ -1126,7 +1126,7 @@
+ #define CFG_MONITOR_MODE_CONCURRENCY CFG_INI_UINT( \
+ 	"monitor_mode_concurrency", \
+-	MONITOR_MODE_CONC_NO_SUPPORT, \
++	MONITOR_MODE_CONC_STA_SCAN_MON, \
+ 	MONITOR_MODE_CONC_MAX, \
+ 	MONITOR_MODE_CONC_NO_SUPPORT, \
+ 	CFG_VALUE_OR_DEFAULT, \
+ 	"Monitor mode concurrency supported")
