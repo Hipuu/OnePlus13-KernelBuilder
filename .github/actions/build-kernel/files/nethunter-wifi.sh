@@ -687,14 +687,25 @@ find_python_for_wifite() {
 
 cmd_wifite() {
   need_root
-  WIFITE_BIN=$(find_wifite) || die "wifite not found.
+  # Droidspaces container install takes priority when present: the Ubuntu
+  # container carries the full toolchain (aircrack-ng, reaver, bully,
+  # pixiewps, hcxdumptool, hostapd) with none of Termux's repo gaps.
+  DS_BIN=/data/local/Droidspaces/bin/droidspaces
+  if [ -x /mnt/Droidspaces/idk/usr/bin/wifite ] && [ -x "$DS_BIN" ]; then
+    CPID=$("$DS_BIN" pid idk 2>/dev/null)
+    [ -n "$CPID" ] || die "container 'idk' is not running; start it (Droidspaces app or $DS_BIN start)"
+    _wifite_mode=container
+  else
+    WIFITE_BIN=$(find_wifite) || die "wifite not found.
   Install it in Termux (recommended):
       pkg install root-repo && pkg install git python
       git clone https://github.com/kimocoder/wifite2 && cd wifite2 && python3 setup.py install
   or inside the NetHunter chroot: apt install wifite.
+  Or install the Droidspaces Ubuntu container and: apt install wifite
   Then re-run: $0 wifite"
-
-  PYTHON=$(find_python_for_wifite) || die "python3 not found"
+    PYTHON=$(find_python_for_wifite) || die "python3 not found"
+    _wifite_mode=host
+  fi
 
   # Internal chip: switch to con_mode=4 unless it is already there. External
   # adapters loaded via 'load' keep working untouched.
@@ -706,16 +717,24 @@ cmd_wifite() {
   fi
   ip link set "$WIFITE_IFACE" up 2>/dev/null
 
-  echo "=== launching wifite on $WIFITE_IFACE ==="
+  echo "=== launching wifite on $WIFITE_IFACE ($_wifite_mode) ==="
   # TERM is needed by wifite's curses-free output; PATH additions cover the
   # Termux toolchain (aircrack-ng, iw, ...) when run from adb shell su.
   TERM=${TERM:-dumb}
-  if [ -d /data/data/com.termux/files/usr/bin ]; then
-    PATH="/data/data/com.termux/files/usr/bin:$PATH"
-    export PATH TERM PREFIX=/data/data/com.termux/files/usr TMPDIR=/data/data/com.termux/files/usr/tmp
+  if [ "$_wifite_mode" = container ]; then
+    # wlan0 lives on the host; the container shares the host network
+    # namespace (net_mode=host), so its tools see the monitor iface as-is.
+    nsenter -t "$CPID" -m -p -- /bin/bash -c \
+      "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin TERM=$TERM; wifite -i $WIFITE_IFACE $*"
+    _rc=$?
+  else
+    if [ -d /data/data/com.termux/files/usr/bin ]; then
+      PATH="/data/data/com.termux/files/usr/bin:$PATH"
+      export PATH TERM PREFIX=/data/data/com.termux/files/usr TMPDIR=/data/data/com.termux/files/usr/tmp
+    fi
+    "$PYTHON" "$WIFITE_BIN" -i "$WIFITE_IFACE" "$@"
+    _rc=$?
   fi
-  "$PYTHON" "$WIFITE_BIN" -i "$WIFITE_IFACE" "$@"
-  _rc=$?
 
   # Regain normal Wi-Fi even on Ctrl-C: wifite cannot restore what it did
   # not set up (it never touched the con_mode state machine).
