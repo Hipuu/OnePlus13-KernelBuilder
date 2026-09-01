@@ -136,23 +136,6 @@ Modules are built with `CONFIG_MODVERSIONS=y`, so a modules ZIP loads **only** o
 
 The loader displaces the platform Wi-Fi stack only when a loaded driver actually needs `mac80211`; a reboot (or `restore`) brings the internal Wi-Fi back. See the scroll header inside `nethunter-wifi.sh` for the full rationale.
 
-### Wifite on the internal chip (no adapter)
-
-The loader has a `wifite` command that flips the internal chip to monitor mode (`con_mode=4`), launches wifite2 on `wlan0`, and restores normal Wi-Fi on exit:
-
-```bash
-./nethunter-wifi.sh wifite              # monitor chip + run wifite
-./nethunter-wifi.sh wifite --no-pmkid   # any wifite2 args pass through
-```
-
-One-time toolchain install (run inside Termux or the NetHunter chroot):
-
-```bash
-sh wifite-setup.sh     # shipped in the module pack
-```
-
-Installs python/wifite2, the aircrack-ng suite, reaver/hashcat/mdk4 via the Termux `root-repo` + `tur-hacking` component (or apt in the chroot), and builds hcxdumptool/hcxtools/bully from source where no package exists. Passive attacks (handshake capture, PMKID, evil-twin AP, WPS pixie-dust) work with the internal chip; frame-injection attacks (deauth) require the qcacld injection patch this build ships and remain experimental — see the header of `nethunter-wifi.sh`.
-
 ---
 
 ## Battery & power tweaks

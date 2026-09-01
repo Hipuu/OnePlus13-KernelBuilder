@@ -4180,23 +4180,16 @@ runs:
         # One-command loader. ath9k_htc and friends cannot be built into the
         # Image -- Kconfig would force CFG80211=y with them, which permanently
         # breaks the internal Wi-Fi (see the script's header comment) -- so ship
-        # a script that does the unload/insmod dance instead. wifite-setup.sh
-        # installs the wifite2 toolchain the loader's 'wifite' command drives.
+        # a script that does the unload/insmod dance instead.
         LOADER="$GITHUB_ACTION_PATH/files/nethunter-wifi.sh"
-        WIFITE_SETUP="$GITHUB_ACTION_PATH/files/wifite-setup.sh"
         if [ ! -f "$LOADER" ]; then
           echo "::error::loader script missing at $LOADER"
           exit 1
         fi
-        if [ ! -f "$WIFITE_SETUP" ]; then
-          echo "::error::wifite setup script missing at $WIFITE_SETUP"
-          exit 1
-        fi
         install -m 755 "$LOADER" "$STAGE/nethunter-wifi.sh"
-        install -m 755 "$WIFITE_SETUP" "$STAGE/wifite-setup.sh"
 
         MODULES_ZIP_NAME="kernel_modules_${ZIP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}.zip"
-        ( cd "$STAGE" && zip -q -j -9 "$MODULES_ZIP_NAME" ./*.ko modules.dep nethunter-wifi.sh wifite-setup.sh )
+        ( cd "$STAGE" && zip -q -j -9 "$MODULES_ZIP_NAME" ./*.ko modules.dep nethunter-wifi.sh )
         mv "$STAGE/$MODULES_ZIP_NAME" "$ARTIFACTS_FOLDER/"
         rm -rf "$STAGE"
 
