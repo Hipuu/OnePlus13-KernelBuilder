@@ -30,7 +30,10 @@ set -u
 PKG=""
 APT=""
 if command -v pkg >/dev/null 2>&1 && [ -n "${PREFIX:-}" ] && [ "${PREFIX#*/com.termux}" != "$PREFIX" ]; then
-    PKG=pkg
+    # apt, not pkg: the pkg wrapper refuses to run as root, and this script
+    # is often driven from an adb su shell where only root has Android's
+    # network binding. apt has no such guard and works in both contexts.
+    PKG=apt
 elif command -v apt-get >/dev/null 2>&1 && [ -f /etc/kali-release ]; then
     APT=apt-get
 else
@@ -50,8 +53,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 if [ -n "$PKG" ]; then
     note "installing repos and core packages (Termux)"
-    pkg install -y root-repo tur-repo git python libpcap openssl \
-        clang make pkg-config >/dev/null 2>&1 || warn "core pkg install had warnings"
+    apt install -y root-repo tur-repo git python libpcap openssl \
+        clang make pkg-config >/dev/null 2>&1 || warn "core apt install had warnings"
     # tur-hacking is a TUR component that is not subscribed by tur-repo by
     # default; add its source line explicitly next to the others.
     TUR_LIST="$PREFIX/etc/apt/sources.list.d/tur.list"
@@ -59,8 +62,8 @@ if [ -n "$PKG" ]; then
         echo "deb https://tur.kcubeterm.com tur-packages tur-hacking" >> "$TUR_LIST"
         note "subscribed tur-hacking component"
     fi
-    pkg update >/dev/null 2>&1 || true
-    pkg install -y aircrack-ng reaver hashcat mdk4 iw macchanger dnsmasq \
+    apt update >/dev/null 2>&1 || true
+    apt install -y aircrack-ng reaver hashcat mdk4 iw macchanger dnsmasq \
         pixiewps >/dev/null 2>&1 || warn "some pentest packages failed to install"
 elif [ -n "$APT" ]; then
     note "installing packages (Kali chroot)"
@@ -105,7 +108,7 @@ build_from_git bully        https://github.com/aircrack-ng/bully.git
 # driver against libnl from the Termux repo and cross-build for the prefix.
 if ! have hostapd && [ -n "$PKG" ]; then
     note "building hostapd from source (not packaged for Termux)"
-    pkg install -y libnl >/dev/null 2>&1 || warn "libnl install failed"
+    apt install -y libnl >/dev/null 2>&1 || warn "libnl install failed"
     _hver=2.11
     _hdir="$HOME/hostapd-$_hver"
     if [ ! -x "$_hdir/hostapd/hostapd" ]; then

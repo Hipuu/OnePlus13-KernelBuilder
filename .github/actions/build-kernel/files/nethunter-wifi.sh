@@ -593,6 +593,18 @@ cmd_conmode() {
     wifi_cmd set-wifi-enabled enabled
     echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
     echo "  Wi-Fi re-enabled; reconnection takes a few seconds"
+    # Firmware-health check after leaving monitor mode. The driver logs a
+    # marker when the ghost-vdev teardown could not reach firmware (WMI
+    # unavailable or VDEV_DELETE send failed); a leaked ghost vdev asserts
+    # peach-v2 firmware on the NEXT system suspend and the teardown race
+    # panics the kernel (SYSTEM_LAST_KMSG of a 6.6.118 boot). Say so now
+    # instead of letting the phone die 10-20 minutes later.
+    if dmesg 2>/dev/null | grep -q "ghost vdev leaked\|teardown skipped, WMI unavailable"; then
+      echo
+      echo "  WARNING: the monitor-mode helper vdev could not be torn down"
+      echo "  in firmware. The phone will crash on the next deep sleep."
+      echo "  >>> REBOOT NOW (normal restart) to clear it. <<<"
+    fi
   fi
 }
 

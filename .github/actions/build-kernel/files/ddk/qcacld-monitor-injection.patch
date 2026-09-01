@@ -15,7 +15,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,757 @@
+@@ -3449,6 +3456,764 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -563,6 +563,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +{
 +	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
++	QDF_STATUS status;
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
 +	bool helper_created = false;
@@ -594,6 +595,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	wma = cds_get_context(QDF_MODULE_ID_WMA);
 +	if (!wma || !wma->wmi_handle) {
++		/*
++		 * No WMI handle: the ghost vdev may survive in firmware. A
++		 * later PMO suspend walking it asserts peach-v2 firmware
++		 * (cmnos_assert -> MHI ramdump -> teardown panic). Log loudly
++		 * so the loader's post-switch health check can advise reboot.
++		 */
++		hdd_err("Injection: teardown skipped, WMI unavailable - ghost vdev may leak into firmware; reboot recommended");
 +		if (g_inj.lock_inited) {
 +			qdf_spin_lock_bh(&g_inj.lock);
 +			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
@@ -645,20 +653,19 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	msleep(100);
 +
 +	/* WMI_VDEV_DELETE_CMDID */
-+	wmi_unified_vdev_delete_send(wmi, vdev_id);
-+	msleep(100);
-+
-+	if (g_inj.lock_inited) {
-+		qdf_spin_lock_bh(&g_inj.lock);
-+		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
-+		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
-+		qdf_spin_unlock_bh(&g_inj.lock);
++	status = wmi_unified_vdev_delete_send(wmi, vdev_id);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		/*
++		 * If this send fails the ghost vdev survives in firmware and
++		 * the next PMO suspend asserts (the 10-20 min late reboot).
++		 * The loader's post-switch health check keys on this marker.
++		 */
++		hdd_err("Injection: VDEV_DELETE send failed (%d) - ghost vdev leaked; reboot recommended",
++			status);
 +	} else {
-+		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
-+		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		hdd_info("Injection: ghost STA helper torn down (vdev %u)",
++			 vdev_id);
 +	}
-+
-+	hdd_info("Injection: ghost STA helper torn down (vdev %u)", vdev_id);
 +}
 +
 +/*
