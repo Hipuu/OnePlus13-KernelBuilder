@@ -523,7 +523,10 @@ cmd_conmode() {
     if ! ip link show mon0 >/dev/null 2>&1; then
       PHY=$(iw dev wlan0 info | grep -o 'wiphy [0-9]*' | cut -d' ' -f2)
       [ -n "$PHY" ] || die "wlan0 is not up (associate first)"
-      iw phy "$PHY" interface add mon0 type monitor || die "failed to create mon0 (sta+mon concurrency unsupported or firmware busy)"
+      # otherbss => QDF_MONITOR_FLAG_OTHER_BSS: the driver treats this as
+      # rx-mon + STA concurrency and runs wlan_hdd_add_monitor_check.
+      iw phy "$PHY" interface add mon0 type monitor flags otherbss \
+        || die "failed to create mon0 (sta+mon concurrency unsupported or firmware busy)"
     fi
     ip link set mon0 up 2>/dev/null
     if [ -n "$_chan" ]; then
