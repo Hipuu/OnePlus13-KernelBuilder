@@ -603,7 +603,7 @@ cmd_conmode() {
       echo
       echo "  WARNING: the monitor-mode helper vdev could not be torn down"
       echo "  in firmware. The phone will crash on the next deep sleep."
-      echo "  >>> REBOOT NOW (normal restart) to clear it. <<<"
+      echo "  === REBOOT NOW (normal restart) to clear it. ==="
     fi
   fi
 }
