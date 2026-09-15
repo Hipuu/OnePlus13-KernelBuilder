@@ -347,6 +347,12 @@ cmd_restore() {
   for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
     resident "$m" || echo "  $m: not restored ($(cat "$ERR" 2>/dev/null))"
   done
+  # Defensive cleanup from any prior dualsta session.  The platform reload
+  # above would tear down mon0 as part of cfg80211 wiphy destruction, but
+  # doing it explicitly here ensures the operator's intent ("restore normal
+  # Wi-Fi") is honored even if the cfg80211 teardown races with a held
+  # socket.  Wake_lock release below covers the same case.
+  ip link del mon0 2>/dev/null
   echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
   wifi_cmd set-wifi-enabled enabled
 
@@ -523,6 +529,17 @@ cmd_conmode() {
     if ! ip link show mon0 >/dev/null 2>&1; then
       PHY=$(iw dev wlan0 info | grep -o 'wiphy [0-9]*' | cut -d' ' -f2)
       [ -n "$PHY" ] || die "wlan0 is not up (associate first)"
+      # rx-mon (otherbss) requires a live STA association: the firmware's
+      # deauth dispatcher only accepts TX against an associated session,
+      # so a monitor netdev without one hits the same firmware assert the
+      # dualsta mode was designed to avoid.  iw link reports "Connected to"
+      # for an associated STA and "Not connected." otherwise; wpa_supplicant
+      # is not required (iw link works whether or not it is running).
+      if ! iw dev wlan0 link 2>/dev/null | grep -q 'Connected to'; then
+        die "wlan0 is not associated to an AP; associate first
+  (Path B dualsta requires a live session -- the firmware rejects
+  injected frames without one)"
+      fi
       # otherbss => QDF_MONITOR_FLAG_OTHER_BSS: the driver treats this as
       # rx-mon + STA concurrency and runs wlan_hdd_add_monitor_check.
       iw phy "$PHY" interface add mon0 type monitor flags otherbss \
@@ -540,6 +557,13 @@ cmd_conmode() {
     echo "  Remove with: ip link del mon0; echo nethunter-inject > /sys/power/wake_unlock"
     return 0
   fi
+
+  # Defensive cleanup: a previous dualsta session may have left mon0 up.
+  # In sta/monitor the qcacld reload below tears down any leftover monitor
+  # netdev as part of cfg80211 wiphy destruction, but doing it explicitly
+  # makes the state transition unambiguous and survives edge cases where
+  # the driver unload races with userspace (e.g. netsock hold).
+  ip link del mon0 2>/dev/null
 
   _ko=$(qcacld_ko)
   [ -f "$_ko" ] || die "no $QCACLD.ko in this pack or $PLATFORM_DIR"
