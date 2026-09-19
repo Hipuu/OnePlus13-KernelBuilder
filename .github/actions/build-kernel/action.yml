@@ -849,13 +849,28 @@ runs:
           while [ $attempt -le $max_attempts ]; do
               echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
 
+              # gitlab.com's /-/archive/ endpoint sits behind Cloudflare Bot
+              # Manager and serves an interactive Turnstile challenge
+              # (Cf-Mitigated: challenge) to non-browser clients -- both
+              # aria2c and curl are blocked.  git smart HTTP is NOT
+              # challenged, so fall back to a shallow clone.  $branch may be
+              # a commit SHA, so clone the default branch, fetch the ref,
+              # and detach to it.
+              local fetched=false
               if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
-                  mkdir -p "$repo_name"
-                  if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
+                  if mkdir -p "$repo_name" && tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
                       echo "✅ Success: $repo_name synced"
                       rm -f "$shm_path"
                       return 0
                   fi
+              elif { rm -rf "$repo_name" 2>/dev/null
+                     git clone --depth 1 "$url" "$repo_name" 2>/dev/null &&
+                     { git -C "$repo_name" cat-file -e "$branch^{commit}" 2>/dev/null ||
+                       git -C "$repo_name" fetch --depth 1 origin "$branch" 2>/dev/null; } &&
+                     git -C "$repo_name" checkout --detach "$branch" 2>/dev/null; }; then
+                  echo "✅ Success: $repo_name cloned (archive endpoint challenged by Cloudflare)"
+                  rm -f "$shm_path"
+                  return 0
               fi
 
               echo "⚠️ Attempt $attempt failed, clearing RAM and retrying..."
