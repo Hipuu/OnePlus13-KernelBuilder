@@ -224,10 +224,39 @@ load_closure() {
 
 wifi_cmd() { cmd wifi "$@" >/dev/null 2>&1; }
 
+# Fail safe on an already-hung firmware. Once the target has asserted
+# ("Received firmware hang event" -> WMI Stop -> SSR) the WMI teardown
+# commands can no longer complete, and unloading the module in that state
+# panics the kernel -- observed twice on 2026-09-21, both times with
+# SYSTEM_LAST_KMSG ending in "[last unloaded: qca_cld3_peach_v2(OE)]".
+# Refusing is strictly better than reloading: the phone survives, and the
+# caller is told to reboot. The scan window is deliberately short so that a
+# hang the driver has since recovered from does not block switches forever.
+# Markers cover the whole fatal chain that precedes the panic (SSR event,
+# MHI ramdump handshake, cmnos assert, and the loader's own ghost-vdev
+# health markers), not just the first hang line -- a teardown race can omit
+# the headline message while still being mid-assert.
+fw_hung() {
+  dmesg 2>/dev/null | tail -120 | grep -q \
+    -e "Received firmware hang event" -e "Received SSR event" \
+    -e "RAMDUMP DOWNLOAD MODE" -e "cmnos_assert" \
+    -e "ghost vdev leaked" -e "teardown skipped"
+}
+
+refuse_hung_fw() {
+  if fw_hung; then
+    die "the WLAN firmware has asserted (SSR); unloading now would panic the kernel.
+  Reboot the phone, then retry. Nothing was changed."
+  fi
+}
+
 # Modules to unload before loading an external mac80211 driver: the whole
 # resident pair plus peach. See the WIFI_SWAP_MODULES comment for why the
 # vendor cfg/mac can no longer stay resident.
 unload_platform_stack() {
+  # cmd_load reaches here: without the check, a load right after an SSR would
+  # unload an asserted firmware and panic exactly like a conmode switch did.
+  refuse_hung_fw
   echo "=== displacing platform Wi-Fi stack ==="
   echo "  (internal Wi-Fi stops working until you reboot or run: $0 restore)"
   wifi_cmd set-wifi-enabled disabled
@@ -574,18 +603,9 @@ cmd_conmode() {
     return 0
   fi
 
-  # Fail safe on an already-hung firmware. Once the target has asserted
-  # ("Received firmware hang event" -> WMI Stop -> SSR) the WMI teardown
-  # commands can no longer complete, and unloading the module in that state
-  # panics the kernel -- observed twice on 2026-09-21, both times with
-  # SYSTEM_LAST_KMSG ending in "[last unloaded: qca_cld3_peach_v2(OE)]".
-  # Refusing is strictly better than reloading: the phone survives, and the
-  # caller is told to reboot. The scan window is deliberately short so that a
-  # hang the driver has since recovered from does not block switches forever.
-  if dmesg 2>/dev/null | tail -120 | grep -q "Received firmware hang event"; then
-    die "the WLAN firmware is hung (SSR); unloading now would panic the kernel.
-  Reboot the phone, then switch modes. Nothing was changed."
-  fi
+  # Fail safe on an already-hung firmware (shared helper: also covers the
+  # cmd_load unload path). See fw_hung/refuse_hung_fw above.
+  refuse_hung_fw
 
   echo "=== stopping Wi-Fi framework ==="
   wifi_cmd set-wifi-enabled disabled
