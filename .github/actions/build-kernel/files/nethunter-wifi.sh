@@ -574,6 +574,19 @@ cmd_conmode() {
     return 0
   fi
 
+  # Fail safe on an already-hung firmware. Once the target has asserted
+  # ("Received firmware hang event" -> WMI Stop -> SSR) the WMI teardown
+  # commands can no longer complete, and unloading the module in that state
+  # panics the kernel -- observed twice on 2026-09-21, both times with
+  # SYSTEM_LAST_KMSG ending in "[last unloaded: qca_cld3_peach_v2(OE)]".
+  # Refusing is strictly better than reloading: the phone survives, and the
+  # caller is told to reboot. The scan window is deliberately short so that a
+  # hang the driver has since recovered from does not block switches forever.
+  if dmesg 2>/dev/null | tail -120 | grep -q "Received firmware hang event"; then
+    die "the WLAN firmware is hung (SSR); unloading now would panic the kernel.
+  Reboot the phone, then switch modes. Nothing was changed."
+  fi
+
   echo "=== stopping Wi-Fi framework ==="
   wifi_cmd set-wifi-enabled disabled
   sleep 3

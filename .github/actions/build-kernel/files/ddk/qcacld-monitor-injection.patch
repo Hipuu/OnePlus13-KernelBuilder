@@ -846,7 +846,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8110,315 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8110,327 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1011,9 +1011,26 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	/*
 +	 * Address / peer policy for peach mgmt TX on ghost STA:
 +	 * - broadcast probe_req: rewrite SA to helper (self-peer) — proven OTA
-+	 * - unicast any mgmt: ensure WMI peer for DA; FW status 1 without it
++	 * - unicast any mgmt: ensure WMI peer for the DA ONLY; FW status 1
++	 *   without it
 +	 * - deauth/disassoc keep caller SA (AP spoof) — broadcast deauth OTA works
 +	 * - mgmt.macaddr: DA for unicast (peer key), helper for broadcast
++	 *
++	 * NEVER peer the header SA.  A PEER_CREATE whose MAC is the monitored
++	 * AP's own BSSID puts a second non-self peer on a vdev that is
++	 * VDEV_STARTED but deliberately never VDEV_UP'ed, and peach-v2
++	 * cmnos-asserts on the mgmt-TX completion path ~230-250 ms later:
++	 * firmware hang -> WMI Stop -> SSR -> the next module unload panics
++	 * the kernel (SYSTEM_LAST_KMSG: "last unloaded: qca_cld3_peach_v2").
++	 * Measured on the 7f6886 build, same warm monitor session:
++	 *   unicast DA=victim SA=helper    (DA peer only)  -> TX completes clean
++	 *   unicast DA=victim SA=AP BSSID  (DA + SA peers) -> hang -> SSR
++	 * Broadcast deauth spoofing the AP's SA with zero peers is OTA-verified
++	 * (it kicked the test client off), so the header SA needs no peer to be
++	 * transmitted — the FW mgmt-TX dispatcher keys on mgmt.macaddr, not on
++	 * the frame's SA.  Known trade-off: unicast mgmt that spoofs a
++	 * third-party SA (e.g. EAPOL/auth spoofing) may now complete with FW
++	 * status=1, i.e. it fails to transmit instead of hanging the firmware.
 +	 */
 +	if (skb->len >= 24 &&
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
@@ -1024,11 +1041,6 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	    !is_broadcast_ether_addr(hdr->addr1) &&
 +	    !is_multicast_ether_addr(hdr->addr1)) {
 +		hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr1);
-+		/* Also peer the SA when spoofing a third party (e.g. AP BSSID). */
-+		if (!ether_addr_equal(hdr->addr2, helper_mac) &&
-+		    !is_broadcast_ether_addr(hdr->addr2) &&
-+		    !is_zero_ether_addr(hdr->addr2))
-+			hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr2);
 +	}
 +
 +	/*
