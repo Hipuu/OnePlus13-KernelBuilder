@@ -33,9 +33,13 @@
 #   ./nethunter-wifi.sh list                list every driver in this pack
 #   ./nethunter-wifi.sh monitor [if] [ch]   put the adapter into monitor mode
 #   ./nethunter-wifi.sh managed [if]        undo monitor mode
-#   ./nethunter-wifi.sh conmode sta|monitor [ch]
+#   ./nethunter-wifi.sh conmode sta|monitor [ch] [--force]
 #                                           switch the *internal* Wi-Fi between
-#                                           normal and monitor (reloads qcacld)
+#                                           normal and monitor (reloads qcacld).
+#                                           Leaving monitor mode defaults to a
+#                                           reboot (in-place teardown has a
+#                                           kernel-panic class); --force opts
+#                                           into the risky in-place reload.
 #   ./nethunter-wifi.sh install [driver ...]  autoload at every boot (KernelSU)
 #   ./nethunter-wifi.sh uninstall           undo install
 #
@@ -250,6 +254,29 @@ refuse_hung_fw() {
   fi
 }
 
+# A distinct, markerless crash class seen on this device (2026-09-21): tearing
+# down a con_mode=4 (monitor) instance leaked a driver-internal timer into the
+# kernel timer wheel, rmmod then freed its container, and ~0.9 s later the
+# timer softirq oopsed walking the poisoned node (__run_timers on a freed
+# WLAN slab object, QCMM Apps watchdog bite). No firmware-hang/SSR marker is
+# emitted on this path, so refuse_hung_fw() cannot see it -- the only reliable
+# guard is to not unload the driver after a monitor session has been created.
+# Reboot ends the session cleanly (con_mode is chosen at insmod, so Wi-Fi
+# returns as normal sta). The explicit --force flag (handled in cmd_conmode)
+# opts back into the in-place reload and accepts the residual crash risk.
+_force=0
+refuse_monitor_teardown() {
+  if [ "$_force" = 1 ]; then return 0; fi
+  if resident "$QCACLD" && [ "$(conmode_now)" = "$CONMODE_MONITOR" ]; then
+    die "the Wi-Fi driver is loaded in MONITOR mode (con_mode=4, injection helper up).
+  Unloading it in place can panic the kernel ~1 s after rmmod: the monitor-session
+  teardown leaves a driver timer in the wheel, rmmod frees its container, and the
+  timer softirq oopses on it (no firmware-hang marker -- invisible to the SSR guard).
+  To end the session: REBOOT NOW (normal restart); Wi-Fi returns as normal sta.
+  To force the risky in-place reload anyway:  $0 conmode sta --force"
+  fi
+}
+
 # Modules to unload before loading an external mac80211 driver: the whole
 # resident pair plus peach. See the WIFI_SWAP_MODULES comment for why the
 # vendor cfg/mac can no longer stay resident.
@@ -257,6 +284,7 @@ unload_platform_stack() {
   # cmd_load reaches here: without the check, a load right after an SSR would
   # unload an asserted firmware and panic exactly like a conmode switch did.
   refuse_hung_fw
+  refuse_monitor_teardown
   echo "=== displacing platform Wi-Fi stack ==="
   echo "  (internal Wi-Fi stops working until you reboot or run: $0 restore)"
   wifi_cmd set-wifi-enabled disabled
@@ -290,6 +318,10 @@ unload_can_stack() {
 
 cmd_load() {
   need_root
+  # Only cmd_conmode parses --force; reset here so a --force set earlier in the
+  # same process (interactive menu loop) cannot silently disarm the gate that
+  # unload_platform_stack relies on for a later load.
+  _force=0
   drivers=${*:-$DEFAULT_DRIVERS}
   [ -f "$DEP" ] || die "modules.dep missing next to $0"
 
@@ -530,12 +562,25 @@ cmd_conmode() {
   _mode=${1:-}
   _chan=${2:-}
 
+  # --force (any position) opts out of the monitor-teardown gate; the flag
+  # must not be mistaken for a channel when it lands in the channel slot.
+  _force=0
+  for _a in "$@"; do
+    case "$_a" in
+      --force|-f) _force=1 ;;
+    esac
+  done
+  case "$_chan" in
+    --force|-f) _chan=${3:-} ;;
+  esac
+
   if [ -z "$_mode" ] || [ "$_mode" = show ]; then
     _cur=$(conmode_now)
     echo "  con_mode: ${_cur:-unset} -> $(conmode_name "$_cur")"
     [ -n "$_cur" ] && ip link show wlan0 2>/dev/null | head -1
     echo
-    echo "usage: $0 conmode sta|monitor|dualsta [channel]"
+    echo "usage: $0 conmode sta|monitor|dualsta [channel] [--force]"
+    echo "  --force: skip the monitor-teardown safety refusal (crash risk accepted)"
     return 0
   fi
 
@@ -602,6 +647,14 @@ cmd_conmode() {
     echo "  already in $(conmode_name "$_want")"
     return 0
   fi
+
+  # Leaving a monitor (con_mode=4) session unloads the driver; that teardown
+  # has a markerless kernel-panic class (freed-object timer, ~1 s after rmmod,
+  # no firmware-hang marker). Refuse by default -- reboot ends the session
+  # cleanly. `conmode ... --force` opts back into the risky in-place reload.
+  # Nothing is changed before this check, so a refused switch leaves the
+  # session fully alive and injectable. See refuse_monitor_teardown().
+  refuse_monitor_teardown
 
   # Fail safe on an already-hung firmware (shared helper: also covers the
   # cmd_load unload path). See fw_hung/refuse_hung_fw above.
@@ -673,7 +726,8 @@ cmd_conmode() {
     command -v iw >/dev/null 2>&1 && iw dev wlan0 info 2>/dev/null | grep -E "type|channel"
     echo
     echo "Capture with: tcpdump -i wlan0 -e -nn"
-    echo "Back to normal: $0 conmode sta"
+    echo "End the session by rebooting (recommended -- in-place sta restore can panic)."
+    echo "If you must reload in place: $0 conmode sta --force (crash risk accepted)"
   else
     wifi_cmd set-wifi-enabled enabled
     echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
