@@ -184,15 +184,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +/*
 + * Build a unique desc_id in the high reserved range:
 + *   bits[15:0]  = HDD_MON_INJECT_DESC_BASE | slot
-+ *   bits[31:16] = low 16 of monotonic seq (avoids stale FW completions
-+ *                 matching a recycled slot after wrap).
++ *   bits[30:16] = low 15 of monotonic seq; bit 31 stays clear so the
++ *   int return of slot_put cannot alias its -1 "full" sentinel (double-free).
 + * Stock mgmt_txrx pools are small; any id >= DESC_BASE misses cleanly.
 + */
 +static uint32_t hdd_mon_inject_make_desc_id(uint32_t idx, uint32_t seq)
 +{
 +	return HDD_MON_INJECT_DESC_BASE |
 +	       (idx & (HDD_MON_INJECT_SLOTS - 1)) |
-+	       ((seq & 0xFFFFU) << 16);
++	       ((seq & 0x7FFFU) << 16);
 +}
 +
 +static bool hdd_mon_inject_desc_is_ours(uint32_t desc_id)
