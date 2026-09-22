@@ -359,6 +359,16 @@ cmd_load() {
 
 cmd_restore() {
   need_root
+  # restore rmmods everything recorded in $STATE. On a DDK pack `load
+  # qca_cld3_peach_v2` records peach into $STATE without tripping wifi_swap
+  # (the qcacld closure contains no mac80211, so cmd_load never reaches
+  # unload_platform_stack), making this loop a third unload entry point into a
+  # possibly con_mode=4 instance -- the same markerless teardown-panic class
+  # refuse_monitor_teardown exists for, and an already-asserted firmware would
+  # panic here exactly like the SSR-guarded paths. Gate before any rmmod runs,
+  # mirroring unload_platform_stack's order.
+  refuse_hung_fw
+  refuse_monitor_teardown
   echo "=== unloading modules this script loaded ==="
   if [ -s "$STATE" ]; then
     # Fixed point rather than reverse order: rmmod refuses a module while
