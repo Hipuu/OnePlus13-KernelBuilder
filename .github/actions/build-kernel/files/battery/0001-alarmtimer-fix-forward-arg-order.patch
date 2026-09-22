@@ -1,0 +1,35 @@
+From c9e137c26cd4a5da19f27e0f85c92b9e0d4054bd Mon Sep 17 00:00:00 2001
+From: Lie Ryan <lie.ryan@gmail.com>
+Date: Sun, 30 Mar 2025 06:29:36 +0000
+Subject: [PATCH] alarmtimer: Fix argument order in alarm_timer_forward()
+
+[ Upstream commit 5d16467ae56314d58f22b1f4580ec1ba30a48411 ]
+
+The alarm_timer_forward() callback passes its arguments to
+alarm_forward() in the wrong order, which results in the wrong
+interval being used to forward the timer.
+
+The consequence is missed expirations or incorrect overrun
+accounting. Android uses alarmtimer frequently (every suspend-resume
+cycle and every AlarmManager wakeup), so bad overrun accounting feeds
+back into wrong suspend decisions — the wakeup-minimization logic in
+this pipeline depends on correct expiry bookkeeping.
+
+The Hipuu 6.6.142 fork already carries the fix; this patch targets the
+stock OnePlusOSS 6.6.118 base and is skipped there via the marker
+guard in action.yml (grep for the corrected argument order).
+
+Fixes: 1c1e35611d8e ("alarmtimers: Rate limit starting alarmtimer on suspend")
+Cc: stable@vger.kernel.org
+Signed-off-by: Lie Ryan <lie.ryan@gmail.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+---
+ kernel/time/alarmtimer.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/time/alarmtimer.c b/kernel/time/alarmtimer.c
+--- a/kernel/time/alarmtimer.c
++++ b/kernel/time/alarmtimer.c
+@@ -611 +611 @@
+-	return alarm_forward(alarm, timr->it_interval, now);
++	return alarm_forward(alarm, now, timr->it_interval);

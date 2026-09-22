@@ -1,3 +1,16 @@
+diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
+--- a/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -732,7 +732,8 @@ static const struct ieee80211_iface_limi
+ 	wlan_hdd_sta_iface_limit[] = {
+ 	{
+ 		.max = 2,
+-		.types = BIT(NL80211_IFTYPE_STATION),
++		.types = BIT(NL80211_IFTYPE_STATION) |
++			 BIT(NL80211_IFTYPE_MONITOR),
+ 	},
+ };
+ 
 diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 --- a/core/hdd/src/wlan_hdd_main.c
 +++ b/core/hdd/src/wlan_hdd_main.c
@@ -15,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,757 @@
+@@ -3449,6 +3456,770 @@ static void hdd_mon_turn_off_ps_and_wow(
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -171,15 +184,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +/*
 + * Build a unique desc_id in the high reserved range:
 + *   bits[15:0]  = HDD_MON_INJECT_DESC_BASE | slot
-+ *   bits[31:16] = low 16 of monotonic seq (avoids stale FW completions
-+ *                 matching a recycled slot after wrap).
++ *   bits[30:16] = low 15 of monotonic seq; bit 31 stays clear so the
++ *   int return of slot_put cannot alias its -1 "full" sentinel (double-free).
 + * Stock mgmt_txrx pools are small; any id >= DESC_BASE misses cleanly.
 + */
 +static uint32_t hdd_mon_inject_make_desc_id(uint32_t idx, uint32_t seq)
 +{
 +	return HDD_MON_INJECT_DESC_BASE |
 +	       (idx & (HDD_MON_INJECT_SLOTS - 1)) |
-+	       ((seq & 0xFFFFU) << 16);
++	       ((seq & 0x7FFFU) << 16);
 +}
 +
 +static bool hdd_mon_inject_desc_is_ours(uint32_t desc_id)
@@ -309,24 +322,30 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	/*
-+	 * Firmware often returns only low16(desc_id).  Identify the slot
-+	 * from that lane; accept the completion if the slot is in use.
-+	 * Optional: if upper bits are present, prefer exact match, else
-+	 * still reclaim by slot so DMA nbufs never leak.
++	 * Strict desc_id match.  Earlier code accepted low16-only completions
++	 * (firmware sometimes strips the upper seq bits) by matching on
++	 * `(stored_desc & 0xFFFFU) == (desc_id & 0xFFFFU)`.  That allowed a
++	 * stale completion for slot N to reclaim a slot that had been reused
++	 * since the original submission: the stored nbuf is the new
++	 * submission's, still in flight or being DMA'd by firmware, and
++	 * freeing it here is a kernel UAF / DMA mapping corruption.
++	 *
++	 * When firmware strips the seq bits, the slot stays in_use and the
++	 * reaper (HDD_MON_INJECT_AGE_MS / _FAST_MS) reclaims it.  DMA leak
++	 * is bounded by the reaper period + age.  When firmware echoes the
++	 * full desc_id (the normal case on peach-v2), we reclaim immediately
++	 * and never reach the reaper.
 +	 */
-+	if (g_inj.slots[idx].in_use) {
-+		stored_desc = g_inj.slots[idx].desc_id;
-+		if ((desc_id >> 16) == 0 ||
-+		    stored_desc == desc_id ||
-+		    (stored_desc & 0xFFFFU) == (desc_id & 0xFFFFU)) {
-+			nbuf = g_inj.slots[idx].nbuf;
-+			g_inj.slots[idx].in_use = false;
-+			g_inj.slots[idx].nbuf = NULL;
-+			g_inj.slots[idx].desc_id = 0;
-+			if (g_inj.inflight)
-+				g_inj.inflight--;
-+			freed = true;
-+		}
++	stored_desc = g_inj.slots[idx].desc_id;
++	if (g_inj.slots[idx].in_use &&
++	    stored_desc == desc_id) {
++		nbuf = g_inj.slots[idx].nbuf;
++		g_inj.slots[idx].in_use = false;
++		g_inj.slots[idx].nbuf = NULL;
++		g_inj.slots[idx].desc_id = 0;
++		if (g_inj.inflight)
++			g_inj.inflight--;
++		freed = true;
 +	}
 +	dev = g_inj.mon_dev;
 +	if (freed) {
@@ -563,6 +582,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +{
 +	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
++	QDF_STATUS status;
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
 +	bool helper_created = false;
@@ -594,6 +614,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	wma = cds_get_context(QDF_MODULE_ID_WMA);
 +	if (!wma || !wma->wmi_handle) {
++		/*
++		 * No WMI handle: the ghost vdev may survive in firmware. A
++		 * later PMO suspend walking it asserts peach-v2 firmware
++		 * (cmnos_assert -> MHI ramdump -> teardown panic). Log loudly
++		 * so the loader's post-switch health check can advise reboot.
++		 */
++		hdd_err("Injection: teardown skipped, WMI unavailable - ghost vdev may leak into firmware; reboot recommended");
 +		if (g_inj.lock_inited) {
 +			qdf_spin_lock_bh(&g_inj.lock);
 +			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
@@ -645,20 +672,19 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	msleep(100);
 +
 +	/* WMI_VDEV_DELETE_CMDID */
-+	wmi_unified_vdev_delete_send(wmi, vdev_id);
-+	msleep(100);
-+
-+	if (g_inj.lock_inited) {
-+		qdf_spin_lock_bh(&g_inj.lock);
-+		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
-+		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
-+		qdf_spin_unlock_bh(&g_inj.lock);
++	status = wmi_unified_vdev_delete_send(wmi, vdev_id);
++	if (QDF_IS_STATUS_ERROR(status)) {
++		/*
++		 * If this send fails the ghost vdev survives in firmware and
++		 * the next PMO suspend asserts (the 10-20 min late reboot).
++		 * The loader's post-switch health check keys on this marker.
++		 */
++		hdd_err("Injection: VDEV_DELETE send failed (%d) - ghost vdev leaked; reboot recommended",
++			status);
 +	} else {
-+		g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
-+		qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
++		hdd_info("Injection: ghost STA helper torn down (vdev %u)",
++			 vdev_id);
 +	}
-+
-+	hdd_info("Injection: ghost STA helper torn down (vdev %u)", vdev_id);
 +}
 +
 +/*
@@ -773,7 +799,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4256,34 @@
+@@ -3523,6 +4294,34 @@ static int __hdd_mon_open(struct net_dev
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -808,7 +834,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6636,11 @@
+@@ -5875,6 +6674,11 @@ int hdd_stop_no_trans(struct net_device
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -820,7 +846,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8072,306 @@
+@@ -7306,11 +8110,327 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -927,11 +953,20 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	}
 +
 +	hdr = (struct ieee80211_hdr *)skb->data;
-+	if (!ieee80211_is_mgmt(hdr->frame_control)) {
-+		hdd_err("Injection: non-mgmt frame (fc=0x%04x), dropping",
-+			hdr->frame_control);
++	if (skb->len < 16) {
++		hdd_err("Injection: frame too short (%u), dropping",
++			(uint32_t)skb->len);
 +		goto drop;
 +	}
++
++	/*
++	 * Management, data and control frames all ride the ghost-vdev
++	 * WMI path: the firmware validates the frame type internally
++	 * (60 of 67 types inject on peach-v2). Data frames were
++	 * previously dropped by a management-only gate here, which
++	 * blocked WEP replay, reaver/bully EAPOL and mdk4 floods -- the
++	 * non-capture half of wifite.
++	 */
 +
 +	/*
 +	 * Snapshot helper state under the lock.  The WMI handle is NOT
@@ -976,9 +1011,26 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	/*
 +	 * Address / peer policy for peach mgmt TX on ghost STA:
 +	 * - broadcast probe_req: rewrite SA to helper (self-peer) — proven OTA
-+	 * - unicast any mgmt: ensure WMI peer for DA; FW status 1 without it
++	 * - unicast any mgmt: ensure WMI peer for the DA ONLY; FW status 1
++	 *   without it
 +	 * - deauth/disassoc keep caller SA (AP spoof) — broadcast deauth OTA works
 +	 * - mgmt.macaddr: DA for unicast (peer key), helper for broadcast
++	 *
++	 * NEVER peer the header SA.  A PEER_CREATE whose MAC is the monitored
++	 * AP's own BSSID puts a second non-self peer on a vdev that is
++	 * VDEV_STARTED but deliberately never VDEV_UP'ed, and peach-v2
++	 * cmnos-asserts on the mgmt-TX completion path ~230-250 ms later:
++	 * firmware hang -> WMI Stop -> SSR -> the next module unload panics
++	 * the kernel (SYSTEM_LAST_KMSG: "last unloaded: qca_cld3_peach_v2").
++	 * Measured on the 7f6886 build, same warm monitor session:
++	 *   unicast DA=victim SA=helper    (DA peer only)  -> TX completes clean
++	 *   unicast DA=victim SA=AP BSSID  (DA + SA peers) -> hang -> SSR
++	 * Broadcast deauth spoofing the AP's SA with zero peers is OTA-verified
++	 * (it kicked the test client off), so the header SA needs no peer to be
++	 * transmitted — the FW mgmt-TX dispatcher keys on mgmt.macaddr, not on
++	 * the frame's SA.  Known trade-off: unicast mgmt that spoofs a
++	 * third-party SA (e.g. EAPOL/auth spoofing) may now complete with FW
++	 * status=1, i.e. it fails to transmit instead of hanging the firmware.
 +	 */
 +	if (skb->len >= 24 &&
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
@@ -989,11 +1041,6 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	    !is_broadcast_ether_addr(hdr->addr1) &&
 +	    !is_multicast_ether_addr(hdr->addr1)) {
 +		hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr1);
-+		/* Also peer the SA when spoofing a third party (e.g. AP BSSID). */
-+		if (!ether_addr_equal(hdr->addr2, helper_mac) &&
-+		    !is_broadcast_ether_addr(hdr->addr2) &&
-+		    !is_zero_ether_addr(hdr->addr2))
-+			hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr2);
 +	}
 +
 +	/*
@@ -1129,7 +1176,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12405,25 @@
+@@ -11423,6 +12531,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1155,6 +1202,23 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
+@@ -23260,8 +24387,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+ 						PM_STA_MODE,
+ 						NULL);
+ 
+-		if (num_open_session) {
+-			/* Try disconnecting if already in connected state */
++		if (num_open_session && !is_rx_mon) {
++			/*
++			 * Disconnect only for the non-rx-mon path. With
++			 * is_rx_mon (otherbss flag) the STA association
++			 * stays up: that live session is the context the
++			 * fw deauth dispatcher needs - without it the fw
++			 * asserts (SYSTEM_LAST_KMSG analysis).
++			 */
+ 			wlan_hdd_cm_issue_disconnect(sta_adapter->deflink,
+ 						     REASON_UNSPEC_FAILURE,
+ 						     true);
 diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
 --- a/core/wma/src/wma_mgmt.c
 +++ b/core/wma/src/wma_mgmt.c
@@ -1168,7 +1232,7 @@ diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
  #include "wlan_objmgr_psoc_obj.h"
  #include "wlan_objmgr_pdev_obj.h"
  #include "wlan_objmgr_vdev_obj.h"
-@@ -3165,6 +3168,14 @@
+@@ -3165,6 +3168,14 @@ static int wma_process_mgmt_tx_completio
  	if (wma_validate_handle(wma_handle))
  		return -EINVAL;
  
@@ -1183,3 +1247,15 @@ diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
  	wma_debug("status: %s wmi_desc_id: %d",
  		  wma_get_status_str(status), desc_id);
  
+diff --git a/components/mlme/dispatcher/inc/cfg_mlme_generic.h b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
+--- a/components/mlme/dispatcher/inc/cfg_mlme_generic.h
++++ b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
+@@ -1125,7 +1125,7 @@ enum wlan_epcs_frame {
+  */
+ #define CFG_MONITOR_MODE_CONCURRENCY CFG_INI_UINT( \
+ 	"monitor_mode_concurrency", \
+-	MONITOR_MODE_CONC_NO_SUPPORT, \
++	MONITOR_MODE_CONC_STA_SCAN_MON, \
+ 	MONITOR_MODE_CONC_MAX, \
+ 	MONITOR_MODE_CONC_NO_SUPPORT, \
+ 	CFG_VALUE_OR_DEFAULT, \

@@ -96,9 +96,9 @@ apply_prepatch() {
     # Older android15-6.6 patch levels reference VMA_PAD_START without defining it.
     if grep -qF 'VMA_PAD_START(' ./fs/proc/task_mmu.c && ! grep -qF '#define VMA_PAD_START' ./fs/proc/task_mmu.c; then
       echo "Prepatch: inserting VMA_PAD_START fallback for android15-6.6"
-      printf '#undef VMA_PAD_START\n#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif\n' > /tmp/vma_pad.txt
-      awk '/#include "internal.h"/{print; while((getline line < "/tmp/vma_pad.txt") > 0) print line; close("/tmp/vma_pad.txt"); next} {print}' ./fs/proc/task_mmu.c > ./fs/proc/task_mmu.c.tmp && mv ./fs/proc/task_mmu.c.tmp ./fs/proc/task_mmu.c
-      rm -f /tmp/vma_pad.txt
+      printf '#undef VMA_PAD_START\n#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif\n' > "$RUNNER_TEMP/vma_pad.txt"
+      awk '/#include "internal.h"/{print; while((getline line < ENVIRON["RUNNER_TEMP"] "/vma_pad.txt") > 0) print line; close(ENVIRON["RUNNER_TEMP"] "/vma_pad.txt"); next} {print}' ./fs/proc/task_mmu.c > ./fs/proc/task_mmu.c.tmp && mv ./fs/proc/task_mmu.c.tmp ./fs/proc/task_mmu.c
+      rm -f "$RUNNER_TEMP/vma_pad.txt"
       log_prepatch "vma_pad_fallback"
     fi
   fi

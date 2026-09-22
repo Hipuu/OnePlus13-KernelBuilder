@@ -96,10 +96,15 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo '${{ inputs.op_config_json }}' > /tmp/config.json
-        jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' /tmp/config.json >> "$GITHUB_ENV"
+        # $RUNNER_TEMP, not /tmp: on a self-hosted host several runner
+        # processes can share the machine, and each has its own _work/_temp
+        # while /tmp is global. A fixed /tmp path lets one matrix job
+        # overwrite another's config mid-build.
+        CONFIG_JSON="$RUNNER_TEMP/config.json"
+        echo '${{ inputs.op_config_json }}' > "$CONFIG_JSON"
+        jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' "$CONFIG_JSON" >> "$GITHUB_ENV"
         echo "Parsed config:"
-        jq '.' /tmp/config.json
+        jq '.' "$CONFIG_JSON"
 
     - name: Validate Inputs
       shell: bash
@@ -309,19 +314,36 @@ runs:
         echo "Creating folder for configuration: $CONFIG"
         mkdir -p "$CONFIG"
         echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
-        REPO="/usr/local/bin/repo"
+        # $RUNNER_TEMP, not /usr/local/bin: self-hosted runners may not have
+        # passwordless sudo, and writing to a system path pollutes the host
+        # for unrelated repos. Each runner process gets its own _temp dir.
+        REPO="$RUNNER_TEMP/repo"
         if [ ! -x "$REPO" ]; then
           curl --fail --show-error --location --proto '=https' https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
           chmod +x "$REPO"
         fi
+        # Prepend so 'repo' resolves to our copy for the rest of this job.
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
         echo "REPO=$REPO" >> "$GITHUB_ENV"
 
     - name: Configure Swap Space
+      # Only GitHub-hosted runners need this: they ship 16GB RAM and no usable
+      # swap, and the DDK/Bazel path OOMs without it. Self-hosted runners are
+      # required to have >=32GB RAM (see AGENTS.md), where adding a 16GB swap
+      # file is pure disk waste — and the action needs passwordless sudo plus
+      # write access to /, which a locked-down runner host may not grant.
+      # Gated on == 'github-hosted' rather than != 'self-hosted' so that an
+      # empty/absent runner.environment (old GHES) skips rather than runs.
+      if: ${{ runner.environment == 'github-hosted' }}
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 16
 
     - name: Free Disk Space
+      # Same reasoning, and this one is destructive: these paths are
+      # GitHub-hosted image contents. On a self-hosted host, dotnet/android/
+      # julia/powershell may be things the owner actually uses.
+      if: ${{ runner.environment == 'github-hosted' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -337,7 +359,15 @@ runs:
         git config --global feature.manyFiles true
         git config --global core.fsmonitor true
         git config --global pack.sparse true
-        git config --global http.sslVerify false
+        # http.sslVerify=false is a workaround for flaky TLS against the
+        # mirrors the manifests pull from, and it is only acceptable because a
+        # GitHub-hosted VM is destroyed after the run. On a self-hosted runner
+        # `git config --global` persists forever, so setting it there would
+        # permanently disable certificate verification for every future git
+        # operation by that user. Never do that.
+        if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+          git config --global http.sslVerify false
+        fi
 
     - name: Sync Kernel Source
       id: sync-kernel-source
@@ -684,7 +714,9 @@ runs:
     - name: Restore ccache cache
       id: restore-ccache-cache
       uses: ./.github/actions/cache/restore
-      if: ${{ inputs.clean == false || inputs.clean == 'false' }}
+      # The DDK path builds through Bazel's own disk cache and never runs
+      # ccache; restoring its bucket there only burns 1-2GB of hosted disk.
+      if: ${{ (inputs.clean == false || inputs.clean == 'false') && env.OP_DDK != 'true' }}
       with:
         cache_path: ${{ env.CCACHE_DIR }}
         cache_key: ${{ inputs.ksu_type }}-v3-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_LTO }}_LTO
@@ -817,13 +849,28 @@ runs:
           while [ $attempt -le $max_attempts ]; do
               echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
 
+              # gitlab.com's /-/archive/ endpoint sits behind Cloudflare Bot
+              # Manager and serves an interactive Turnstile challenge
+              # (Cf-Mitigated: challenge) to non-browser clients -- both
+              # aria2c and curl are blocked.  git smart HTTP is NOT
+              # challenged, so fall back to a shallow clone.  $branch may be
+              # a commit SHA, so clone the default branch, fetch the ref,
+              # and detach to it.
+              local fetched=false
               if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
-                  mkdir -p "$repo_name"
-                  if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
+                  if mkdir -p "$repo_name" && tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
                       echo "✅ Success: $repo_name synced"
                       rm -f "$shm_path"
                       return 0
                   fi
+              elif { rm -rf "$repo_name" 2>/dev/null
+                     git clone --depth 1 "$url" "$repo_name" 2>/dev/null &&
+                     { git -C "$repo_name" cat-file -e "$branch^{commit}" 2>/dev/null ||
+                       git -C "$repo_name" fetch --depth 1 origin "$branch" 2>/dev/null; } &&
+                     git -C "$repo_name" checkout --detach "$branch" 2>/dev/null; }; then
+                  echo "✅ Success: $repo_name cloned (archive endpoint challenged by Cloudflare)"
+                  rm -f "$shm_path"
+                  return 0
               fi
 
               echo "⚠️ Attempt $attempt failed, clearing RAM and retrying..."
@@ -1150,6 +1197,24 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
+          "v2.3.0")
+            # v2.3.0 synced with tiann/KernelSU main at 34a82ab7 (see the
+            # upstream "Bump version to 2.3.0" commit); verified to apply
+            # cleanly to KSU main HEAD 932014ab (one commit past the sync
+            # point). KSUN is NOT supported on this susfs version yet:
+            # upstream hunks still reject there and WildKernels' fix sets
+            # only go up to v2.2.0, so mixing a v2.3.0 base patch with the
+            # v2.2.0 fix set leaves the module half-patched (that is exactly
+            # what failed run 33287059782). Fail loudly instead. KSUN builds
+            # resolve the v2.2.0 ref via the variant-keyed pin in
+            # .github/compatible-commits.json.
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              echo "::error::SUSFS v2.3.0 does not support KernelSU-Next yet (WildKernels fix patches stop at v2.2.0). Use ksu_variant=KSU, or pin susfs_branch to a v2.2.0 commit."
+              exit 1
+            fi
+            cd "$KSU_FOLDER"
+            patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+            ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
@@ -1157,6 +1222,20 @@ runs:
         esac
 
         cd "$COMMON_KERNEL_FOLDER"
+        if [ "${{ inputs.ksu_type }}" = "KSU" ] && [ -d "$KSU_FOLDER" ]; then
+          # A half-applied SUSFS->KernelSU patch leaves the module un-buildable
+          # (succeeded hunks drop Kbuild entries whose callers still exist),
+          # then Bazel dies at link with confusing errors an hour later.
+          # Detect rejects here at minute ~3 instead: fail fast with the list.
+          if REJ_LIST=$(find "$KSU_FOLDER" -name '*.rej' -type f | sort); then
+            if [ -n "$REJ_LIST" ]; then
+              echo "::error::SUSFS KernelSU patch left rejects; KSU/SUSFS drifted apart:"
+              echo "$REJ_LIST"
+              echo "Fix: update .github/compatible-commits.json to matching refs"
+              exit 1
+            fi
+          fi
+        fi
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
             sed -i '/#include <trace\/hooks\/blk.h>/a #include <trace\/hooks\/fs.h>' ./fs/namespace.c
@@ -1287,8 +1366,16 @@ runs:
         fi
 
         if [ "$OP_HMBIRD" = true ]; then
-          echo "Patching hmbird!"
-          HMBIRD_MODEL=$(echo "$OP_MODEL" | sed 's/-[0-9]\+\.[0-9]\+\.[0-9]\+$//')
+          # feat/perf-stack: the Hipuu common-kernel fork ships HMBIRD/sched_ext
+          # (kernel/sched/ext.c + hmbird/, drivers/of/overwriter, hmbird.conf)
+          # fully integrated; the WildKernels patches below target the
+          # OnePlusOSS base and reject against the fork's reworked
+          # kernel/sched/*. Skip them when the base already provides SCX.
+          if [ -f ./kernel/sched/ext.c ]; then
+            echo "Base kernel already carries HMBIRD/sched_ext; skipping fengchi patches"
+          else
+            echo "Patching hmbird!"
+            HMBIRD_MODEL=$(echo "$OP_MODEL" | sed 's/-[0-9]\+\.[0-9]\+\.[0-9]\+$//')
           case "$OP_MODEL" in
             OP-ACE-5-ULTRA-6.6.50|OP-ACE-5-PRO-6.6.30|OP13-6.6.30|OP13-6.6.66|OP13-CPH-6.6.56|OP13T-6.6.89|OP13-6.6.89|OP-ACE-5-PRO-6.6.89)
               # OP13-6.6.66 is a local variant with no upstream config; the only
@@ -1317,15 +1404,24 @@ runs:
           chmod +x ./drivers/of/overwriter/overwrite_configs/convert_configs.sh
           dos2unix "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/hmbird_config.patch"
           patch -p1 -F 3 < "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/hmbird_config.patch"
+          fi
         else
           echo "Hmbird not enabled, skipping fengchi patch"
         fi
 
         echo "Patching module intercept and overlay mechanism"
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
-        if [ -d "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/" ]; then
+        # feat/perf-stack: the Hipuu fork already carries this mechanism
+        # (kernel/module/module_overlay/*); applying the OnePlusOSS-base
+        # patch again would prompt interactively over existing files and
+        # abort under set -e. Skip when present.
+        if [ -f ./kernel/module/module_overlay/module_intercept.c ]; then
+          echo "Base kernel already carries module_overlay; skipping"
+        else
+          patch -p1 < "$KERNEL_PATCHES_FOLDER/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+        fi
+        if [ -f "$COMMON_KERNEL_FOLDER/kernel/module/module_overlay/convert_overlay.sh" ]; then
           chmod +x ./kernel/module/module_overlay/convert_overlay.sh
-        elif [ -d "$COMMON_KERNEL_FOLDER/kernel/module_overlay/" ]; then
+        elif [ -f "$COMMON_KERNEL_FOLDER/kernel/module_overlay/convert_overlay.sh" ]; then
           chmod +x ./kernel/module_overlay/convert_overlay.sh
         fi
 
@@ -1432,6 +1528,15 @@ runs:
         set -euo pipefail
         echo "::group::Apply Optimisation patches"
         cd "$COMMON_KERNEL_FOLDER"
+        # feat/perf-stack: the Hipuu fork ships its own optimization series
+        # (optimized string/mem ops among them); WildKernels' patches target
+        # the OnePlusOSS base and reject as already-applied on the fork.
+        # mm/uksm.c exists only in the fork, so use it as the marker.
+        if [ -f ./mm/uksm.c ]; then
+          echo "Fork base carries its own optimization series; skipping WildKernels opt patches"
+          echo "::endgroup::"
+          exit 0
+        fi
         KERNEL_VERSION="${{ env.KERNEL_VER }}"
         MIN_VERSION="5.16"
         patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/optimized_mem_operations.patch"
@@ -1504,13 +1609,34 @@ runs:
         # A2: upstream hrtimer redundant-reprogram fix (stable ece8be21d8c93)
         cd "$COMMON_KERNEL_FOLDER"
         echo "Patching 0001-hrtimer-avoid-pointless-reprogramming.patch"
-        patch -p1 --forward < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
-          echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
-        }
+        # Skip when the base already ships this fix in either form: the Hipuu
+        # fork carries the upstream in_hrtirq early-return, and every 6.6.y
+        # base newer than 6.6.30 carries the newer CSD-kick rework, which is a
+        # superset of this fix. In practice only 6.6.30 receives the patch;
+        # its hunk is pinned to 6.6.30's exact region with trailing context,
+        # and --fuzz=0 keeps that application self-verifying — at default
+        # fuzz GNU patch can drop context and blind-apply at the recorded
+        # line number (6.6.118's first run wedged the block into the middle
+        # of a stock comment and failed to compile hrtimer.c).
+        if grep -qF 'new_base->cpu_base->in_hrtirq' kernel/time/hrtimer.c \
+           || grep -qF 'hrtimer_base_csd' kernel/time/hrtimer.c; then
+          # Both forms end in the same behavior (skip the pointless
+          # reprogram), so a skip here is the desired end-state, not a
+          # warning.
+          echo "ℹ️ hrtimer reprogram fix already present in this base; skipping"
+        else
+          patch -p1 --forward --fuzz=0 < "$BATTERY_PATCHES/0001-hrtimer-avoid-pointless-reprogramming.patch" || {
+            echo "::warning::hrtimer reprogram patch did not apply cleanly; may already be present"
+          }
+        fi
 
         # A1: gate task-tracker hrtimer on tasktrack_enable (vendor module)
+        # The patch path is cpu/sched/sched_info/osi_tasktrack.c home-relative,
+        # so it must run from the vendor oplus-kernel root (the parent of cpu/),
+        # not from inside the sched_info dir: -p1 would resolve to
+        # sched_info/sched_info/osi_tasktrack.c and silently never apply.
         if [ -d "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info" ]; then
-          cd "$CONFIG_FOLDER/vendor/oplus/kernel/cpu/sched/sched_info"
+          cd "$CONFIG_FOLDER/vendor/oplus/kernel"
           echo "Patching 0001-oplus-gate-tasktracker-timer-on-enable.patch"
           patch -p1 --forward < "$BATTERY_PATCHES/0001-oplus-gate-tasktracker-timer-on-enable.patch" || {
             echo "::warning::tasktrack timer gate patch did not apply; source may differ"
@@ -1518,6 +1644,71 @@ runs:
         else
           echo "::warning::tasktrack source directory not found; skipping A1 patch"
         fi
+
+        # Battery-focused power patches (unconditional on every base).
+        # The stock OnePlusOSS bases genuinely need these; the Hipuu fork
+        # already ships its own (stronger) versions of several of them, so
+        # --forward reports "Reversed (or previously applied)" there. That
+        # outcome is success, not a warning: separate it from genuine hunk
+        # failures so the log stays actionable (the warnings were pure noise
+        # on 6.6.118 while still catching real regressions elsewhere).
+        cd "$COMMON_KERNEL_FOLDER"
+        for p in \
+          add_timeout_wakelocks_globally \
+          avoid_extra_s2idle_wake_attempts \
+          minimise_wakeup_time \
+          reduce_freeze_timeout \
+          reduce_pci_pme_wakeups \
+          silence_irq_cpu_logspam \
+          silence_system_logspam \
+          increase_ext4_default_commit_age \
+          f2fs_enlarge_min_fsync_blocks \
+          0001-mglru-default-min-ttl-1000ms \
+          0001-alarmtimer-fix-forward-arg-order \
+          0001-cpuidle-teo-drop-target-residency-check \
+          0001-cpuidle-menu-residency-threshold-polling \
+          0001-cpuidle-menu-tick-stopped-timer-check
+        do
+          echo "Patching $p.patch"
+          PATCH_LOG="$RUNNER_TEMP/battery-$p.log"
+          # patch exits non-zero both for genuine rejects and for
+          # --forward's reversed-detection skip, so classify by log content:
+          # "Reversed (or previously applied)" without any "FAILED" hunk means
+          # the base already carries the change (the Hipuu fork ships stronger
+          # variants of several of these) — success, not a warning.
+          if patch -p1 --forward < "$BATTERY_PATCHES/$p.patch" >"$PATCH_LOG" 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          # Per-patch "already present" markers, used when hunks FAIL because
+          # the base ships its own (textually divergent) variant of the same
+          # change — e.g. the Hipuu fork's alarmtimer and freezer tweaks.
+          # Marker logic must be per-patch: the freeze-timeout one matches
+          # any non-stock value because the fork ships a shorter timeout
+          # than the patch's own 1s.
+          fork_shipped=false
+          case "$p" in
+            minimise_wakeup_time)
+              grep -qF 'ktime_to_ms(min) + 1' kernel/time/alarmtimer.c && fork_shipped=true ;;
+            reduce_freeze_timeout)
+              grep -qF 'freeze_timeout_msecs' kernel/power/process.c \
+                && ! grep -qF 'freeze_timeout_msecs = 20 * MSEC_PER_SEC' kernel/power/process.c \
+                && fork_shipped=true ;;
+          esac
+          if [ "$fork_shipped" = true ]; then
+            echo "ℹ️ $p.patch already present in this base (fork-shipped variant); skipping"
+          elif grep -q "FAILED" "$PATCH_LOG"; then
+            echo "::warning::$p.patch did not apply cleanly; may be already applied or fork-shipped"
+            cat "$PATCH_LOG"
+          elif grep -qE "Reversed \(or previously applied\)" "$PATCH_LOG"; then
+            echo "ℹ️ $p.patch already present in this base; skipping"
+          elif [ "$rc" -ne 0 ]; then
+            # Non-zero exit with neither marker: unexpected, surface it.
+            echo "::warning::$p.patch exited with status $rc"
+            cat "$PATCH_LOG"
+          fi
+        done
 
         echo "✅ Battery optimization patches applied"
         echo "::endgroup::"
@@ -1564,6 +1755,16 @@ runs:
           rm -f drivers/misc/ntsync.c
         fi
 
+        # feat/perf-stack: the fork base ships NTSYNC already; applying again
+        # yields "previously applied" per-file skips that GNU patch reports
+        # as failures under set -e.
+        if grep -q 'ntsync' drivers/misc/Makefile 2>/dev/null; then
+          echo "Base kernel already carries NTSYNC; skipping patches"
+          grep -q 'CONFIG_NTSYNC=y' arch/arm64/configs/gki_defconfig || \
+            echo 'CONFIG_NTSYNC=y' >> arch/arm64/configs/gki_defconfig
+          echo "✅ NTSync present"
+          echo "::endgroup::"
+        else
         echo "Patching $(basename $NTSYNC_PATCH)!"
         patch -p1 --forward < "$NTSYNC_PATCH"
         echo "Patching ntsync_base!"
@@ -1573,6 +1774,7 @@ runs:
         EOF
         echo "✅ NTSync patch applied"
         echo "::endgroup::"
+        fi
 
     - name: Apply Unicode Fix Patch
       shell: bash
@@ -1586,9 +1788,11 @@ runs:
 
         echo "Patching unicode!"
         if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1-.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1-.patch" || \
+              echo "::warning::unicode 6.1- patch skipped (already applied or inapplicable)"
         else
-            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch"
+            patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch" || \
+              echo "::warning::unicode 6.1+ patch skipped (already applied or inapplicable)"
         fi
 
     - name: Add Tmpfs Support
@@ -1623,7 +1827,16 @@ runs:
         CONFIG_TCP_CONG_ADVANCED=y
         CONFIG_TCP_CONG_BBR3=y
         EOF
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch"
+        # The Hipuu fork already carries the BBRv3 backport; applying the
+        # external patch on top only produces reject noise ("tcp_bbr3.c
+        # already exists", reversed hunks). Skip it when the fork ships it;
+        # stock OnePlusOSS bases (no tcp_bbr3.c) still get the full backport.
+        if [ -f net/ipv4/tcp_bbr3.c ]; then
+          echo "ℹ️ BBRv3 already present in this base; skipping backport patch"
+        else
+          patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/bbrv3/0001-net-tcp-backport-BBRv3-to-$ANDROID_VER-$KERNEL_VER.patch" || \
+            echo "::warning::BBRv3 backport skipped (already applied or inapplicable)"
+        fi
 
         if [ "${{ env.ANDROID_VER }}" = "android12" ] && [ "${{ env.KERNEL_VER }}" = "5.10" ]; then
           if ! grep -qF 'int proc_dou8vec_minmax(' ./include/linux/sysctl.h; then
@@ -1640,12 +1853,22 @@ runs:
       run: |
         set -euo pipefail
         echo "Enable Important Net Schedulers (qdisc)"
+        # DEFAULT_FQ: BBR-family congestion control requires pacing; without
+        # fq as the default qdisc each socket spins its own high-res pacing
+        # timer instead of sharing one. Both bases build FQ but leave the
+        # default as pfifo_fast (net/sched/Kconfig choice default).
+        # NET_SCH_DEFAULT must be set for the choice to exist at all: the
+        # DEFAULT_* choice members live under "if NET_SCH_DEFAULT", so a
+        # bare CONFIG_DEFAULT_FQ=y is silently dropped by olddefconfig
+        # otherwise (run 33361889651's defconfig assert caught exactly that).
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_NET_SCH_DEFAULT=y
         CONFIG_NET_SCH_FQ=y
         CONFIG_NET_SCH_FQ_CODEL=y
         CONFIG_NET_SCH_CAKE=y
         CONFIG_NET_SCH_PIE=y
         CONFIG_NET_SCH_FQ_PIE=y
+        CONFIG_DEFAULT_FQ=y
         EOF
 
     - name: Add TTL Target Support
@@ -1762,6 +1985,134 @@ runs:
         fi
 
         echo "✅ Droidspaces Support applied"
+        echo "::endgroup::"
+
+    # Performance stack extras (feat/perf-stack). Sources are pinned by
+    # commit so rebuilds stay reproducible:
+    # - ADIOS I/O scheduler: Hipuu/build_oneplus_sm8750 @ 805b38e4
+    # - zram lz4 1.10.0 / zstd 1.5.7 backports: cctv18/oppo_oplus_realme_sm8750 @ 21db9e7d
+    # - Re-Kernel freeze-notification LKM: Sakion-Team/Re-Kernel @ 6baf1a58
+    #
+    # Conflict notes vs the other tree mutations in this build:
+    # - ADIOS touches block/{Kconfig,Makefile} + new block/adios.c; the
+    #   kernel-fork series does not modify block/ Kconfig/Makefile.
+    # - Re-Kernel adds drivers/rekernel/ and appends one line each to
+    #   drivers/Kconfig and drivers/Makefile; nothing else writes those.
+    # - zram patches touch lib/lz4 and lib/zstd only; the fork's mm/uksm,
+    #   MGLRU and BPF work lives elsewhere. The fork's "zram tracking"
+    #   defconfig commit is config-level, orthogonal to these code patches.
+    - name: Add ADIOS I/O scheduler
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add ADIOS I/O scheduler"
+        cd "$COMMON_KERNEL_FOLDER"
+        if [ -f block/adios.c ]; then
+          echo "ADIOS already present, skipping"
+        else
+          # $RUNNER_TEMP rather than /tmp: concurrent matrix jobs on one
+          # self-hosted host share /tmp and would clobber each other's patch.
+          ADIOS_PATCH="$RUNNER_TEMP/adios.patch"
+          curl --fail --show-error --location --proto '=https' \
+            "https://raw.githubusercontent.com/Hipuu/build_oneplus_sm8750/805b38e473e98cb2cbe02aa15186cd7bf31fd84e/patch/adios_ioscheduler_6.6.patch" \
+            -o "$ADIOS_PATCH"
+          if ! patch -p1 --ignore-whitespace -F 3 < "$ADIOS_PATCH"; then
+            echo "::warning::ADIOS patch needed fuzz fallback; retrying with force"
+            patch -p1 --force --ignore-whitespace < "$ADIOS_PATCH"
+          fi
+          rm -f "$ADIOS_PATCH"
+          grep -q 'CONFIG_MQ_IOSCHED_ADIOS' arch/arm64/configs/gki_defconfig || \
+            {
+              echo 'CONFIG_MQ_IOSCHED_ADIOS=y'
+              echo 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y'
+            } >> arch/arm64/configs/gki_defconfig
+          test -f block/adios.c || { echo "::error::ADIOS patch applied but block/adios.c missing"; exit 1; }
+          echo "✅ ADIOS I/O scheduler applied"
+        fi
+        echo "::endgroup::"
+
+    - name: Apply zram lz4/zstd backports
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply zram lz4/zstd backports"
+        cd "$COMMON_KERNEL_FOLDER"
+        BASE="https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/21db9e7d547ca625bd5aa734fb5dfc8b94ea48ef/zram_patch"
+        # The Hipuu common fork already ships both backports (lib/lz4/lz4.c,
+        # lib/zstd/common/allocations.h), so on that base every hunk reports
+        # "Reversed (or previously applied)" and the old step printed pure-noise
+        # warnings. Detect the fork-shipped state up front and skip the whole
+        # download+patch.
+        # The stock OnePlusOSS bases, meanwhile, LACK the fs/f2fs/lz4armv8/
+        # sources this patch renames into lib/lz4/lz4armv8/. There the rename
+        # hunks fail, but the include/linux/lz4.h hunk succeeds, leaving lz4.h
+        # including a directory that was never created — the build dies at
+        # "'lz4armv8/lz4accel.h' file not found" (run 33286475512). So the
+        # backport is only applicable when the source layout it expects
+        # exists; otherwise keep the base's stock lz4/zstd, which builds fine.
+        if [ -f lib/lz4/lz4.c ] && [ -f lib/zstd/common/allocations.h ]; then
+          echo "ℹ️ zram lz4/zstd backports already present in this base; skipping"
+          echo "✅ zram lz4/zstd backports applied"
+          echo "::endgroup::"
+          exit 0
+        fi
+        if [ ! -d fs/f2fs/lz4armv8 ] || [ ! -f fs/f2fs/lz4armv8/lz4accel.c ]; then
+          echo "ℹ️ base lacks fs/f2fs/lz4armv8 (patch's rename source); keeping stock lz4/zstd"
+          echo "✅ zram lz4/zstd backports applied"
+          echo "::endgroup::"
+          exit 0
+        fi
+        LZ4_PATCH="$RUNNER_TEMP/001-lz4.patch"
+        ZSTD_PATCH="$RUNNER_TEMP/002-zstd.patch"
+        curl --fail --show-error --location --proto '=https' "$BASE/001-lz4.patch" -o "$LZ4_PATCH"
+        curl --fail --show-error --location --proto '=https' "$BASE/002-zstd.patch" -o "$ZSTD_PATCH"
+        curl --fail --show-error --location --proto '=https' "$BASE/lz4armv8.S" -o lib/lz4armv8.S
+        # Upstream applies these tolerantly (|| true); keep the same
+        # leniency but surface what happened instead of failing the build
+        # on an already-applied hunk.
+        if ! patch -p1 -F 3 < "$LZ4_PATCH"; then
+          echo "::warning::lz4 backport reported rejects (possibly already applied)"
+        fi
+        if ! patch -p1 -F 3 < "$ZSTD_PATCH"; then
+          echo "::warning::zstd backport reported rejects (possibly already applied)"
+        fi
+        rm -f "$LZ4_PATCH" "$ZSTD_PATCH"
+        test -f lib/lz4armv8.S
+        echo "✅ zram lz4/zstd backports applied"
+        echo "::endgroup::"
+
+    - name: Add Re-Kernel support
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Add Re-Kernel support"
+        cd "$COMMON_KERNEL_FOLDER"
+        RE_SHA=6baf1a58f55ffbc7d8ceb98f5a8877ff6ccd522e
+        if [ ! -f "$GITHUB_WORKSPACE/Re-Kernel/LKM-Source/rekernel.h" ]; then
+          retry_clone_re() {
+            for i in 1 2 3; do
+              git clone --depth 1 "https://github.com/Sakion-Team/Re-Kernel.git" \
+                "$GITHUB_WORKSPACE/Re-Kernel" && return 0
+              echo "clone attempt $i failed"; sleep 5
+            done
+            return 1
+          }
+          retry_clone_re
+        fi
+        RE_DIR="$GITHUB_WORKSPACE/Re-Kernel/LKM-Source"
+        grep -q 'source "drivers/rekernel/Kconfig"' drivers/Kconfig || \
+          sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' drivers/Kconfig
+        grep -q 'obj-$(CONFIG_REKERNEL)' drivers/Makefile || \
+          printf '\n# Re-Kernel\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> drivers/Makefile
+        mkdir -p drivers/rekernel
+        cp "$RE_DIR"/* drivers/rekernel/
+        # Re-Kernel v11+ is version-agnostic: no KERNEL_x_y gate to uncomment.
+        grep -q 'CONFIG_REKERNEL=' arch/arm64/configs/gki_defconfig || \
+          {
+            echo 'CONFIG_REKERNEL=m'
+            echo 'CONFIG_REKERNEL_NETWORK=y'
+          } >> arch/arm64/configs/gki_defconfig
+        echo "✅ Re-Kernel wired into drivers/rekernel"
         echo "::endgroup::"
 
     # Nethunter support, ported from nullptr-t-oss/EmberHeart_OnePlus11
@@ -2182,6 +2533,23 @@ runs:
       run: |
         set -euo pipefail
         echo "Add Build based configs"
+        # UKSM (Hipuu fork): the choice/int symbols have no defaults, so any
+        # config evaluation that sees them as (NEW) — e.g. kleaf's syncconfig
+        # after merging vendor fragments — prompts interactively. Under CI
+        # (stdin at EOF) conf enters an error-retry loop at 100% CPU that
+        # looks like a hung "Creating kernel config" action (runs 33255886913
+        # and 33294720160 both burned 20+ min in it). Pin the choice and the
+        # int values explicitly so nothing is ever (NEW); 4 = the "android"
+        # UKSM governor. Bases without the UKSM Kconfig ignore these lines.
+        if grep -q "config UKSM" "$COMMON_KERNEL_FOLDER/mm/Kconfig"; then
+          cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_KSM=y
+        CONFIG_UKSM=y
+        CONFIG_KSM_LEGACY=n
+        CONFIG_UKSM_CPU_GOVERNOR=4
+        CONFIG_UKSM_SLEEP_MS=100
+        EOF
+        fi
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
         CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n
@@ -2189,6 +2557,7 @@ runs:
         CONFIG_FRAME_WARN=0
         CONFIG_TRACEPOINTS=y
         CONFIG_LRU_GEN_ENABLED=y
+        CONFIG_SCHED_CLUSTER=y
         EOF
 
     - name: Add RUST build configs
@@ -2377,13 +2746,13 @@ runs:
         # Track the fuzz level that actually applies: the real apply below must
         # reuse it, not blindly retry --fuzz=3 after that level already failed.
         APPLY_FUZZ=3
-        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun.log 2>&1; then
+        if ! patch -p1 --fuzz=3 --dry-run < "$QCACLD_PATCH" > "$RUNNER_TEMP/inject_dryrun.log" 2>&1; then
           echo "::error::monitor injection patch does not apply to this qcacld revision"
-          cat /tmp/inject_dryrun.log | head -50 || true
+          cat "$RUNNER_TEMP/inject_dryrun.log" | head -50 || true
           # Try with more fuzz as a last resort
-          if ! patch -p1 --fuzz=10 --dry-run < "$QCACLD_PATCH" > /tmp/inject_dryrun2.log 2>&1; then
+          if ! patch -p1 --fuzz=10 --dry-run < "$QCACLD_PATCH" > "$RUNNER_TEMP/inject_dryrun2.log" 2>&1; then
             echo "::error::patch also fails with fuzz=10"
-            cat /tmp/inject_dryrun2.log | head -50 || true
+            cat "$RUNNER_TEMP/inject_dryrun2.log" | head -50 || true
             exit 1
           fi
           echo "::warning::patch applies with fuzz=10 but not fuzz=3"
@@ -2458,6 +2827,28 @@ runs:
         BAZEL_BIN="$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel"
         HERMETIC_PYTHON="$KERNEL_PLATFORM_FOLDER/prebuilts/build-tools/path/linux-x86/python3"
 
+        # SUBLEVEL sync: the Hipuu common fork is a 6.6.142 tree while the
+        # pinned OnePlusOSS msm-kernel is 6.6.118 (no 6.6.142 msm-kernel
+        # exists upstream — verified across all OSS branches and forks).
+        # Kleaf detects the skew but only warns and then renames the staging
+        # dir to the base kernel's release, so every vendor/DDK module ships
+        # with 6.6.118 vermagic next to a 6.6.142 Image (caught 11 minutes
+        # later by the packaging vermagic guard — run 33305088242). Align the
+        # vendor tree's SUBLEVEL to the common fork instead: KMI identity is
+        # android15-8 either way, and vendor modules link against common's
+        # Module.symvers, so this is branding, not ABI.
+        COMMON_SUBLEVEL=$(sed -n 's/^SUBLEVEL = //p' "$COMMON_KERNEL_FOLDER/Makefile" | head -1)
+        MSM_SUBLEVEL=$(sed -n 's/^SUBLEVEL = //p' "$MSM_KERNEL_FOLDER/Makefile" | head -1)
+        if [ -n "$COMMON_SUBLEVEL" ] && [ -n "$MSM_SUBLEVEL" ] \
+           && [ "$COMMON_SUBLEVEL" != "$MSM_SUBLEVEL" ]; then
+          echo "ℹ️ Syncing msm-kernel SUBLEVEL $MSM_SUBLEVEL -> $COMMON_SUBLEVEL (common fork is 6.6.$COMMON_SUBLEVEL)"
+          sed -i "s/^SUBLEVEL = .*/SUBLEVEL = $COMMON_SUBLEVEL/" "$MSM_KERNEL_FOLDER/Makefile"
+          grep -q "^SUBLEVEL = $COMMON_SUBLEVEL$" "$MSM_KERNEL_FOLDER/Makefile" || {
+            echo "::error::failed to set msm-kernel SUBLEVEL to $COMMON_SUBLEVEL"
+            exit 1
+          }
+        fi
+
         MISSING=0
         for f in "$BAZEL_LAUNCHER" "$BAZEL_BIN" "$HERMETIC_PYTHON" \
                  "$KERNEL_PLATFORM_FOLDER/MODULE.bazel" \
@@ -2468,6 +2859,16 @@ runs:
             MISSING=1
           fi
         done
+
+        # feat/perf-stack: enumerate this Bazel's startup flags so the heap
+        # size can be set with the supported flag (older Bazel doesn't
+        # recognize --host_jvm_args/--host_jvm_size). The grep is
+        # deliberately narrow to print only the heap-related lines.
+        echo "::group::Bazel startup-flag support"
+        "$BAZEL_BIN" --help_startup 2>&1 | grep -E '^\s*--(host_jvm|jvm|memory)' | head -20 || true
+        echo "::endgroup::"
+        # Reduce silent guessing churn: emit the version too.
+        "$BAZEL_BIN" --version 2>&1 | head -3
 
         # MODULE.bazel names each of these with local_path_override /
         # new_kleaf_local_repository, so a missing one is a load-phase failure
@@ -2580,8 +2981,34 @@ runs:
         {
           echo ""
           echo "# --- appended by Prepare Bazel/DDK build ---"
-          echo "build --jobs=$(nproc --all)"
+          # Cap --jobs to the cgroup CPU quota: nproc reports the host's
+          # cores, but container/VM runners (ezycloudx etc.) are often
+          # quota-limited below that. Oversubscribing the quota makes the
+          # 500+ action burst after analysis starve the long single-threaded
+          # config action (observed 23+ min for //common:kernel_aarch64_
+          # config while the sibling sun_perf_config took ~8 s).
+          if [ -r /sys/fs/cgroup/cpu.max ]; then
+            read -r CG_QUOTA CG_PERIOD < /sys/fs/cgroup/cpu.max
+            if [ "$CG_QUOTA" = "max" ]; then
+              CG_CPUS=$(nproc)
+            else
+              CG_CPUS=$(( (CG_QUOTA + CG_PERIOD - 1) / CG_PERIOD ))
+              [ "$CG_CPUS" -gt "$(nproc)" ] && CG_CPUS=$(nproc)
+              [ "$CG_CPUS" -lt 1 ] && CG_CPUS=1
+            fi
+          else
+            CG_CPUS=$(nproc)
+          fi
+          echo "build --jobs=$CG_CPUS"
           echo "build --disk_cache=$BAZEL_DISK_CACHE"
+          # feat/perf-stack: Hipuu's kernel fork carries a much larger
+          # bazel analysis graph; the default host heap is OOM-killed
+          # mid-load (Bazel 7.1.1 per startup-flag dump). The kleaf wrapper
+          # Fortran config swallowed --host_jvm_args even under `common`
+          # (Bazel printed "Inherited 'common' options: --host_jvm_args=-Xmx12g"
+          # then immediately rejected it as Unrecognized option), so set the
+          # heap via JAVA_TOOL_OPTIONS — the embedded JVM reads it before
+          # parsing any Bazel args.
           case "${{ env.OP_LTO }}" in
             none|thin|full) echo "build --lto=${{ env.OP_LTO }}" ;;
             *) echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}" >&2; exit 1 ;;
@@ -2655,6 +3082,61 @@ runs:
         # output sets. Image (common) and modules_staging_dir*.tar.gz (the
         # vendor kernel) are harvested by later steps via bazel-bin; without
         # this they stay cache-side and staging fails with "No kernel Image".
+        # feat/perf-stack: the Hipuu kernel fork has a much larger bazel
+        # analysis graph than the OnePlusOSS base; the default host heap
+        # is OOM-killed mid-load. The correct heap-size startup flag
+        # varies by Bazel version; the right name is printed in the
+        # 'Bazel startup-flag support' dump just above. Re-add here once
+        # identified. Use JAVA_TOOL_OPTIONS=-Xmx<size> so the embedded
+        # Heap-size workaround lives in a separate prep step; Bazel 7.1.1
+        # rejects all heap startup flags. The only env that survives
+        # its whitelist is BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE (a percent
+        # of total host RAM). qcacld-3.0's wlan_qcacld3_modules.bzl
+        # generates 2000+ targets and Hipuu's kernel fork adds several
+        # hundred more on top; 75% (12GB on a 16GB runner) was still
+        # OOM-killed at the loading step.
+        #
+        # The percentage is computed, not hard-coded, because this action now
+        # also runs on self-hosted runners with 32-64GB+ of RAM. A flat 95%
+        # there would hand the JVM ~60GB and leave the OS, the Clang
+        # subprocesses and the linker fighting over the remaining ~3GB —
+        # Bazel's analysis graph does not need more than ~24GB even for the
+        # fork. So: take 95% of host RAM, clamp to a 24GB ceiling, and convert
+        # back to the percentage the env var expects.
+        MEM_TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+        MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))
+        HEAP_CEILING_MB=24576
+        # Leave 6GB for the OS, the 4 clang jobs, the bazel client and the
+        # runner: on a 16GB hosted box the old 95% (~15.5GB) put the JVM
+        # at ~17GB RSS and OOM-killed the run even with the 16GB swap
+        # (33037783258 'lost communication' at 95 min). On big self-hosted
+        # hosts the 24GB ceiling still applies.
+        HEAP_FLOOR_MB=8192
+        HEAP_TARGET_MB=$(( MEM_TOTAL_MB - 6144 ))
+        if [ "$HEAP_TARGET_MB" -gt "$HEAP_CEILING_MB" ]; then
+          HEAP_TARGET_MB=$HEAP_CEILING_MB
+        fi
+        if [ "$HEAP_TARGET_MB" -lt "$HEAP_FLOOR_MB" ]; then
+          HEAP_TARGET_MB=$HEAP_FLOOR_MB
+        fi
+        HEAP_PCT=$(( HEAP_TARGET_MB * 100 / MEM_TOTAL_MB ))
+        [ "$HEAP_PCT" -lt 1 ] && HEAP_PCT=1
+        [ "$HEAP_PCT" -gt 95 ] && HEAP_PCT=95
+        echo "Host RAM: ${MEM_TOTAL_MB}MB; Bazel server heap target: ${HEAP_TARGET_MB}MB (${HEAP_PCT}%)"
+        export BAZEL_JVM_HEAP_SIZE_MAX_PERCENTAGE=$HEAP_PCT
+        # Build the GKI config target alone first: it is the dependency-
+        # root of everything else (Image, modules_prepare, the DDK module),
+        # so when the common tree moves to a new revision this one action
+        # is the whole cold-cache cost. Building it separately (1) makes
+        # its wall time visible as its own step in the Actions log instead
+        # of a frozen "[576 / 593]" line, (2) persists its output to the
+        # disk cache even if the full build below is cancelled, and (3) is
+        # trivially retryable on self-hosted hosts without redoing analysis.
+        if ! ./tools/bazel build "//common:kernel_aarch64_config" 2>&1 | tee "$DDK_BUILD_LOG"; then
+          echo "::error::Bazel config build failed; tail of ddk-build.log:"
+          tail -n 300 "$DDK_BUILD_LOG" || true
+          exit 1
+        fi
         if ! ./tools/bazel build \
           --output_groups=+modules_staging_archive,+.config \
           "$DDK_KERNEL_TARGET" \
@@ -2843,11 +3325,14 @@ runs:
         fi
 
         # Re-run depmod so the DDK module appears in modules.dep; the ZIP step
-        # resolves its dependency closure from that file. A failed depmod must
-        # be visible: silently shipping the archive's stale modules.dep would
-        # drop the swept external modules from the ZIP closure.
+        # resolves its dependency closure from that file. A failed depmod
+        # must be visible: silently shipping the archive's stale modules.dep
+        # would drop the swept external modules from the ZIP closure, and
+        # the ZIP step's "absent → re-run depmod" fallback would not trigger.
+        # Remove the stale map on failure so the ZIP step hard-fails instead.
         if ! depmod -b "$OUT/install" "$(basename "$UNAME_DIR")"; then
-          echo "::warning::depmod failed; modules.dep may be stale for $(basename "$UNAME_DIR")"
+          echo "::warning::depmod failed; removing stale modules.dep.* for $(basename "$UNAME_DIR")"
+          rm -f "$OUT/install/lib/modules/$(basename "$UNAME_DIR")"/modules.dep.*
         fi
 
         # Fail early if AR9271 stack was requested but Kleaf dropped the kos
@@ -2918,6 +3403,25 @@ runs:
         if [ "$OP_SUSFS" = "true" ]; then
           assert_config "CONFIG_KSU_SUSFS=y"
         fi
+        # UKSM: the pinned KSM/UKSM values exist so kleaf's syncconfig never
+        # sees a (NEW) symbol — an unset UKSM reintroduces the interactive
+        # prompt loop that hung "Creating kernel config" for 20+ min (the
+        # ints have no Kconfig defaults, so a dropped KSM selection makes
+        # them NEW again). Assert the choice survived the vendor-fragment
+        # merge instead of assuming it did.
+        if grep -q "config UKSM" "$COMMON_KERNEL_FOLDER/mm/Kconfig"; then
+          assert_config "CONFIG_UKSM=y"
+          assert_config "CONFIG_UKSM_CPU_GOVERNOR=4"
+          assert_config "CONFIG_UKSM_SLEEP_MS=100"
+        fi
+        # Battery round: FQ (BBR pacing) and SCHED_CLUSTER are appended for
+        # every variant, but the DDK vendor-fragment merge can drop symbols;
+        # assert both survived so a silent drop fails here, not on-device.
+        # DEFAULT_FQ additionally needs NET_SCH_DEFAULT=y (appended in the
+        # qdisc step) — without that gate the choice member is not visible
+        # and kconfig discards the line before the merge even runs.
+        assert_config "CONFIG_DEFAULT_FQ=y"
+        assert_config "CONFIG_SCHED_CLUSTER=y"
         if [ "$OP_NTSYNC" = "true" ]; then
           assert_config "CONFIG_NTSYNC=y"
         fi
@@ -2934,13 +3438,31 @@ runs:
         [ "$FAILED" -eq 0 ] || exit 1
         echo "✅ defconfig assertions passed"
 
+        # MGLRU working-set patch: min_ttl must be non-zero in the source the
+        # Image was built from (the battery patch sets it to 1000 ms; both
+        # bases ship 0). A skipped/failed patch means no working-set
+        # protection on device — fail here rather than ship silent default.
+        if grep -q "lru_gen_min_ttl" "$COMMON_KERNEL_FOLDER/mm/vmscan.c" \
+           && ! grep -q "lru_gen_min_ttl __read_mostly = HZ;" "$COMMON_KERNEL_FOLDER/mm/vmscan.c"; then
+          echo "::error::MGLRU min_ttl patch not in effect (working-set protection missing)"
+          exit 1
+        fi
+
         # Compare the shipped artifacts, not a config file. The previous check
         # read GKI's .config, found the branding, and passed -- while the vendor
         # modules had been built from msm-kernel's own defconfig and carried a
         # different vermagic (run 31045666257). A module whose vermagic differs
         # from the kernel is refused at load, so this is the check that matters.
+        # KREL comes from the Image itself, not the staging dir name: Kleaf
+        # rewrites kernel.release to the base kernel's value on sublevel skew,
+        # so the directory name can lie about what the Image actually is
+        # (run 33305088242).
         IMG="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
-        KREL="$(basename "$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+        KREL="$(tr -d '\0' < "$IMG" | grep -ao 'Linux version [^ ]*' | head -1 | cut -d' ' -f3)"
+        if [ -z "$KREL" ]; then
+          echo "::error::cannot read kernel release from $IMG"
+          exit 1
+        fi
         MISMATCH=0
         KO_CHECK="qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_') cfg80211 mac80211"
         if [ "${OP_WIRELESS_MODULES:-false}" = "true" ] && [ "${OP_NETHUNTER:-false}" = "true" ]; then
@@ -2964,6 +3486,34 @@ runs:
         [ "$MISMATCH" -eq 0 ] || exit 1
         echo "✅ Image and modules agree on $KREL"
         echo "::endgroup::"
+
+    - name: Prepare ThinLTO cache dir
+      if: ${{ env.OP_DDK != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ThinLTO backend artifacts (imported bitcode + codegen output) live in a
+        # cache dir passed to ld.lld via --thinlto-cache-dir. Persisting it across
+        # runs skips re-importing/re-optimizing unchanged modules on the next link.
+        LDCACHE_DIR="$GITHUB_WORKSPACE/ldcache_${KERNEL_FULL_VER}"
+        mkdir -p "$LDCACHE_DIR"
+        echo "LDCACHE_DIR=$LDCACHE_DIR" >> "$GITHUB_ENV"
+        echo "ThinLTO cache dir: $LDCACHE_DIR"
+
+    - name: Restore ThinLTO cache
+      uses: ./.github/actions/cache/restore
+      # Release-backed mirror of the ccache restore, but only meaningful for
+      # thin LTO (full/none either don't emit backend caches or don't benefit).
+      # DDK/Kleaf path never goes through ld-wrapper, so gate it to make-based.
+      if: ${{ env.OP_DDK != 'true' && env.OP_LTO == 'thin' && (inputs.clean == false || inputs.clean == 'false') }}
+      with:
+        cache_path: ${{ env.LDCACHE_DIR }}
+        cache_key: lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-thin
+        cache_bucket: "lto-cache"
+        debug: ${{ inputs.debug }}
+        restore_keys: |
+          lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
 
     - name: Build Kernel
       id: build_kernel_step
@@ -3005,12 +3555,14 @@ runs:
         set -u
 
         # ld-wrapper is only needed for thin LTO to spread work across cores
+        # and to persist the backend cache across runs. nproc/2 keeps the
+        # memory-hungry ThinLTO backend from OOMing on shared runners.
         if [ "${{ env.OP_LTO }}" = "thin" ]; then
           echo '#!/bin/bash' > "$COMMON_KERNEL_FOLDER/ld-wrapper"
-          echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
+          echo "ld.lld \"\$@\" --thinlto-cache-dir=${LDCACHE_DIR} --thinlto-jobs=\$(( $(nproc --all) / 2 ))" >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
           chmod +x "$COMMON_KERNEL_FOLDER/ld-wrapper"
           LD_CMD="$COMMON_KERNEL_FOLDER/ld-wrapper"
-          echo "Using ld-wrapper for thin LTO"
+          echo "Using ld-wrapper for thin LTO (cache=$LDCACHE_DIR, jobs=$(nproc --all)/2)"
         else
           LD_CMD="ld.lld"
           echo "Using ld.lld directly (LTO=${{ env.OP_LTO }})"
@@ -3375,7 +3927,7 @@ runs:
         if ! zip -r9 "$ZIP_NAME" ./* \
              -x "*.git*" \
              -x "$ZIP_NAME" \
-             -x "README.md" 2>&1 | tee /tmp/zip.log; then
+             -x "README.md" 2>&1 | tee "$RUNNER_TEMP/zip.log"; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
@@ -3476,17 +4028,46 @@ runs:
           exit 1
         fi
 
-        # Close the seed set over modules.dep. Each line is
-        #   kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/rfkill.ko ...
-        WANTED=$(awk -v seeds="$SEEDS" '
+        # depmod's modules.dep is not a trustworthy closure source: on the DDK
+        # tree it dropped the rtl8187 -> eeprom_93cx6 edge even though kbuild
+        # recorded "depends=eeprom_93cx6" in the module itself, so rtl8187.ko
+        # shipped without its dependency and failed to insmod on-device with
+        # "Unknown symbol eeprom_93cx6_read". The authoritative record is the
+        # modules' own .modinfo depends= line, so resolve the closure from
+        # modinfo instead and use modules.dep only as a sanity reference.
+        MODINFO_BIN=""
+        for cand in "${CLANG_BIN_PATH:-}/llvm-modinfo" "$(command -v modinfo || true)"; do
+          [ -n "$cand" ] && [ -x "$cand" ] && MODINFO_BIN="$cand" && break
+        done
+        [ -n "$MODINFO_BIN" ] || MODINFO_BIN=modinfo
+        DEP_MAP="$RUNNER_TEMP/modinfo-deps.txt"
+        : > "$DEP_MAP"
+        while IFS= read -r ko; do
+          [ -n "$ko" ] || continue
+          deps=$("$MODINFO_BIN" -F depends "$ko" 2>/dev/null | tr ',' ' ')
+          printf '%s: %s\n' "$(basename "$ko" .ko)" "$deps" >> "$DEP_MAP"
+        done < <(find "$UNAME_DIR" -type f -name '*.ko')
+        # The install tree holds duplicates (tar-staged + swept-flat copies of
+        # the same module); keep the first map entry per module name so the
+        # shipped modules.dep has exactly one line per staged module.
+        awk '!seen[$1]++' "$DEP_MAP" > "$DEP_MAP.dedup" && mv "$DEP_MAP.dedup" "$DEP_MAP"
+
+        # Close the seed set over the modinfo depends map. Each line is
+        #   <basename>: <dep-basename> ...
+        WANTED=$(awk -v seeds="$SEEDS" -v depmap="$DEP_MAP" '
           BEGIN {
             n = split(seeds, s, "\n")
-            for (i = 1; i <= n; i++) if (s[i] != "") want[s[i]] = 1
-          }
-          {
-            key = $1
-            sub(/:$/, "", key)
-            for (i = 2; i <= NF; i++) dep[key] = dep[key] " " $i
+            for (i = 1; i <= n; i++) {
+              p = s[i]; sub(/^.*\//, "", p); sub(/\.ko$/, "", p)
+              if (p != "") want[p] = 1
+            }
+            while ((getline line < depmap) > 0) {
+              key = line; sub(/:.*/, "", key)
+              rest = line; sub(/^[^:]*:[ ]?/, "", rest)
+              n2 = split(rest, d, " ")
+              for (i = 1; i <= n2; i++) if (d[i] != "") dep[key] = dep[key] " " d[i]
+            }
+            close(depmap)
           }
           END {
             changed = 1
@@ -3501,16 +4082,31 @@ runs:
               for (a in add) { want[a] = 1; changed = 1 }
             }
             for (m in want) print m
-          }' "$DEP_FILE" | sort)
+          }' | sort)
 
         STAGE=$(mktemp -d)
-        while IFS= read -r rel; do
-          [ -n "$rel" ] || continue
-          if [ -f "$UNAME_DIR/$rel" ]; then
-            cp -n -- "$UNAME_DIR/$rel" "$STAGE/"
+        # Modules the phone's vendor partition provides and loads at boot
+        # (/vendor/lib/modules: cnss*, ipam, rmnet_mem, ...). peach's modinfo
+        # depends= lists them, but depmod-based packs never shipped them and
+        # peach loads fine against the on-device copies, so a missing one is
+        # not a pack defect. On cold builds the sweep stages them anyway.
+        PLATFORM_PROVIDED="cnss2 cnss_nl cnss_utils cnss_prealloc cnss_plat_ipc_qmi_svc ipam rmnet_mem gsim smem-mailbox wlan_firmware_service"
+        while IFS= read -r mod; do
+          [ -n "$mod" ] || continue
+          hit="$(find "$UNAME_DIR" -type f -name "$mod.ko" -print -quit)"
+          if [ -n "$hit" ]; then
+            cp -n -- "$hit" "$STAGE/"
           else
-            echo "::error::modules.dep lists $rel but it is not in the install tree"
-            FAILED_DEPS=$((FAILED_DEPS+1))
+            provided=0
+            for p in $PLATFORM_PROVIDED; do
+              [ "$p" = "$mod" ] && provided=1
+            done
+            if [ "$provided" = 1 ]; then
+              echo "[INFO] closure wants $mod.ko: not staged; the vendor partition provides it at boot"
+            else
+              echo "::error::closure wants $mod.ko but it is not in the install tree"
+              FAILED_DEPS=$((FAILED_DEPS+1))
+            fi
           fi
         done <<< "$WANTED"
         if [ "${FAILED_DEPS:-0}" -gt 0 ]; then
@@ -3534,12 +4130,16 @@ runs:
         # The zoo is only built when nethunter is enabled alongside wireless
         # (see the module-config step's gating); a DDK build with
         # wireless_modules=true but nethunter=false ships peach + cfg/mac only.
+        # eeprom_93cx6 is the canary for the depmod-closure gap that shipped
+        # rtl8187.ko without its dependency (the pack now closes over
+        # modinfo depends= instead, but keep the canary so a regression
+        # fails here loudly instead of on-device).
         if [ "$OP_DDK" = "true" ] && [ "${OP_NETHUNTER:-false}" = "true" ]; then
           # peach + vendor cfg/mac (CRC pair) + the external-driver zoo built
           # on msm-kernel against that same mac80211.
           for m in "qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_')" cfg80211 mac80211 \
                    ath9k_htc ath9k_hw ath9k_common ath \
-                   carl9170 rtl8xxxu rt2800usb zd1211rw p54usb mt7921u; do
+                   carl9170 rtl8xxxu rt2800usb zd1211rw p54usb mt7921u eeprom_93cx6; do
             [ -n "$(find "$STAGE" -name "$m.ko" -print -quit)" ] || missing="$missing $m.ko"
           done
         else
@@ -3552,35 +4152,38 @@ runs:
           exit 1
         fi
 
-        # Ship a flattened modules.dep next to the .ko files. The install-tree
-        # copy uses paths ("kernel/net/wireless/cfg80211.ko: kernel/net/rfkill/
-        # rfkill.ko"), but the ZIP is flat, so rewrite every entry to bare
-        # module names and keep only modules actually in the pack. This is what
-        # nethunter-wifi.sh walks to insmod a driver's dependencies in order.
-        awk '
+        # cc770_isa probes ISA I/O ports, which do not exist on arm64: insmod
+        # fails with EINVAL on every device (on-device test, run 33367477018's
+        # pack). Drop it rather than shipping a module that can never load;
+        # the cc770 core and platform variants stay.
+        if [ -f "$STAGE/cc770_isa.ko" ]; then
+          rm -f "$STAGE/cc770_isa.ko"
+          echo "Dropped cc770_isa.ko from the pack (ISA probing is impossible on arm64)"
+          # Recount: the modules.dep consistency check below compares the
+          # post-drop file count against post-drop dep lines.
+          MODULE_COUNT=$(find "$STAGE" -type f -name '*.ko' | wc -l)
+        fi
+
+        # Ship a flattened modules.dep next to the .ko files. The ZIP is flat,
+        # so every entry is rewritten to bare module names. Generate it from
+        # the modinfo depends map (same source as the closure) filtered to the
+        # staged set, NOT from depmod's modules.dep: the depmod file already
+        # proved lossy (it dropped the rtl8187 -> eeprom_93cx6 edge), and the
+        # loader walks this file to insmod dependencies in order.
+        # File 1 = staged basenames (populates have[]), file 2 = dep map.
+        awk -v depmap="$DEP_MAP" '
+          NR == FNR { key = $1; sub(/\.ko$/, "", key); have[key] = 1; next }
           {
             key = $1; sub(/:$/, "", key)
-            gsub(/^.*\//, "", key); sub(/\.ko$/, "", key)
+            if (!(key in have)) next
+            rest = $0; sub(/^[^:]*:[ ]?/, "", rest)
+            n = split(rest, d, " ")
             line = key ":"
-            for (i = 2; i <= NF; i++) {
-              d = $i
-              gsub(/^.*\//, "", d); sub(/\.ko$/, "", d)
-              line = line " " d
-            }
+            for (i = 1; i <= n; i++) if (d[i] != "" && d[i] in have) line = line " " d[i]
             print line
-          }' "$DEP_FILE" > "$STAGE/modules.dep.all"
-
-        awk 'NR == FNR { have[$1] = 1; next }
-             {
-               key = $1; sub(/:$/, "", key)
-               if (!(key in have)) next
-               line = key ":"
-               for (i = 2; i <= NF; i++) if ($i in have) line = line " " $i
-               print line
-             }' \
+          }' \
           <(cd "$STAGE" && find . -name '*.ko' -printf '%f\n' | sed 's/\.ko$//') \
-          "$STAGE/modules.dep.all" > "$STAGE/modules.dep"
-        rm -f "$STAGE/modules.dep.all"
+          "$DEP_MAP" > "$STAGE/modules.dep"
 
         DEP_LINES=$(wc -l < "$STAGE/modules.dep")
         echo "modules.dep entries: $DEP_LINES"
@@ -3833,11 +4436,34 @@ runs:
         working_dir: "./main-source"
         compression_level: 6
 
+    - name: Save ThinLTO cache
+      # Persist ld.lld's ThinLTO backend cache so the next run skips
+      # re-importing/re-optimizing unchanged modules during linking. Only thin
+      # LTO and the make-based path use ld-wrapper / the cache dir.
+      if: always() && steps.build_kernel_step.conclusion == 'success' && env.OP_LTO == 'thin'
+      uses: ./.github/actions/cache/save
+      with:
+        cache_path: ${{ env.LDCACHE_DIR }}
+        cache_key: lto-v1-${{ inputs.ksu_type }}-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}-thin
+        cache_bucket: "lto-cache"
+        debug: ${{ inputs.debug }}
+        github_token: ${{ inputs.github_token }}
+        working_dir: "./main-source"
+        compression_level: 6
+        delete_after_upload: true
+
     - name: Save Bazel disk cache
       # Mirror of the ccache save for the Kleaf/DDK path: --disk_cache keeps
       # action outputs keyed by content hash, so a warm cache turns the 44-min
-      # cold build into an incremental one on the next run.
-      if: always() && steps.build_ddk_step.conclusion == 'success'
+      # cold build into an incremental one on the next run. Saved even when
+      # the build fails or is cancelled: the cache key already versions by
+      # kernel revision, so partial progress (e.g. a completed config action
+      # on a new tree revision) is directly reusable and a later-step
+      # failure no longer throws away hours of compilation. Runs even when
+      # the job is cancelled mid-build (the most common outcome for the
+      # self-hosted DDK variant), because the split config build above has
+      # usually completed by then and is the expensive part to redo.
+      if: always() && steps.build_ddk_step.conclusion != 'skipped'
       uses: ./.github/actions/cache/save
       with:
         cache_path: ${{ env.BAZEL_DISK_CACHE }}

@@ -1,31 +1,45 @@
-From ece8be21d8c932ab2267191ae2ed664c79c8b6da Mon Sep 17 00:00:00 2001
+From d19ff16c11db38f3ee179d72751fb9b340174330 Mon Sep 17 00:00:00 2001
 From: Peter Zijlstra <peterz@infradead.org>
 Date: Tue, 24 Feb 2026 17:35:37 +0100
 Subject: [PATCH] hrtimer: Avoid pointless reprogramming in
  __hrtimer_start_range_ns()
 
-[ Upstream commit d19ff16c11db38f3ee179d72751fb9b340174330 ]
-
 Much like hrtimer_reprogram(), skip programming if the cpu_base is running
 the hrtimer interrupt.
 
+Scope note: 6.6.30 is the ONLY pinned base that still needs this patch.
+Every other tree already ends in the same behavior by other means: 6.6.66,
+6.6.89 (A15/A16/global) and 6.6.118 carry the newer upstream CSD-kick
+rework of this region (hrtimer_base_is_online + smp_call_function_single_
+async via hrtimer_base_csd) - a superset of this fix - and the Hipuu
+6.6.142 fork pre-ships the in_hrtirq early-return itself. action.yml
+therefore skips on either marker and applies this hunk with --fuzz=0.
+
+The hunk is anchored to 6.6.30's exact region with real trailing context
+(`if (!force_local)` / `return first;`) so the application is
+self-verifying: with --fuzz=0, line drift or a wrong base fails loudly
+instead of blindly inserting at the recorded line number. The first run
+of this file carried only a single context line, and 6.6.118's build
+wedged it into the middle of a stock comment at fuzz 1, failing to
+compile hrtimer.c (run 33361879790). Blank context lines carry an
+explicit space prefix: unprefixed empty lines are tolerated by GNU patch
+but rejected by this repo's hunk-count validator.
+
 Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
 Signed-off-by: Thomas Gleixner <tglx@kernel.org>
-Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
 Reviewed-by: Juri Lelli <juri.lelli@redhat.com>
 Reviewed-by: Thomas Gleixner <tglx@kernel.org>
 Link: https://patch.msgid.link/20260224163429.069535561@kernel.org
-Stable-dep-of: f2e388a019e4 ("hrtimer: Reduce trace noise in hrtimer_start()")
-Signed-off-by: Sasha Levin <sashal@kernel.org>
 ---
  kernel/time/hrtimer.c | 8 ++++++++
  1 file changed, 8 insertions(+)
 
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
-index 9f41327d3a6d6..3bc3111ca5317 100644
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
-@@ -1287,6 +1287,14 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -1261,6 +1261,14 @@
  	}
  
  	first = enqueue_hrtimer(timer, new_base, mode);
@@ -37,6 +51,6 @@ index 9f41327d3a6d6..3bc3111ca5317 100644
 +	if (new_base->cpu_base->in_hrtirq)
 +		return false;
 +
- 	if (!force_local) {
- 		/*
- 		 * If the current CPU base is online, then the timer is
+ 	if (!force_local)
+ 		return first;
+ 

@@ -1,5 +1,12 @@
 name: Build OnePlus 13 Kernel
 
+# Serialize self-hosted matrix jobs: they share one physical host and would
+# collide on /dev/shm, disk I/O, and RAM even with $RUNNER_TEMP isolation.
+# GitHub-hosted is unaffected — each matrix job gets its own VM.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -13,6 +20,7 @@ on:
         options:
           - 6.6.89 A16
           - 6.6.118 A16
+          - 6.6.142 A16
           - 6.6.66 A15
           - 6.6.30 A15
           - 6.6.89 CPH A15
@@ -53,12 +61,12 @@ on:
         type: boolean
         default: true
       ddk:
-        description: 'Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (6.6.118 A16 only; ignored elsewhere)'
+        description: 'Build with Bazel/Kleaf and produce the qcacld-3.0 DDK module (6.6.118/6.6.142 A16 only; ignored elsewhere)'
         required: false
         type: boolean
         default: true
       ddk_injection:
-        description: 'Patch qcacld for frame injection in monitor mode (experimental; requires ddk, so 6.6.118 A16 only)'
+        description: 'Patch qcacld for frame injection in monitor mode (experimental; requires ddk, so 6.6.118/6.6.142 A16 only)'
         required: false
         type: boolean
         default: true
@@ -121,6 +129,14 @@ on:
         required: true
         type: boolean
         default: false
+      runner:
+        description: 'Runner pool: github-hosted (ubuntu-latest, 16 GB) or self-hosted (needs ≥32 GB RAM for Bazel DDK builds)'
+        required: true
+        type: choice
+        options:
+          - github-hosted
+          - self-hosted
+        default: github-hosted
 
 jobs:
   plan:
@@ -128,6 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      runs_on: ${{ steps.plan.outputs.runs_on }}
     steps:
       - name: Checkout builder
         uses: actions/checkout@v6
@@ -149,6 +166,9 @@ jobs:
             "6.6.118 A16")
               CONFIGS='["configs/OP13-6.6.118.json"]'
               ;;
+            "6.6.142 A16")
+              CONFIGS='["configs/OP13-6.6.142.json"]'
+              ;;
             "6.6.66 A15")
               CONFIGS='["configs/OP13-6.6.66.json"]'
               ;;
@@ -162,7 +182,7 @@ jobs:
               CONFIGS='["configs/OP13-CPH-6.6.56.json"]'
               ;;
             "all")
-              CONFIGS='["configs/OP13-6.6.89.json","configs/OP13-6.6.118.json","configs/OP13-6.6.66.json","configs/OP13-6.6.30.json","configs/OP13-CPH-6.6.89.json","configs/OP13-CPH-6.6.56.json"]'
+              CONFIGS='["configs/OP13-6.6.89.json","configs/OP13-6.6.118.json","configs/OP13-6.6.142.json","configs/OP13-6.6.66.json","configs/OP13-6.6.30.json","configs/OP13-CPH-6.6.89.json","configs/OP13-CPH-6.6.56.json"]'
               ;;
             *)
               echo "::error::Unknown kernel_version choice: $CHOICE"
@@ -173,15 +193,54 @@ jobs:
           echo "matrix={\"config\":$CONFIGS}" >> "$GITHUB_OUTPUT"
           echo "Matrix: {\"config\":$CONFIGS}"
 
+          # Self-hosted runners must register with labels: self-hosted, linux, X64.
+          # The plan job always runs on GitHub-hosted (it's cheap), but it resolves
+          # the runner label once so every downstream job uses the same pool.
+          if [ "${{ inputs.runner }}" = "self-hosted" ]; then
+            echo 'runs_on=["self-hosted","linux","X64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: ${{ matrix.config }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
     needs: plan
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
+      - name: Clean workspace (self-hosted only)
+        if: ${{ inputs.runner == 'self-hosted' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Self-hosted runners persist $GITHUB_WORKSPACE across runs. Stale
+          # kernel sources, toolchains, or ccache dirs from a previous variant
+          # can poison the next build (wrong defconfig, leftover .o files,
+          # mismatched modules.dep). Wipe it so every run starts fresh; the
+          # release-backed ccache restore repopulates what matters.
+          echo "Self-hosted runner detected — cleaning workspace"
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          fi
+          # The build action sets global git config (feature.manyFiles,
+          # core.fsmonitor, pack.sparse) that leak between unrelated repos
+          # on a persistent host. Unset them so the next repo gets defaults.
+          for key in feature.manyFiles core.fsmonitor pack.sparse; do
+            git config --global --unset "$key" 2>/dev/null || true
+          done
+          # Bazel's output base ($HOME/.cache/bazel) grows unbounded across
+          # runs and lives outside the workspace, so the wipe above never
+          # touches it. Run 33241700491 died with ENOSPC exactly because of
+          # this. Prune output bases not touched in the last 7 days; the
+          # release-backed disk cache makes the content recoverable.
+          if [ -d "$HOME/.cache/bazel" ]; then
+            find "$HOME/.cache/bazel" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
       - name: Checkout builder
         uses: actions/checkout@v6
         with:
@@ -198,6 +257,41 @@ jobs:
             libxml2-utils rsync unzip dwarves file python3 python-is-python3 python3-requests \
             ccache jq bc dos2unix kmod libdw-dev elfutils pigz zstd
           sudo apt-get clean
+
+      - name: Check free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail fast with an actionable message instead of dying mid-build
+          # with ENOSPC (which also kills the runner's own log writer and
+          # produces an undebuggable run — see run 33241700491).
+          df -h
+          avail_kb=$(df -Pk "${GITHUB_WORKSPACE:-.}" | awk 'NR==2 {print $4}')
+          avail_gib=$((avail_kb / 1024 / 1024))
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            # Hosted VMs ship ~35-45 GiB free and that has been enough; only
+            # warn so a shrinking image never hard-breaks the default path.
+            if [ "$avail_gib" -lt 30 ]; then
+              echo "::warning::Only ${avail_gib} GiB free on hosted runner — builds have worked at this level, but watch for ENOSPC."
+            fi
+            exit 0
+          fi
+          # Self-hosted: thresholds are variant-aware. Non-DDK variants peak
+          # around 50 GiB (source + toolchain + ccache + outputs). The Bazel
+          # DDK variants (6.6.118/142) need ~150 GiB on top of that — a 100 GB disk
+          # physically cannot fit one, so reject it up front with the reason
+          # instead of burning an hour and dying in a cryptic ENOSPC.
+          if [ "$(jq -r '.ddk // false' "$GITHUB_WORKSPACE/${{ matrix.config }}")" = "true" ]; then
+            min_gib=150
+            hint="DDK variant needs ~150 GiB free (Bazel output base dominates). Expand the host volume or use a larger runner."
+          else
+            min_gib=50
+            hint="Prune on the host: ~/.cache/bazel, old _work dirs, docker leftovers."
+          fi
+          if [ "$avail_gib" -lt "$min_gib" ]; then
+            echo "::error::Only ${avail_gib} GiB free — need ${min_gib} GiB. ${hint}"
+            exit 1
+          fi
 
       - name: Configure ccache
         shell: bash
@@ -245,8 +339,8 @@ jobs:
 
           # The DDK inputs can only turn a variant's DDK build off, never on:
           # only manifests carrying the Kleaf/Bazel projects can build it, and
-          # only OP13-6.6.118 does today. Forcing it on elsewhere would fail
-          # during Bazel's load phase with a far less obvious error.
+          # only OP13-6.6.118/OP13-6.6.142 do today. Forcing it on elsewhere
+          # would fail during Bazel's load phase with a far less obvious error.
           config_ddk=$(jq -r '.ddk // false' "${{ matrix.config }}")
           if [ "$config_ddk" != "true" ]; then
             ddk=false
@@ -337,6 +431,7 @@ jobs:
         shell: bash
         env:
           SUSFS_BRANCH_INPUT: ${{ inputs.susfs_branch }}
+          KSU_VARIANT: ${{ inputs.ksu_variant }}
         run: |
           set -euo pipefail
           android_version=$(jq -r '.android_version' "${{ matrix.config }}")
@@ -355,8 +450,15 @@ jobs:
           # Prefer the last known-good commit for this GKI version so builds stay
           # green when upstream SUSFS introduces incompatible changes. The mapping
           # lives in .github/compatible-commits.json and can be updated whenever a
-          # newer compatible commit is verified.
-          compatible_commit=$(jq -r --arg key "$kernel_key" '.susfs[$key] // empty' .github/compatible-commits.json)
+          # newer compatible commit is verified. Pins are keyed by KSU variant:
+          # the susfs patch set must match the flavor it patches (KSU main is
+          # synced at v2.3.0; KSUN dev + WildKernels fix sets target v2.2.0).
+          # A plain-string pin is still honored for both variants.
+          compatible_commit=$(jq -r --arg key "$kernel_key" --arg variant "$KSU_VARIANT" '
+            .susfs[$key] as $pin |
+            if ($pin | type) == "object" then ($pin[$variant] // "")
+            elif ($pin | type) == "string" then $pin
+            else "" end' .github/compatible-commits.json)
           if [ -n "$SUSFS_BRANCH_INPUT" ]; then
             ref="$SUSFS_BRANCH_INPUT"
           elif [ -n "${compatible_commit:-}" ]; then
@@ -407,7 +509,12 @@ jobs:
 
   firmware:
     name: Nethunter Wireless Firmware
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    # `needs: plan` is mandatory, not ordering sugar: job outputs are only
+    # readable from jobs that declare the producer as a direct dependency.
+    # Without it `needs.plan.outputs.runs_on` is '' and fromJSON('') aborts
+    # the run before any step executes.
+    needs: plan
     if: ${{ inputs.wireless_modules }}
     steps:
       - name: Download latest Nethunter firmware
@@ -448,8 +555,11 @@ jobs:
 
   release:
     name: Create release
-    runs-on: ubuntu-latest
-    needs: [build, firmware]
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    # `plan` is listed explicitly even though build/firmware already depend on
+    # it: GitHub Actions does not surface outputs through transitive needs, so
+    # `needs.plan.outputs.runs_on` would be empty with only [build, firmware].
+    needs: [plan, build, firmware]
     if: ${{ inputs.release_type != 'none' && !cancelled() && needs.build.result == 'success' }}
     steps:
       # v8 is required, not v7: the build job uploads the ZIPs with

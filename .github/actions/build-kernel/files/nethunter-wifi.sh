@@ -33,9 +33,13 @@
 #   ./nethunter-wifi.sh list                list every driver in this pack
 #   ./nethunter-wifi.sh monitor [if] [ch]   put the adapter into monitor mode
 #   ./nethunter-wifi.sh managed [if]        undo monitor mode
-#   ./nethunter-wifi.sh conmode sta|monitor [ch]
+#   ./nethunter-wifi.sh conmode sta|monitor [ch] [--force]
 #                                           switch the *internal* Wi-Fi between
-#                                           normal and monitor (reloads qcacld)
+#                                           normal and monitor (reloads qcacld).
+#                                           Leaving monitor mode defaults to a
+#                                           reboot (in-place teardown has a
+#                                           kernel-panic class); --force opts
+#                                           into the risky in-place reload.
 #   ./nethunter-wifi.sh install [driver ...]  autoload at every boot (KernelSU)
 #   ./nethunter-wifi.sh uninstall           undo install
 #
@@ -58,13 +62,24 @@ INSTALL_DIR=/data/adb/nethunter-wifi
 # Modules the platform stack owns. Displacing these is what costs internal
 # Wi-Fi, so it happens only when a requested driver actually needs mac80211.
 #
-# DDK packs ship peach + vendor cfg/mac + ath9k_htc all CRC-matched together.
-# ath9k links against the same mac80211 peach uses, so only peach is unloaded
-# and the already-resident cfg/mac stay. Non-DDK packs ship a GKI cfg/mac pair
-# that must replace the platform pair (different CRCs).
-PLATFORM_MODULES_FULL="qca_cld3_peach_v2 mac80211 cfg80211"
-PLATFORM_MODULES_DDK="qca_cld3_peach_v2"
+# BOTH DDK and non-DDK packs replace the whole resident pair (peach +
+# mac80211 + cfg80211). The vendor mac80211 is built without
+# CONFIG_MAC80211_LEDS: its symbol table lacks
+# __ieee80211_create_tpt_led_trigger and __ieee80211_get_{tx,rx,assoc,radio}_
+# led_name, so every LED-using driver (ath9k_htc, mt76, rt2x00, rtl8187,
+# carl9170, p54, mac80211_hwsim) dies with "Unknown symbol" while the
+# resident pair stays (on-device test of run 33367477018's pack). The pack's
+# cfg/mac pair is CRC-matched against this Image, so peach reloads fine
+# against it and "restore" brings internal Wi-Fi back.
+WIFI_SWAP_MODULES="qca_cld3_peach_v2 mac80211 cfg80211"
 PLATFORM_DIR=/vendor/lib/modules
+# /system/lib/modules preloads an older CAN core whose can.ko lacks
+# can_sock_destruct, so pack can-raw can only load against the pack's
+# can.ko. Displace the platform CAN core -- and vcan/slcan, which pin
+# can-dev -- only when a requested driver actually needs it (can-raw is
+# the only known consumer of the missing export).
+CAN_SWAP_MODULES="can-gw can-bcm vcan slcan can-dev can"
+SYSTEM_MODULES_DIR=/system/lib/modules
 
 # The internal Qualcomm Wi-Fi driver. Its operating mode is fixed at insmod time
 # by the con_mode module parameter, which qcacld declares read-only in sysfs
@@ -211,28 +226,86 @@ load_closure() {
   return "$_rc"
 }
 
-# True if $1 needs mac80211, i.e. loading it displaces the platform stack.
-needs_mac80211() {
-  in_list mac80211 $(closure_of "$1")
-}
-
 wifi_cmd() { cmd wifi "$@" >/dev/null 2>&1; }
 
-# Modules to unload before loading an external mac80211 driver.
-platform_displace_list() {
-  if have_module qca_cld3_peach_v2; then
-    echo "$PLATFORM_MODULES_DDK"
-  else
-    echo "$PLATFORM_MODULES_FULL"
+# Fail safe on an already-hung firmware. Once the target has asserted
+# ("Received firmware hang event" -> WMI Stop -> SSR) the WMI teardown
+# commands can no longer complete, and unloading the module in that state
+# panics the kernel -- observed twice on 2026-09-21, both times with
+# SYSTEM_LAST_KMSG ending in "[last unloaded: qca_cld3_peach_v2(OE)]".
+# Refusing is strictly better than reloading: the phone survives, and the
+# caller is told to reboot. The scan window is deliberately short so that a
+# hang the driver has since recovered from does not block switches forever.
+# Markers cover the whole fatal chain that precedes the panic (SSR event,
+# MHI ramdump handshake, cmnos assert, and the loader's own ghost-vdev
+# health markers), not just the first hang line -- a teardown race can omit
+# the headline message while still being mid-assert.
+fw_hung() {
+  dmesg 2>/dev/null | tail -120 | grep -q \
+    -e "Received firmware hang event" -e "Received SSR event" \
+    -e "RAMDUMP DOWNLOAD MODE" -e "cmnos_assert" \
+    -e "ghost vdev leaked" -e "teardown skipped"
+}
+
+refuse_hung_fw() {
+  if fw_hung; then
+    die "the WLAN firmware has asserted (SSR); unloading now would panic the kernel.
+  Reboot the phone, then retry. Nothing was changed."
   fi
 }
 
+# A distinct, markerless crash class seen on this device (2026-09-21): tearing
+# down a con_mode=4 (monitor) instance leaked a driver-internal timer into the
+# kernel timer wheel, rmmod then freed its container, and ~0.9 s later the
+# timer softirq oopsed walking the poisoned node (__run_timers on a freed
+# WLAN slab object, QCMM Apps watchdog bite). No firmware-hang/SSR marker is
+# emitted on this path, so refuse_hung_fw() cannot see it -- the only reliable
+# guard is to not unload the driver after a monitor session has been created.
+# Reboot ends the session cleanly (con_mode is chosen at insmod, so Wi-Fi
+# returns as normal sta). The explicit --force flag (handled in cmd_conmode)
+# opts back into the in-place reload and accepts the residual crash risk.
+_force=0
+refuse_monitor_teardown() {
+  if [ "$_force" = 1 ]; then return 0; fi
+  if resident "$QCACLD" && [ "$(conmode_now)" = "$CONMODE_MONITOR" ]; then
+    die "the Wi-Fi driver is loaded in MONITOR mode (con_mode=4, injection helper up).
+  Unloading it in place can panic the kernel ~1 s after rmmod: the monitor-session
+  teardown leaves a driver timer in the wheel, rmmod frees its container, and the
+  timer softirq oopses on it (no firmware-hang marker -- invisible to the SSR guard).
+  To end the session: REBOOT NOW (normal restart); Wi-Fi returns as normal sta.
+  To force the risky in-place reload anyway:  $0 conmode sta --force"
+  fi
+}
+
+# Modules to unload before loading an external mac80211 driver: the whole
+# resident pair plus peach. See the WIFI_SWAP_MODULES comment for why the
+# vendor cfg/mac can no longer stay resident.
 unload_platform_stack() {
+  # cmd_load reaches here: without the check, a load right after an SSR would
+  # unload an asserted firmware and panic exactly like a conmode switch did.
+  refuse_hung_fw
+  refuse_monitor_teardown
   echo "=== displacing platform Wi-Fi stack ==="
   echo "  (internal Wi-Fi stops working until you reboot or run: $0 restore)"
   wifi_cmd set-wifi-enabled disabled
   sleep 2
-  for m in $(platform_displace_list); do
+  for m in $WIFI_SWAP_MODULES; do
+    if resident "$m"; then
+      if rmmod "$m" 2>"$ERR"; then
+        echo "  unloaded $m"
+      else
+        echo "  could not unload $m: $(cat "$ERR" 2>/dev/null)"
+      fi
+    fi
+  done
+}
+
+# Same for the platform CAN core when a requested driver needs can-raw: the
+# /system can.ko predates can_sock_destruct, so the pack's can.ko must take
+# over (and can-dev/vcan/slcan are pinned by it in both directions).
+unload_can_stack() {
+  echo "=== displacing platform CAN core ==="
+  for m in $CAN_SWAP_MODULES; do
     if resident "$m"; then
       if rmmod "$m" 2>"$ERR"; then
         echo "  unloaded $m"
@@ -245,6 +318,10 @@ unload_platform_stack() {
 
 cmd_load() {
   need_root
+  # Only cmd_conmode parses --force; reset here so a --force set earlier in the
+  # same process (interactive menu loop) cannot silently disarm the gate that
+  # unload_platform_stack relies on for a later load.
+  _force=0
   drivers=${*:-$DEFAULT_DRIVERS}
   [ -f "$DEP" ] || die "modules.dep missing next to $0"
 
@@ -252,11 +329,15 @@ cmd_load() {
     have_module "$d" || die "no $d.ko in this pack (try: $0 list)"
   done
 
-  swap=0
-  for d in $drivers; do
-    needs_mac80211 "$d" && swap=1
+  clos=$(closure_of $drivers)
+  wifi_swap=0
+  can_swap=0
+  for m in $clos; do
+    [ "$m" = mac80211 ] && wifi_swap=1
+    [ "$m" = can-raw ] && can_swap=1
   done
-  [ "$swap" = 1 ] && unload_platform_stack
+  [ "$wifi_swap" = 1 ] && unload_platform_stack
+  [ "$can_swap" = 1 ] && unload_can_stack
 
   echo "=== firmware ==="
   set_firmware_path
@@ -278,6 +359,16 @@ cmd_load() {
 
 cmd_restore() {
   need_root
+  # restore rmmods everything recorded in $STATE. On a DDK pack `load
+  # qca_cld3_peach_v2` records peach into $STATE without tripping wifi_swap
+  # (the qcacld closure contains no mac80211, so cmd_load never reaches
+  # unload_platform_stack), making this loop a third unload entry point into a
+  # possibly con_mode=4 instance -- the same markerless teardown-panic class
+  # refuse_monitor_teardown exists for, and an already-asserted firmware would
+  # panic here exactly like the SSR-guarded paths. Gate before any rmmod runs,
+  # mirroring unload_platform_stack's order.
+  refuse_hung_fw
+  refuse_monitor_teardown
   echo "=== unloading modules this script loaded ==="
   if [ -s "$STATE" ]; then
     # Fixed point rather than reverse order: rmmod refuses a module while
@@ -300,21 +391,40 @@ cmd_restore() {
     echo "  nothing recorded as loaded"
   fi
 
-  echo "=== restoring platform Wi-Fi stack ==="
-  # Prefer pack copies when present (DDK peach matches this Image's CRCs).
-  for m in cfg80211 mac80211 qca_cld3_peach_v2; do
-    if resident "$m"; then
-      echo "  $m already resident"
-    elif [ -f "$DIR/$m.ko" ]; then
-      insmod "$DIR/$m.ko" 2>"$ERR" \
-        && echo "  restored $m (pack)" \
-        || echo "  $m: $(cat "$ERR" 2>/dev/null)"
-    elif [ -f "$PLATFORM_DIR/$m.ko" ]; then
-      insmod "$PLATFORM_DIR/$m.ko" 2>"$ERR" \
-        && echo "  restored $m (vendor)" \
-        || echo "  $m: $(cat "$ERR" 2>/dev/null)"
-    fi
+  echo "=== restoring platform Wi-Fi + CAN stacks ==="
+  # Prefer pack copies when present: the pack pair is CRC-matched against
+  # this Image, and the CAN core from the pack exports can_sock_destruct.
+  # Dependencies: cfg80211 <- mac80211 <- peach; can <- can-dev <- vcan/slcan.
+  # Instead of hardcoding one dependency-ordered pass, iterate: insmod fails
+  # harmlessly while a dependency is still missing, and later passes fill in.
+  pass=0
+  while [ "$pass" -lt 6 ]; do
+    progress=0
+    for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
+      resident "$m" && continue
+      src=""
+      for dir in "$DIR" "$PLATFORM_DIR" "$SYSTEM_MODULES_DIR"; do
+        if [ -f "$dir/$m.ko" ]; then src="$dir/$m.ko"; break; fi
+      done
+      [ -n "$src" ] || continue
+      if insmod "$src" 2>"$ERR"; then
+        echo "  restored $m ($(basename "$(dirname "$src")"))"
+        progress=1
+      fi
+    done
+    [ "$progress" = 0 ] && break
+    pass=$((pass + 1))
   done
+  for m in cfg80211 mac80211 qca_cld3_peach_v2 can can-dev vcan slcan; do
+    resident "$m" || echo "  $m: not restored ($(cat "$ERR" 2>/dev/null))"
+  done
+  # Defensive cleanup from any prior dualsta session.  The platform reload
+  # above would tear down mon0 as part of cfg80211 wiphy destruction, but
+  # doing it explicitly here ensures the operator's intent ("restore normal
+  # Wi-Fi") is honored even if the cfg80211 teardown races with a held
+  # socket.  Wake_lock release below covers the same case.
+  ip link del mon0 2>/dev/null
+  echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
   wifi_cmd set-wifi-enabled enabled
 
   echo
@@ -462,20 +572,82 @@ cmd_conmode() {
   _mode=${1:-}
   _chan=${2:-}
 
+  # --force (any position) opts out of the monitor-teardown gate; the flag
+  # must not be mistaken for a channel when it lands in the channel slot.
+  _force=0
+  for _a in "$@"; do
+    case "$_a" in
+      --force|-f) _force=1 ;;
+    esac
+  done
+  case "$_chan" in
+    --force|-f) _chan=${3:-} ;;
+  esac
+
   if [ -z "$_mode" ] || [ "$_mode" = show ]; then
     _cur=$(conmode_now)
     echo "  con_mode: ${_cur:-unset} -> $(conmode_name "$_cur")"
     [ -n "$_cur" ] && ip link show wlan0 2>/dev/null | head -1
     echo
-    echo "usage: $0 conmode sta|monitor [channel]"
+    echo "usage: $0 conmode sta|monitor|dualsta [channel] [--force]"
+    echo "  --force: skip the monitor-teardown safety refusal (crash risk accepted)"
     return 0
   fi
 
   case "$_mode" in
-    sta|managed|normal|0) _want=$CONMODE_STA ;;
-    monitor|mon|4)        _want=$CONMODE_MONITOR ;;
-    *) die "unknown mode '$_mode' (want: sta | monitor)" ;;
+    sta|managed|normal|0)    _want=$CONMODE_STA ;;
+    monitor|mon|4)           _want=$CONMODE_MONITOR ;;
+    dualsta|assoc|sta-mon)   _want=dualsta ;;
+    *) die "unknown mode '$_mode' (want: sta | monitor | dualsta)" ;;
   esac
+
+  # dualsta = Path B: keep the driver in mission mode (no reload, Wi-Fi stays
+  # up and associated), create a second monitor netdev via the stock
+  # cfg80211 add-interface path, and set its channel. Requires the ini knob
+  # monitor_mode_concurrency=1 (STA_SCAN_MON), which our qcacld patch sets
+  # as the default. No MHI reload, no ghost vdev: injected frames carry the
+  # STA vdev id, so the firmware sees them against a live session -- the
+  # only context its deauth dispatcher accepts without asserting.
+  if [ "$_want" = dualsta ]; then
+    command -v iw >/dev/null 2>&1 || die "iw not found"
+    if ! ip link show mon0 >/dev/null 2>&1; then
+      PHY=$(iw dev wlan0 info | grep -o 'wiphy [0-9]*' | cut -d' ' -f2)
+      [ -n "$PHY" ] || die "wlan0 is not up (associate first)"
+      # rx-mon (otherbss) requires a live STA association: the firmware's
+      # deauth dispatcher only accepts TX against an associated session,
+      # so a monitor netdev without one hits the same firmware assert the
+      # dualsta mode was designed to avoid.  iw link reports "Connected to"
+      # for an associated STA and "Not connected." otherwise; wpa_supplicant
+      # is not required (iw link works whether or not it is running).
+      if ! iw dev wlan0 link 2>/dev/null | grep -q 'Connected to'; then
+        die "wlan0 is not associated to an AP; associate first
+  (Path B dualsta requires a live session -- the firmware rejects
+  injected frames without one)"
+      fi
+      # otherbss => QDF_MONITOR_FLAG_OTHER_BSS: the driver treats this as
+      # rx-mon + STA concurrency and runs wlan_hdd_add_monitor_check.
+      iw phy "$PHY" interface add mon0 type monitor flags otherbss \
+        || die "failed to create mon0 (sta+mon concurrency unsupported or firmware busy)"
+    fi
+    ip link set mon0 up 2>/dev/null
+    if [ -n "$_chan" ]; then
+      iw dev mon0 set channel "$_chan" 2>"$ERR" \
+        || echo "  channel $_chan rejected (must match wlan0's channel while associated)"
+    fi
+    echo nethunter-inject > /sys/power/wake_lock 2>/dev/null \
+      && echo "  suspend blocked (wake_lock: nethunter-inject)"
+    echo "  mon0 up on $(iw dev mon0 info | grep channel | head -1)"
+    echo "  wlan0 stays associated; inject/airodump on mon0."
+    echo "  Remove with: ip link del mon0; echo nethunter-inject > /sys/power/wake_unlock"
+    return 0
+  fi
+
+  # Defensive cleanup: a previous dualsta session may have left mon0 up.
+  # In sta/monitor the qcacld reload below tears down any leftover monitor
+  # netdev as part of cfg80211 wiphy destruction, but doing it explicitly
+  # makes the state transition unambiguous and survives edge cases where
+  # the driver unload races with userspace (e.g. netsock hold).
+  ip link del mon0 2>/dev/null
 
   _ko=$(qcacld_ko)
   [ -f "$_ko" ] || die "no $QCACLD.ko in this pack or $PLATFORM_DIR"
@@ -485,6 +657,18 @@ cmd_conmode() {
     echo "  already in $(conmode_name "$_want")"
     return 0
   fi
+
+  # Leaving a monitor (con_mode=4) session unloads the driver; that teardown
+  # has a markerless kernel-panic class (freed-object timer, ~1 s after rmmod,
+  # no firmware-hang marker). Refuse by default -- reboot ends the session
+  # cleanly. `conmode ... --force` opts back into the risky in-place reload.
+  # Nothing is changed before this check, so a refused switch leaves the
+  # session fully alive and injectable. See refuse_monitor_teardown().
+  refuse_monitor_teardown
+
+  # Fail safe on an already-hung firmware (shared helper: also covers the
+  # cmd_load unload path). See fw_hung/refuse_hung_fw above.
+  refuse_hung_fw
 
   echo "=== stopping Wi-Fi framework ==="
   wifi_cmd set-wifi-enabled disabled
@@ -534,6 +718,14 @@ cmd_conmode() {
     || echo "  warning: asked for con_mode=$_want but driver reports ${_got:-unset}"
 
   if [ "$_want" = "$CONMODE_MONITOR" ]; then
+    # Block system suspend while the ghost STA vdev is up: peach-v2 firmware
+    # asserts (cmnos_assert -> MHI ramdump) when PMO suspends the target with
+    # a monitor+ghost vdev active, and the driver teardown race after that
+    # death took the whole kernel down (SYSTEM_LAST_KMSG: timer softirq oops
+    # in __run_timers on a freed WLAN object). A wake_lock is cheap here --
+    # pentest sessions are short and deliberate.
+    echo nethunter-inject > /sys/power/wake_lock 2>/dev/null \
+      && echo "  suspend blocked (wake_lock: nethunter-inject)"
     ip link set wlan0 up 2>/dev/null
     if [ -n "$_chan" ] && command -v iw >/dev/null 2>&1; then
       iw dev wlan0 set channel "$_chan" 2>"$ERR" \
@@ -544,10 +736,24 @@ cmd_conmode() {
     command -v iw >/dev/null 2>&1 && iw dev wlan0 info 2>/dev/null | grep -E "type|channel"
     echo
     echo "Capture with: tcpdump -i wlan0 -e -nn"
-    echo "Back to normal: $0 conmode sta"
+    echo "End the session by rebooting (recommended -- in-place sta restore can panic)."
+    echo "If you must reload in place: $0 conmode sta --force (crash risk accepted)"
   else
     wifi_cmd set-wifi-enabled enabled
+    echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
     echo "  Wi-Fi re-enabled; reconnection takes a few seconds"
+    # Firmware-health check after leaving monitor mode. The driver logs a
+    # marker when the ghost-vdev teardown could not reach firmware (WMI
+    # unavailable or VDEV_DELETE send failed); a leaked ghost vdev asserts
+    # peach-v2 firmware on the NEXT system suspend and the teardown race
+    # panics the kernel (SYSTEM_LAST_KMSG of a 6.6.118 boot). Say so now
+    # instead of letting the phone die 10-20 minutes later.
+    if dmesg 2>/dev/null | grep -q "ghost vdev leaked\|teardown skipped, WMI unavailable"; then
+      echo
+      echo "  WARNING: the monitor-mode helper vdev could not be torn down"
+      echo "  in firmware. The phone will crash on the next deep sleep."
+      echo "  === REBOOT NOW (normal restart) to clear it. ==="
+    fi
   fi
 }
 
@@ -590,6 +796,8 @@ cmd_uninstall() {
   echo "Reboot to get the internal Wi-Fi back."
 }
 
+# ---------------------------------------------------------------------------
+
 cmd_help() {
   # Print the usage comment block: from the "Usage" heading up to the last
   # line before the first non-comment line, dropping that line itself.
@@ -628,7 +836,7 @@ cmd_menu() {
     echo "  6) status"
     echo "  7) list drivers in this pack"
     echo "  8) restore platform Wi-Fi stack"
-    echo "  9) help"
+    echo "  h) help"
     echo "  0) quit"
     echo
     printf 'choice: '
@@ -662,7 +870,7 @@ cmd_menu() {
       6) cmd_status ;;
       7) cmd_list ;;
       8) cmd_restore ;;
-      9) cmd_help ;;
+      h|H) cmd_help ;;
       0|q|quit|exit) return 0 ;;
       "") ;;
       *) echo "  no such choice: $_sel" ;;
