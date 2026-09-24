@@ -928,7 +928,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8192,404 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8192,430 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1024,12 +1024,8 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 * normally: a false negative costs one assert, a false positive
 +	 * would silently break unicast injection to a real station.
 +	 */
-+	if (g_inj.ap_bssid_valid && ether_addr_equal(g_inj.ap_bssid, mac)) {
-+		qdf_spin_lock_bh(&g_inj.lock);
-+		g_inj.bssid_skipped++;
-+		qdf_spin_unlock_bh(&g_inj.lock);
++	if (g_inj.ap_bssid_valid && ether_addr_equal(g_inj.ap_bssid, mac))
 +		return;
-+	}
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	count = g_inj.peer_count;
@@ -1083,6 +1079,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint32_t chanfreq;
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
++	const uint8_t *peer_target;
 +	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
 +	bool ready;
@@ -1173,7 +1170,8 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 * - unicast any mgmt: ensure WMI peer for the DA ONLY; FW status 1
 +	 *   without it
 +	 * - deauth/disassoc keep caller SA (AP spoof) — broadcast deauth OTA works
-+	 * - mgmt.macaddr: DA for unicast (peer key), helper for broadcast
++	 * - mgmt.macaddr: DA for unicast (peer key), helper self-peer for
++	 *   broadcast AND for the addr1==BSSID case below
 +	 *
 +	 * NEVER peer the header SA.  A PEER_CREATE whose MAC is the monitored
 +	 * AP's own BSSID puts a second non-self peer on a vdev that is
@@ -1190,16 +1188,48 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 * the frame's SA.  Known trade-off: unicast mgmt that spoofs a
 +	 * third-party SA (e.g. EAPOL/auth spoofing) may now complete with FW
 +	 * status=1, i.e. it fails to transmit instead of hanging the firmware.
++	 *
++	 * A unicast frame whose addr1 IS the associated AP's BSSID gets no
++	 * peer either, and is keyed to the helper self-peer so it still
++	 * submits.  This is not an edge case: aireplay-ng's directed deauth
++	 * emits exactly this frame (addr1 = AP BSSID, addr2 = victim) as the
++	 * second half of every iteration, so it is what wifite produces
++	 * constantly.  Skipping the peer alone would leave macaddr = the AP
++	 * BSSID with no peer for it — the FW status=1 path.
 +	 */
 +	if (skb->len >= 24 &&
 +	    ieee80211_is_probe_req(hdr->frame_control) &&
 +	    is_broadcast_ether_addr(hdr->addr1)) {
 +		ether_addr_copy(hdr->addr2, helper_mac);
 +	}
++
++	/*
++	 * Pick the peer key for this frame: a station DA needs its own WMI
++	 * peer, everything else (broadcast, multicast, and the AP's own
++	 * BSSID as DA) rides the helper self-peer.
++	 */
++	peer_target = helper_mac;
 +	if (skb->len >= 24 &&
 +	    !is_broadcast_ether_addr(hdr->addr1) &&
 +	    !is_multicast_ether_addr(hdr->addr1)) {
-+		hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr1);
++		if (g_inj.ap_bssid_valid &&
++		    ether_addr_equal(g_inj.ap_bssid, hdr->addr1)) {
++			/*
++			 * addr1 is the AP's own BSSID (aireplay-ng's
++			 * directed deauth).  Counting it here rather than
++			 * in ensure_peer() is deliberate: the peer call is
++			 * skipped entirely, so that is the only place this
++			 * decision is observable.  A deauth flood must
++			 * produce a non-zero count here, and the firmware
++			 * must NOT log a PEER_CREATE for the BSSID.
++			 */
++			qdf_spin_lock_bh(&g_inj.lock);
++			g_inj.bssid_skipped++;
++			qdf_spin_unlock_bh(&g_inj.lock);
++		} else {
++			hdd_mon_inject_ensure_peer(wmi, vdev_id, hdr->addr1);
++			peer_target = hdr->addr1;
++		}
 +	}
 +
 +	/*
@@ -1261,15 +1291,11 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	mgmt.chanfreq = chanfreq;
 +	mgmt.qdf_ctx = cds_get_context(QDF_MODULE_ID_QDF_DEVICE);
 +	/*
-+	 * Peer MAC passed to WMI: unicast DA after ensure_peer; helper for bcast.
++	 * Peer MAC passed to WMI: the station DA for unicast injection, the
++	 * helper self-peer for broadcast/multicast and for addr1==AP-BSSID.
 +	 * Snapshot under no lock — hdr bytes are local to this skb copy path.
 +	 */
-+	if (skb->len >= 24 &&
-+	    !is_broadcast_ether_addr(hdr->addr1) &&
-+	    !is_multicast_ether_addr(hdr->addr1))
-+		mgmt.macaddr = hdr->addr1;
-+	else
-+		mgmt.macaddr = helper_mac;
++	mgmt.macaddr = peer_target;
 +	mgmt.use_6mbps = 0;
 +	mgmt.tx_params_valid = false;
 +
@@ -1335,7 +1361,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12702,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12728,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1361,7 +1387,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24558,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24584,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
  						PM_STA_MODE,
  						NULL);
  
