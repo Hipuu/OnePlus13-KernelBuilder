@@ -928,7 +928,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8192,430 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8192,458 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1205,23 +1205,51 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	/*
 +	 * Pick the peer key for this frame: a station DA needs its own WMI
-+	 * peer, everything else (broadcast, multicast, and the AP's own
-+	 * BSSID as DA) rides the helper self-peer.
++	 * peer, everything else (broadcast, multicast, the helper's own
++	 * address, and the AP's BSSID as DA) rides the helper self-peer.
 +	 */
 +	peer_target = helper_mac;
 +	if (skb->len >= 24 &&
 +	    !is_broadcast_ether_addr(hdr->addr1) &&
 +	    !is_multicast_ether_addr(hdr->addr1)) {
-+		if (g_inj.ap_bssid_valid &&
-+		    ether_addr_equal(g_inj.ap_bssid, hdr->addr1)) {
++		/*
++		 * Two MACs must never get a peer here.
++		 *
++		 * 1. The helper's OWN address.  A DA equal to the helper MAC
++		 *    is a frame addressed to this very vdev, so the peer
++		 *    would be a second peer for an address that already has
++		 *    the self-peer, on a vdev that is only STARTED and never
++		 *    UP'ed.  A PEER_CREATE for a MAC that is already a peer
++		 *    on this vdev has hung this firmware once (b3c8fd9's
++		 *    SA-peer hang: peach-v2 cmnos-assert ~256 ms later), and
++		 *    a probe-response flood aimed at the injecting station --
++		 *    ordinary monitor traffic -- emits exactly that frame.
++		 *    Unlike the AP-BSSID case below, this test needs no
++		 *    association: the helper MAC is a constant.
++		 *
++		 * 2. The associated AP's BSSID (aireplay-ng's directed
++		 *    deauth).  Best-effort by nature: the cache is filled
++		 *    from the STA adapter's conn_info, so it is only valid
++		 *    while a STA session is associated.  On a monitor-only
++		 *    session -- no association -- it stays invalid and this
++		 *    branch cannot fire.
++		 *
++		 * Both fall through to the helper self-peer, which always
++		 * exists, so the frame still submits.
++		 *
++		 * Counting the skip here rather than in ensure_peer() is
++		 * deliberate: the peer call is skipped entirely, so this is
++		 * the only place the decision is observable.  A deauth flood
++		 * must produce a non-zero bssid_skipped, and the firmware
++		 * must NOT log a PEER_CREATE for either MAC.
++		 */
++		if (ether_addr_equal(helper_mac, hdr->addr1) ||
++		    (g_inj.ap_bssid_valid &&
++		     ether_addr_equal(g_inj.ap_bssid, hdr->addr1))) {
 +			/*
-+			 * addr1 is the AP's own BSSID (aireplay-ng's
-+			 * directed deauth).  Counting it here rather than
-+			 * in ensure_peer() is deliberate: the peer call is
-+			 * skipped entirely, so that is the only place this
-+			 * decision is observable.  A deauth flood must
-+			 * produce a non-zero count here, and the firmware
-+			 * must NOT log a PEER_CREATE for the BSSID.
++			 * One counter for both cases: on device the only
++			 * thing that matters is that a flood incremented
++			 * it and no PEER_CREATE for addr1 was logged.
 +			 */
 +			qdf_spin_lock_bh(&g_inj.lock);
 +			g_inj.bssid_skipped++;
@@ -1361,7 +1389,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12728,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12756,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1387,7 +1415,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24584,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24612,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
  						PM_STA_MODE,
  						NULL);
  
