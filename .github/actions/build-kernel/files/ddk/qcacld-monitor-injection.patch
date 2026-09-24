@@ -1079,7 +1079,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint32_t chanfreq;
 +	uint8_t vdev_id;
 +	uint8_t helper_mac[QDF_MAC_ADDR_SIZE];
-+	const uint8_t *peer_target;
++	uint8_t *peer_target;
 +	tp_wma_handle wma;
 +	struct wmi_unified *wmi;
 +	bool ready;
