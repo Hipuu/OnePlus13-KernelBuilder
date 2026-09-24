@@ -328,10 +328,12 @@ runs:
 
     - name: Configure Swap Space
       # Only GitHub-hosted runners need this: they ship 16GB RAM and no usable
-      # swap, and the DDK/Bazel path OOMs without it. Self-hosted runners are
-      # required to have >=32GB RAM (see AGENTS.md), where adding a 16GB swap
-      # file is pure disk waste — and the action needs passwordless sudo plus
-      # write access to /, which a locked-down runner host may not grant.
+      # swap, and the DDK/Bazel path OOMs without it. Self-hosted hosts are not
+      # assumed to have any particular amount of RAM — a self-hosted runner with
+      # >=16GB works without swap, because the heap clamp below (see the Bazel
+      # heap step) keeps the JVM below physical RAM. Adding a 16GB swap file on
+      # such a host is pure disk waste — and the action needs passwordless sudo
+      # plus write access to /, which a locked-down runner host may not grant.
       # Gated on == 'github-hosted' rather than != 'self-hosted' so that an
       # empty/absent runner.environment (old GHES) skips rather than runs.
       if: ${{ runner.environment == 'github-hosted' }}
@@ -3096,13 +3098,15 @@ runs:
         # hundred more on top; 75% (12GB on a 16GB runner) was still
         # OOM-killed at the loading step.
         #
-        # The percentage is computed, not hard-coded, because this action now
-        # also runs on self-hosted runners with 32-64GB+ of RAM. A flat 95%
-        # there would hand the JVM ~60GB and leave the OS, the Clang
+        # The percentage is computed, not hard-coded, because this action also
+        # runs on self-hosted hosts of any size. A flat 95% on a big host would
+        # hand the JVM ~60GB on a 64GB box and leave the OS, the Clang
         # subprocesses and the linker fighting over the remaining ~3GB —
         # Bazel's analysis graph does not need more than ~24GB even for the
-        # fork. So: take 95% of host RAM, clamp to a 24GB ceiling, and convert
-        # back to the percentage the env var expects.
+        # fork, which is why the ceiling below starts binding at ~30GB of host
+        # RAM: past that, extra RAM buys a DDK build nothing. So: take 95% of
+        # host RAM, clamp to a 24GB ceiling, and convert back to the
+        # percentage the env var expects.
         MEM_TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
         MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))
         HEAP_CEILING_MB=24576

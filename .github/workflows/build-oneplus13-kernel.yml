@@ -130,7 +130,7 @@ on:
         type: boolean
         default: false
       runner:
-        description: 'Runner pool: github-hosted (ubuntu-latest, 16 GB) or self-hosted (needs ≥32 GB RAM for Bazel DDK builds)'
+        description: 'Runner pool: github-hosted (ubuntu-latest, 16 GB + swap) or self-hosted (no RAM floor; Bazel heap is clamped to 24 GB)'
         required: true
         type: choice
         options:
