@@ -928,7 +928,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8192,458 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8192,484 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1228,24 +1228,50 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		 *    association: the helper MAC is a constant.
 +		 *
 +		 * 2. The associated AP's BSSID (aireplay-ng's directed
-+		 *    deauth).  Best-effort by nature: the cache is filled
-+		 *    from the STA adapter's conn_info, so it is only valid
-+		 *    while a STA session is associated.  On a monitor-only
-+		 *    session -- no association -- it stays invalid and this
-+		 *    branch cannot fire.
++		 *    deauth), when a STA association happens to exist.
++		 *    Best-effort by nature: the cache is filled from the
++		 *    STA adapter's conn_info, so it is only valid while a
++		 *    STA session is associated, and on a monitor-only
++		 *    session -- the route that is actually used -- it stays
++		 *    invalid and this test cannot fire.
 +		 *
-+		 * Both fall through to the helper self-peer, which always
-+		 * exists, so the frame still submits.
++		 * 3. Any frame whose addr1 equals its addr3.  For a
++		 *    management frame with neither ToDS nor FromDS set,
++		 *    addr3 IS the BSSID by definition, so this is a
++		 *    BSSID-as-DA test that needs no association and no
++		 *    cache -- which is what makes it fire on the
++		 *    monitor-only route where test 2 is dead.  It is the
++		 *    test that makes aireplay-ng -0 survivable: that attack
++		 *    emits BOTH directions every iteration, and the
++		 *    client->AP direction carries addr1 = addr3 = AP BSSID,
++		 *    which without this test reaches ensure_peer() and hangs
++		 *    the firmware.  The AP->client direction (addr1 =
++		 *    victim, addr3 = AP) still peers normally, so the
++		 *    directed deauth keeps working.
++		 *
++		 *    False-positive risk is bounded.  A station's own MAC is
++		 *    never a BSSID in a frame an attacker sends to it, and a
++		 *    ToDS data frame with addr1 == addr3 means BSSID == DA,
++		 *    also not a station peer.  A FromDS frame can carry
++		 *    addr1 == addr3 == SA, and a 4-address frame
++		 *    addr1 == addr3 == RA/DA, but neither is a shape a
++		 *    monitor-TX tool produces; and if one ever occurred the
++		 *    cost is a frame that falls back to the self-peer and
++		 *    fails to transmit, not a firmware hang.
++		 *
++		 * All three fall through to the helper self-peer, which
++		 * always exists, so the frame still submits.
 +		 *
 +		 * Counting the skip here rather than in ensure_peer() is
 +		 * deliberate: the peer call is skipped entirely, so this is
 +		 * the only place the decision is observable.  A deauth flood
 +		 * must produce a non-zero bssid_skipped, and the firmware
-+		 * must NOT log a PEER_CREATE for either MAC.
++		 * must NOT log a PEER_CREATE for any of these MACs.
 +		 */
 +		if (ether_addr_equal(helper_mac, hdr->addr1) ||
 +		    (g_inj.ap_bssid_valid &&
-+		     ether_addr_equal(g_inj.ap_bssid, hdr->addr1))) {
++		     ether_addr_equal(g_inj.ap_bssid, hdr->addr1)) ||
++		    ether_addr_equal(hdr->addr1, hdr->addr3)) {
 +			/*
 +			 * One counter for both cases: on device the only
 +			 * thing that matters is that a flood incremented
@@ -1389,7 +1415,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12756,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12782,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1415,7 +1441,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24612,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24638,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
  						PM_STA_MODE,
  						NULL);
  
