@@ -562,13 +562,23 @@ jobs:
     needs: [plan, build, firmware]
     if: ${{ inputs.release_type != 'none' && !cancelled() && needs.build.result == 'success' }}
     steps:
-      # v8 is required, not v7: the build job uploads the ZIPs with
-      # `archive: false`, and only v8 checks Content-Type before trying to
-      # unzip a raw (already-zipped-by-us) download.
+      # skip-decompress is REQUIRED, and v8 is required to have it. The build
+      # job uploads the ZIPs with `archive: false`, so the stored payload IS
+      # the flashable file — but download-artifact decides whether to unzip
+      # from the payload's Content-Type/URL suffix, not from how it was
+      # uploaded. A payload that is itself a .zip therefore reports
+      # application/zip, and v8 extracts it by default, leaving a DIRECTORY
+      # named `release-artifacts/AK3_*.zip/` holding the AK3 tree — so the
+      # `find -name 'AK3_*.zip'` in the next step matches nothing and the
+      # release fails with "No release files were collected" (run 35724207107:
+      # all 4 artifacts downloaded, digests verified, zero files collected).
+      # v7 has no such input, hence the version floor. The raw .ko artifact was
+      # never affected only because its Content-Type is not zip.
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: release-artifacts
+          skip-decompress: true
 
       - name: Collect release files
         id: collect
