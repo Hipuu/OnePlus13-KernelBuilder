@@ -928,7 +928,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8192,484 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8192,493 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1235,29 +1235,37 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		 *    session -- the route that is actually used -- it stays
 +		 *    invalid and this test cannot fire.
 +		 *
-+		 * 3. Any frame whose addr1 equals its addr3.  For a
-+		 *    management frame with neither ToDS nor FromDS set,
-+		 *    addr3 IS the BSSID by definition, so this is a
-+		 *    BSSID-as-DA test that needs no association and no
-+		 *    cache -- which is what makes it fire on the
-+		 *    monitor-only route where test 2 is dead.  It is the
-+		 *    test that makes aireplay-ng -0 survivable: that attack
-+		 *    emits BOTH directions every iteration, and the
-+		 *    client->AP direction carries addr1 = addr3 = AP BSSID,
-+		 *    which without this test reaches ensure_peer() and hangs
-+		 *    the firmware.  The AP->client direction (addr1 =
-+		 *    victim, addr3 = AP) still peers normally, so the
-+		 *    directed deauth keeps working.
++		 * 3. Any frame that is addressed to the DS, or whose addr1
++		 *    equals its addr3.  Two shapes, one idea: neither can be
++		 *    a station DA, and both are reachable with no association
++		 *    and no cache -- which is what makes them fire on the
++		 *    monitor-only route where test 2 is dead.
++		 *
++		 *    a. addr1 == addr3.  For a management frame with neither
++		 *       ToDS nor FromDS set, addr3 IS the BSSID by definition,
++		 *       so this is a BSSID-as-DA test.  It catches
++		 *       aireplay-ng -0, which emits BOTH directions every
++		 *       iteration: the client->AP direction carries
++		 *       addr1 = addr3 = AP BSSID.
++		 *
++		 *    b. ToDS set.  A ToDS frame is going to the distribution
++		 *       system, so its addr1 is the RA/BSSID by definition --
++		 *       never a station.  This catches aireplay-ng -3 (ARP
++		 *       replay), which injects ToDS=1 with addr1 = BSSID and
++		 *       addr3 = the replayed ARP's DA, so addr1 != addr3 and
++		 *       (a) alone would miss it.  ARP replay is a core wifite
++		 *       attack, so missing it would leave the same hang.
 +		 *
 +		 *    False-positive risk is bounded.  A station's own MAC is
-+		 *    never a BSSID in a frame an attacker sends to it, and a
-+		 *    ToDS data frame with addr1 == addr3 means BSSID == DA,
-+		 *    also not a station peer.  A FromDS frame can carry
-+		 *    addr1 == addr3 == SA, and a 4-address frame
-+		 *    addr1 == addr3 == RA/DA, but neither is a shape a
-+		 *    monitor-TX tool produces; and if one ever occurred the
-+		 *    cost is a frame that falls back to the self-peer and
-+		 *    fails to transmit, not a firmware hang.
++		 *    never a BSSID in a frame an attacker sends to it; a ToDS
++		 *    frame's addr1 is a DS address by definition; and a
++		 *    FromDS frame, whose addr1 IS a real station DA, is
++		 *    deliberately not caught -- it still peers.  A 4-address
++		 *    frame (ToDS and FromDS both set) has addr1 = RA and is
++		 *    caught, but it is not a shape a monitor-TX tool
++		 *    produces; and if one ever occurred the cost is a frame
++		 *    that falls back to the self-peer and fails to transmit,
++		 *    not a firmware hang.
 +		 *
 +		 * All three fall through to the helper self-peer, which
 +		 * always exists, so the frame still submits.
@@ -1271,6 +1279,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		if (ether_addr_equal(helper_mac, hdr->addr1) ||
 +		    (g_inj.ap_bssid_valid &&
 +		     ether_addr_equal(g_inj.ap_bssid, hdr->addr1)) ||
++		    ieee80211_has_tods(hdr->frame_control) ||
 +		    ether_addr_equal(hdr->addr1, hdr->addr3)) {
 +			/*
 +			 * One counter for both cases: on device the only
@@ -1415,7 +1424,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12782,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12791,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1441,7 +1450,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24638,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24647,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
  						PM_STA_MODE,
  						NULL);
  
