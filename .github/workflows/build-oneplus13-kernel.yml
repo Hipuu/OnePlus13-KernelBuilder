@@ -233,9 +233,15 @@ jobs:
           done
           # Bazel's output base ($HOME/.cache/bazel) grows unbounded across
           # runs and lives outside the workspace, so the wipe above never
-          # touches it. Run 33241700491 died with ENOSPC exactly because of
-          # this. Prune output bases not touched in the last 7 days; the
+          # touches it. Prune output bases not touched in the last 7 days; the
           # release-backed disk cache makes the content recoverable.
+          #
+          # This is defensive, not a diagnosed fix: run 33241700491 (self-hosted,
+          # 2026-08-29) is often cited as dying of ENOSPC, but its job log ends
+          # ~55 min before the job was marked failed, so the log neither shows
+          # nor rules out ENOSPC (if the disk filled, the runner's own log
+          # writer would have died with it). The unbounded-growth property above
+          # stands on its own and is worth pruning regardless.
           if [ -d "$HOME/.cache/bazel" ]; then
             find "$HOME/.cache/bazel" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
               -exec rm -rf {} + 2>/dev/null || true

@@ -329,11 +329,13 @@ runs:
     - name: Configure Swap Space
       # Only GitHub-hosted runners need this: they ship 16GB RAM and no usable
       # swap, and the DDK/Bazel path OOMs without it. Self-hosted hosts are not
-      # assumed to have any particular amount of RAM — a self-hosted runner with
-      # >=16GB works without swap, because the heap clamp below (see the Bazel
-      # heap step) keeps the JVM below physical RAM. Adding a 16GB swap file on
-      # such a host is pure disk waste — and the action needs passwordless sudo
-      # plus write access to /, which a locked-down runner host may not grant.
+      # assumed to have any particular amount of RAM; the heap clamp below (see
+      # the Bazel heap step) keeps the JVM below physical RAM, so a swap file
+      # would not be needed for the heap to fit — and adding a 16GB one is pure
+      # disk waste. The step also needs passwordless sudo plus write access to /,
+      # which a locked-down runner host may not grant. Untested caveat: no
+      # self-hosted DDK build has ever completed on record, so this is reasoning
+      # from the clamp, not an observation.
       # Gated on == 'github-hosted' rather than != 'self-hosted' so that an
       # empty/absent runner.environment (old GHES) skips rather than runs.
       if: ${{ runner.environment == 'github-hosted' }}
@@ -3104,8 +3106,8 @@ runs:
         # subprocesses and the linker fighting over the remaining ~3GB —
         # Bazel's analysis graph does not need more than ~24GB even for the
         # fork, which is why the ceiling below starts binding at ~30GB of host
-        # RAM: past that, extra RAM buys a DDK build nothing. So: take 95% of
-        # host RAM, clamp to a 24GB ceiling, and convert back to the
+        # RAM: past that, extra RAM buys a DDK build nothing. So: take host
+        # RAM minus 6GB, clamp into [8GB, 24GB], and convert back to the
         # percentage the env var expects.
         MEM_TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
         MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))

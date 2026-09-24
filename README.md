@@ -86,12 +86,12 @@ gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
 The `self-hosted` pool is optional, not required, for the DDK/Bazel variant (`feat/perf-stack`): the DDK build completes on GitHub-hosted `ubuntu-latest` (16 GB RAM plus the 16 GB swap this action configures). Register a runner with labels `self-hosted`, `linux`, `X64` to use it.
 
 - **RAM**: no ≥32 GB floor. GitHub-hosted's 16 GB + 16 GB swap is the proven configuration for the DDK build. The action clamps the Bazel JVM heap to 24 GB (host RAM − 6 GB, floored at 8 GB), so the clamp starts binding at ~30 GB of host RAM — past that point more RAM does not make a DDK build faster.
-- **Disk**: ≥ 250 GB free per concurrent job. The workspace is wiped at the start of every `build` job; a variant-aware "Check free disk space" step hard-fails below 50 GiB free (150 GiB for the Bazel DDK variant, whose output base alone can exceed a 100 GB disk).
+- **Disk**: a variant-aware "Check free disk space" step enforces the floor: 150 GiB for the Bazel DDK variants (whose output base alone can exceed a 100 GB disk) and 50 GiB otherwise, on self-hosted hosts. GitHub-hosted VMs ship ~35-45 GiB free and are only warned, since builds have historically fit. Budget well above the floor if you run variants concurrently. The workspace is wiped at the start of every `build` job.
 - **OS**: Ubuntu 22.04+; the workflow installs its own dependencies via `apt-get`.
 - **No sudo required**: the `repo` binary and all temp files live under `$RUNNER_TEMP`; the workspace cleanup also prunes stale `~/.cache/bazel` output bases.
 - **Concurrency**: matrix jobs serialize via a top-level `concurrency:` group, since they share the physical host (`/dev/shm`, disk I/O, RAM). GitHub-hosted is unaffected (each job gets its own VM).
 
-Swap is only configured for GitHub-hosted runners (16 GB, via `pierotofy/set-swap-space`). The step is skipped on self-hosted hosts because it needs passwordless sudo and write access to `/`, which a locked-down runner host may not grant — a self-hosted host of 16 GB or more works without it, since the Bazel heap is clamped below physical RAM.
+Swap is only configured for GitHub-hosted runners (16 GB, via `pierotofy/set-swap-space`). The step is skipped on self-hosted hosts because it needs passwordless sudo and write access to `/`, which a locked-down runner host may not grant — on a self-hosted host the Bazel heap clamp (host RAM − 6 GB, 24 GB ceiling) keeps the JVM below physical RAM, so the swap file is not needed for the heap to fit. The only proven DDK configuration remains hosted 16 GB + swap; no self-hosted DDK build has completed on record.
 
 ---
 
