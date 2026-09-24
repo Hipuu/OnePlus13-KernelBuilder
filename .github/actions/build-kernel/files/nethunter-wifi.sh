@@ -234,17 +234,35 @@ wifi_cmd() { cmd wifi "$@" >/dev/null 2>&1; }
 # panics the kernel -- observed twice on 2026-09-21, both times with
 # SYSTEM_LAST_KMSG ending in "[last unloaded: qca_cld3_peach_v2(OE)]".
 # Refusing is strictly better than reloading: the phone survives, and the
-# caller is told to reboot. The scan window is deliberately short so that a
-# hang the driver has since recovered from does not block switches forever.
-# Markers cover the whole fatal chain that precedes the panic (SSR event,
-# MHI ramdump handshake, cmnos assert, and the loader's own ghost-vdev
-# health markers), not just the first hang line -- a teardown race can omit
-# the headline message while still being mid-assert.
+# caller is told to reboot.
+#
+# The window is a *position* comparison, not a line count.  The earlier
+# "dmesg | tail -120" form silently failed open on this kernel: OPLUS_CHG
+# floods dmesg with thousands of lines per minute, so a firmware assert
+# that had happened minutes ago sat far outside the last 120 lines and the
+# gate reported "not hung" while the firmware was in fact asserted twice
+# (2026-09-24, 11320-line buffer, markers at lines 1252 and 4761).  A
+# `conmode sta` in that state would rmmod an asserted firmware = panic.
+#
+# Compare the line number of the LAST hang marker against the line number
+# of the LAST successful firmware-ready marker: a hang that has not been
+# followed by a fresh FW-ready is still live.  That is self-limiting --
+# after SSR recovery the driver logs "FW ready event received" again, so a
+# recovered hang stops blocking switches, without any arbitrary window.
+# Fail open only when neither marker is present at all (driver not loaded,
+# or a boot that never brought WLAN up).
 fw_hung() {
-  dmesg 2>/dev/null | tail -120 | grep -q \
+  _last_hang=$(dmesg 2>/dev/null | grep -n \
     -e "Received firmware hang event" -e "Received SSR event" \
     -e "RAMDUMP DOWNLOAD MODE" -e "cmnos_assert" \
-    -e "ghost vdev leaked" -e "teardown skipped"
+    -e "ghost vdev leaked" -e "teardown skipped" | tail -1 | cut -d: -f1)
+  [ -z "$_last_hang" ] && return 1
+
+  _last_ready=$(dmesg 2>/dev/null | grep -n \
+    -e "FW ready event received" | tail -1 | cut -d: -f1)
+  [ -z "$_last_ready" ] && return 0
+
+  [ "$_last_hang" -gt "$_last_ready" ]
 }
 
 refuse_hung_fw() {

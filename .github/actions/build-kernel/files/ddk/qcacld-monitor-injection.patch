@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,770 @@ static void hdd_mon_turn_off_ps_and_wow(
+@@ -3449,6 +3456,852 @@ static void hdd_mon_turn_off_ps_and_wow(
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -78,10 +78,31 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +#define HDD_MON_INJECT_REAP_MS		1000	/* nominal reaper period */
 +#define HDD_MON_INJECT_REAP_FAST_MS	250	/* under pressure */
 +#define HDD_MON_INJECT_AGE_MS		1500	/* nominal nbuf lifetime */
-+#define HDD_MON_INJECT_AGE_FAST_MS	400	/* under pressure */
++/*
++ * Lifetime used once inflight >= HDD_MON_INJECT_PRESSURE.  This is the
++ * real throughput knob for flood tools: when firmware completions do not
++ * carry the full desc_id, the reaper is the ONLY reclaim path, so the
++ * sustained TX rate is HDD_MON_INJECT_SLOTS / AGE_FAST_MS.  At 400 ms
++ * that capped a deauth flood at ~80 frames/s and silently dropped ~80%
++ * of aireplay-ng's burst; 150 ms still leaves >10x margin over the
++ * single-digit-ms peach mgmt-TX completion latency.
++ */
++#define HDD_MON_INJECT_AGE_FAST_MS	150	/* under pressure */
 +#define HDD_MON_INJECT_PRESSURE		16	/* faster reaper threshold */
-+#define HDD_MON_INJECT_BACKPRESSURE	24	/* drop TX at this inflight */
-+#define HDD_MON_INJECT_PEER_MAX		8	/* unicast DA peer cache */
++/*
++ * Drop TX at this inflight.  Must stay BELOW HDD_MON_INJECT_SLOTS or the
++ * "no free TX slot" branch fires first and the cap never engages; 30 of
++ * 32 keeps the self-peer plus a little slack while allowing a much
++ * deeper TX pipeline than the original 24, which throttled deauth floods.
++ */
++#define HDD_MON_INJECT_BACKPRESSURE	30	/* drop TX at this inflight */
++/*
++ * Unicast DA peer cache.  A deauth flood walks the same handful of
++ * station MACs repeatedly; 8 entries thrashed and re-created peers
++ * mid-burst (each PEER_CREATE is a WMI round trip on the never-VDEV_UP
++ * ghost vdev).  16 covers a busy BSS without unbounded firmware peers.
++ */
++#define HDD_MON_INJECT_PEER_MAX		16	/* unicast DA peer cache */
 +
 +struct hdd_mon_inject_slot {
 +	bool in_use;
@@ -99,6 +120,19 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	/* Dynamic WMI peers created for unicast DA (FW rejects unicast without peer). */
 +	uint8_t peer_mac[HDD_MON_INJECT_PEER_MAX][QDF_MAC_ADDR_SIZE];
 +	uint8_t peer_count;
++	/*
++	 * BSSID of the live STA association, cached so the atomic TX path
++	 * never has to walk the adapter list.  Frames whose addr1 is the
++	 * AP's own BSSID must NOT get a WMI peer: PEER_CREATE for the
++	 * monitored AP's MAC on the never-VDEV_UP ghost vdev makes peach-v2
++	 * cmnos-assert ~230-250 ms later (see the addr1 policy comment in
++	 * hdd_mon_hard_start_xmit).  aireplay-ng's directed deauth sends
++	 * exactly such a frame, so this exclusion is what makes wifite's
++	 * deauth attack survivable.  Refreshed from process context (the
++	 * reaper work and helper create); zero when not associated.
++	 */
++	uint8_t ap_bssid[QDF_MAC_ADDR_SIZE];
++	bool ap_bssid_valid;
 +	uint32_t chanfreq;
 +	qdf_spinlock_t lock;
 +	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
@@ -109,12 +143,25 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint64_t tx_ok;
 +	uint64_t tx_fail;
 +	uint64_t tx_complete;
++	/*
++	 * Frames whose addr1 matched the cached AP BSSID and therefore
++	 * skipped PEER_CREATE.  Exposed in the teardown log so an on-device
++	 * run can prove the deauth exclusion is actually engaging (a flood
++	 * tool always produces some) without a debugger.
++	 */
++	uint64_t bssid_skipped;
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
 +
 +/* Reaper: periodically unmap + free nbufs stock completion cannot reclaim. */
 +static void hdd_mon_inject_reaper(struct work_struct *work);
++/*
++ * Defined with the other injection helpers further down, but called from
++ * the reaper and helper-create above it, so it needs a forward
++ * declaration here (an implicit declaration is an error under -Werror).
++ */
++static void hdd_mon_inject_refresh_ap_bssid(void);
 +static DECLARE_DELAYED_WORK(hdd_mon_inject_reaper_dw, hdd_mon_inject_reaper);
 +
 +/* Always declare: referenced from stop/open paths and injection functions. */
@@ -395,6 +442,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	if (!g_inj.lock_inited)
 +		return;
 +
++	/*
++	 * Reaper runs in a workqueue, i.e. process context, so it is the
++	 * one periodic hook that may safely walk the adapter list.  Keep
++	 * the AP-BSSID cache fresh here: roaming between the helper create
++	 * and the attack would otherwise leave the exclusion stale and let
++	 * the new BSSID through to PEER_CREATE.
++	 */
++	hdd_mon_inject_refresh_ap_bssid();
++
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	inflight_snap = g_inj.inflight;
 +	ready_snap = g_inj.ready;
@@ -559,6 +615,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	g_inj.ready = true;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
++	/*
++	 * Populate the AP-BSSID exclusion now, in this process context,
++	 * so the very first injected frame is already protected instead of
++	 * waiting up to one reaper period (1 s) for the cache to fill.
++	 */
++	hdd_mon_inject_refresh_ap_bssid();
++
 +	schedule_delayed_work(&hdd_mon_inject_reaper_dw,
 +			      msecs_to_jiffies(HDD_MON_INJECT_REAP_MS));
 +
@@ -711,6 +774,25 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	/* Belt-and-suspenders: flush again after teardown returns. */
 +	hdd_mon_inject_slots_flush();
 +
++	/*
++	 * Surface the counters before the lock goes away: bssid_skipped
++	 * > 0 after an attack is the on-device proof that the addr1
++	 * exclusion kept the AP's own BSSID off the ghost vdev.
++	 */
++	if (g_inj.lock_inited) {
++		uint64_t ok_s, fail_s, done_s, skip_s;
++
++		qdf_spin_lock_bh(&g_inj.lock);
++		ok_s = g_inj.tx_ok;
++		fail_s = g_inj.tx_fail;
++		done_s = g_inj.tx_complete;
++		skip_s = g_inj.bssid_skipped;
++		qdf_spin_unlock_bh(&g_inj.lock);
++		hdd_info("Injection: session stats ok=%llu fail=%llu complete=%llu bssid_skipped=%llu",
++			 (unsigned long long)ok_s, (unsigned long long)fail_s,
++			 (unsigned long long)done_s, (unsigned long long)skip_s);
++	}
++
 +	if (g_inj.lock_inited) {
 +		qdf_spin_lock_bh(&g_inj.lock);
 +		g_inj.mon_dev = NULL;
@@ -799,7 +881,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4294,34 @@ static int __hdd_mon_open(struct net_dev
+@@ -3523,6 +4376,34 @@ static int __hdd_mon_open(struct net_dev
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -834,7 +916,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6674,11 @@ int hdd_stop_no_trans(struct net_device
+@@ -5875,6 +6756,11 @@ int hdd_stop_no_trans(struct net_device
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -846,11 +928,66 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8110,327 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8192,404 @@ static const struct net_device_ops wlan_
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 -/* Monitor mode net_device_ops, does not Tx and most of operations. */
++
++/*
++ * Refresh the cached BSSID of the live STA association.  MUST run in
++ * process context (not atomic): hdd_get_adapter() walks the adapter list
++ * and takes/puts netdev references, which ndo_start_xmit must not do.
++ * Called from the reaper work so the cache tracks roaming, and from
++ * helper create so it is populated before the first injected frame.
++ * A missing association (NULL adapter, or bssid all zero) clears the
++ * cache rather than leaving a stale BSSID behind.
++ */
++static void hdd_mon_inject_refresh_ap_bssid(void)
++{
++	struct hdd_context *hdd_ctx;
++	struct hdd_adapter *sta_adapter;
++	uint8_t bssid[QDF_MAC_ADDR_SIZE];
++	bool valid = false;
++
++	if (!g_inj.lock_inited)
++		return;
++
++	hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
++	if (!hdd_ctx) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.ap_bssid_valid = false;
++		qdf_mem_zero(g_inj.ap_bssid, QDF_MAC_ADDR_SIZE);
++		qdf_spin_unlock_bh(&g_inj.lock);
++		return;
++	}
++
++	sta_adapter = hdd_get_adapter(hdd_ctx, QDF_STA_MODE);
++	if (sta_adapter && sta_adapter->deflink) {
++		struct hdd_station_ctx *sta_ctx =
++			WLAN_HDD_GET_STATION_CTX_PTR(sta_adapter->deflink);
++
++		if (sta_ctx &&
++		    !is_zero_ether_addr(sta_ctx->conn_info.bssid.bytes)) {
++			qdf_mem_copy(bssid, sta_ctx->conn_info.bssid.bytes,
++				     QDF_MAC_ADDR_SIZE);
++			valid = true;
++		}
++	}
++
++	qdf_spin_lock_bh(&g_inj.lock);
++	if (valid) {
++		if (!g_inj.ap_bssid_valid ||
++		    !ether_addr_equal(g_inj.ap_bssid, bssid))
++			hdd_info("Injection: AP BSSID cache -> %pM", bssid);
++		qdf_mem_copy(g_inj.ap_bssid, bssid, QDF_MAC_ADDR_SIZE);
++		g_inj.ap_bssid_valid = true;
++	} else {
++		g_inj.ap_bssid_valid = false;
++		qdf_mem_zero(g_inj.ap_bssid, QDF_MAC_ADDR_SIZE);
++	}
++	qdf_spin_unlock_bh(&g_inj.lock);
++}
 +
 +/*
 + * Firmware mgmt TX on the ghost STA accepts broadcast without a DA peer,
@@ -871,6 +1008,28 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	if (is_broadcast_ether_addr(mac) || is_multicast_ether_addr(mac) ||
 +	    is_zero_ether_addr(mac))
 +		return;
++
++	/*
++	 * Never peer the monitored AP's own BSSID.  peach-v2 cmnos-asserts
++	 * ~230-250 ms after a PEER_CREATE for it on the ghost vdev, and
++	 * aireplay-ng's directed deauth emits exactly that frame
++	 * (addr1 = AP BSSID, addr2 = victim) as the second half of every
++	 * iteration -- so without this gate every wifite deauth attack
++	 * hangs the firmware.
++	 *
++	 * The cache is populated in process context before the helper goes
++	 * ready (and refreshed by the reaper), so the window where it is
++	 * still invalid is only the helper-create path itself, which
++	 * transmits nothing.  When it IS invalid we fall through and peer
++	 * normally: a false negative costs one assert, a false positive
++	 * would silently break unicast injection to a real station.
++	 */
++	if (g_inj.ap_bssid_valid && ether_addr_equal(g_inj.ap_bssid, mac)) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.bssid_skipped++;
++		qdf_spin_unlock_bh(&g_inj.lock);
++		return;
++	}
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	count = g_inj.peer_count;
@@ -1176,7 +1335,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12531,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12702,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1202,7 +1361,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24387,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24558,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
  						PM_STA_MODE,
  						NULL);
  
