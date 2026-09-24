@@ -236,12 +236,22 @@ jobs:
           # touches it. Prune output bases not touched in the last 7 days; the
           # release-backed disk cache makes the content recoverable.
           #
-          # This is defensive, not a diagnosed fix: run 33241700491 (self-hosted,
-          # 2026-08-29) is often cited as dying of ENOSPC, but its job log ends
-          # ~55 min before the job was marked failed, so the log neither shows
-          # nor rules out ENOSPC (if the disk filled, the runner's own log
-          # writer would have died with it). The unbounded-growth property above
-          # stands on its own and is worth pruning regardless.
+          # This is defensive in mechanism, but the failure it guards against
+          # is diagnosed, not assumed: run 33241700491 (self-hosted,
+          # 2026-08-29) died of ENOSPC. Its job log is truncated -- it ends
+          # ~55 min before the job was marked failed -- because the disk
+          # filled, but the runner's own crash survives as a check-run
+          # annotation, which GitHub stores separately from the log stream:
+          #   System.IO.IOException: No space left on device :
+          #   '/root/actions-runner/_diag/Worker_20260829-081542-utc.log'
+          #     at GitHub.Runner.Worker.Program.MainAsync(...)
+          # i.e. the worker process could not even write its own diagnostics
+          # file. Which path consumed the last bytes is NOT known: no df was
+          # captured, and the disk-check step was only added after this
+          # failure. So cite the annotation, not the log -- the log shows
+          # nothing, and an earlier revision of this comment wrongly said the
+          # evidence "neither shows nor rules out ENOSPC". The
+          # unbounded-growth property above stands on its own regardless.
           if [ -d "$HOME/.cache/bazel" ]; then
             find "$HOME/.cache/bazel" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
               -exec rm -rf {} + 2>/dev/null || true
