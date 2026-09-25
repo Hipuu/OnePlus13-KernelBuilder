@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1028 @@
+@@ -3449,6 +3456,1178 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -105,8 +105,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 + *     1496/1496 in submit order).  Completion(g) is therefore processed
 + *     before completion(g+1)..completion(g+128), so those generations
 + *     cannot all have been submitted and freed before completion(g)
-+ *     arrives; and if they were freed by the reaper instead, the reaper
-+ *     age (3000 ms) has already retired slot S's token.
++ *     arrives.
++ *
++ * Note that neither argument needs the reaper's age to be a correctness
++ * bound: a completion that arrives after its slot was reclaimed by the
++ * reaper finds a different token (the slot was reused) or an empty slot,
++ * and frees nothing either way.  The reaper holds the mapping instead of
++ * releasing it, so a "late" completion costs nothing.
 + */
 +#define HDD_MON_INJECT_TOKEN_MASK	0x0FFFU	/* 12 bits: slot + generation */
 +#define HDD_MON_INJECT_GEN_MASK		0x7FU	/* 7 generation bits */
@@ -116,21 +121,30 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +#define HDD_MON_INJECT_REAP_FAST_MS	250	/* under pressure */
 +#define HDD_MON_INJECT_AGE_MS		5000	/* lost-completion safety net */
 +/*
-+ * The reaper is now the LOST-COMPLETION path only: with the token match
++ * The reaper is the LOST-COMPLETION path only: with the token match
 + * fixed, a completion reclaims its own buffer, so the reaper fires only
-+ * when firmware never reported back.  Its age must therefore exceed the
-+ * longest time firmware can still hold a buffer, and it is a single
-+ * constant -- deliberately NOT shortened under pressure.  Measured
-+ * submit->completion max was 768 ms under saturation (inflight up to
-+ * 30); 5000 ms keeps ~6.5x margin.  The previous 150 ms was BELOW p99
++ * when firmware never reported back.  Its age must exceed the longest
++ * time firmware can still hold a buffer, and it is a single constant --
++ * deliberately NOT shortened under pressure.  Measured submit->
++ * completion max was 768 ms under saturation (inflight up to 30);
++ * 5000 ms keeps ~6.5x margin.  The previous 150 ms was BELOW p99
 + * (180 ms), which is what let the reaper unmap buffers firmware was
 + * still DMA-reading and produced the SMMU/NOC fault.
 + *
++ * The age is a heuristic, not a proof: a host can never distinguish
++ * "completion lost" from "completion very late", so no finite age is
++ * provably safe.  That is why the age is no longer load-bearing for
++ * correctness -- the reaper now moves an aged buffer to the quarantine
++ * instead of unmapping it, so firing too early costs a held mapping,
++ * never a use-after-free.  The age only decides how long a slot stays
++ * unavailable to new submissions.
++ *
 + * Cost of the longer age: a genuinely lost completion keeps its slot
-+ * for up to 5 s, and BACKPRESSURE (30) < SLOTS (32), so ~30 losses in a
-+ * row would wedge injection.  Completions are FIFO and near-lossless in
-+ * practice (measured 235/235 delivered), so this is a liveness
-+ * backstop, not a hot path.
++ * for up to 5 s.  Since the slot IS freed (only the mapping is held),
++ * BACKPRESSURE (30) < SLOTS (32) still governs throughput, so losses do
++ * not wedge injection -- they consume quarantine capacity.  Completions
++ * are FIFO and near-lossless in practice (measured 235/235 delivered),
++ * so this is a liveness backstop, not a hot path.
 + */
 +#define HDD_MON_INJECT_PRESSURE		16	/* more frequent reaper checks */
 +/*
@@ -188,6 +202,34 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint32_t chanfreq;
 +	qdf_spinlock_t lock;
 +	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
++	/*
++	 * Bounded quarantine for buffers the reaper reclaimed on the AGE_MS
++	 * timeout.  Such a buffer's slot is freed (so the slot becomes
++	 * reusable and injection stays live) but its DMA mapping is LEFT
++	 * LIVE: the reaper cannot distinguish "completion lost" from
++	 * "completion very late", so it must not be the thing that unmaps.
++	 * A completion that arrives after the buffer was quarantined either
++	 * matches nothing (the slot holds a new token) or is a duplicate --
++	 * either way it frees nothing, which is correct, because the buffer
++	 * is no longer owned by any slot.
++	 *
++	 * Capacity equals SLOTS: inflight is capped at BACKPRESSURE (30) <
++	 * SLOTS, so at most SLOTS distinct buffers can ever be outstanding.
++	 * The quarantine is drained only where firmware is provably done
++	 * with it -- vdev teardown, or a path where firmware is unreachable
++	 * (see hdd_mon_inject_slots_flush).  It is a bounded leak by
++	 * construction, never an unbounded one.
++	 */
++	qdf_nbuf_t quarantine[HDD_MON_INJECT_SLOTS];
++	uint32_t quarantine_count;
++	/*
++	 * Set when the quarantine is full, i.e. more completions were lost
++	 * than the quarantine can hold.  Fails safe: TX is refused (the
++	 * buffer stays tracked in its slot, still in_use) rather than
++	 * force-freeing a mapping firmware may still read.  A session that
++	 * reports this is losing completions and needs the age raised.
++	 */
++	bool quarantine_full;
 +	uint32_t next_slot;
 +	uint32_t inflight;
 +	struct net_device *mon_dev;
@@ -216,20 +258,26 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 *   tx_stale     completions that arrived for a token the slot no
 +	 *                longer held (a reused slot's previous occupant, or
 +	 *                a duplicate).  Expected and benign: frees nothing.
-+	 *   reaped       buffers reclaimed by the AGE_MS timeout, i.e.
-+	 *                completions firmware never delivered.  This is the
-+	 *                path that unmaps on a timer, so it is the one that
-+	 *                caused the SMMU fault; it must stay near zero in a
-+	 *                healthy run.  It was previously only hdd_debug, so
++	 *   reaped       buffers whose completion firmware never delivered,
++	 *                moved to the quarantine by the AGE_MS timeout.  This
++	 *                restores slot liveness only; it does NOT unmap, so it
++	 *                is no longer an SMMU trigger.  Must stay near zero in
++	 *                a healthy run.  It was previously only hdd_debug, so
 +	 *                a crashed run could not prove whether it fired.
++	 *   quarantined  buffers whose slot was reclaimed on timeout and whose
++	 *                DMA mapping is therefore still live.  They are unmapped
++	 *                only where firmware is provably done with them (vdev
++	 *                teardown), never on a timer.  A non-zero value that
++	 *                never drains means completions are being lost.
 +	 *
-+	 * Healthy session: tx_complete >> 0, reaped ~= 0.  Before the fix
-+	 * the reverse held (tx_complete 0, everything reaped), which is
-+	 * exactly what the 987.9s SMMU fault looked like.
++	 * Healthy session: tx_complete >> 0, reaped ~= 0, quarantined ~= 0.
++	 * Before the fix the reverse held (tx_complete 0, everything reaped),
++	 * which is exactly what the 987.9s SMMU fault looked like.
 +	 */
 +	uint64_t tx_stale;
 +	uint64_t reaped;
 +	uint64_t flushed;
++	uint64_t quarantined;
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
@@ -290,8 +338,11 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 + * descriptor pool and use high-range desc_ids.  peach-v2 DOES emit TX
 + * completion events for the ghost STA helper, and wma_process_mgmt_tx_
 + * completion routes ours to hdd_mon_inject_tx_complete, which calls this
-+ * on a strict token match.  The reaper and the teardown flush are the
-+ * fallbacks for a completion that never arrives.
++ * on a strict token match.  When a completion never arrives, the buffer
++ * is moved to the bounded quarantine by the reaper -- deliberately NOT
++ * unmapped there -- and this runs only when firmware is provably done
++ * with it: the teardown flush, which drains the quarantine alongside the
++ * slot table after the ghost vdev is deleted.
 + */
 +static void hdd_mon_inject_unmap_free(qdf_nbuf_t nbuf)
 +{
@@ -403,11 +454,36 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	}
 +}
 +
++/*
++ * Move an aged nbuf into the quarantine instead of unmapping it.  Caller
++ * holds g_inj.lock.
++ *
++ * The reaper reclaimed this buffer's SLOT (so injection stays live) but
++ * firmware never reported the completion, so we cannot prove it is done
++ * with the DMA mapping.  Restoring slot liveness is safe and necessary;
++ * unmapping here is what produced the SMMU/NOC fault.  Hold the mapping
++ * until a point that CAN prove it (vdev teardown), and count it.
++ *
++ * Returns false if the quarantine is full.  On overflow the caller must
++ * NOT free the buffer: the slot keeps it (still in_use) and TX is
++ * refused, so the failure mode is a stalled injection session with a
++ * loud log, never a use-after-free.
++ */
++static bool hdd_mon_inject_quarantine_put(qdf_nbuf_t nbuf)
++{
++	if (g_inj.quarantine_count >= HDD_MON_INJECT_SLOTS) {
++		g_inj.quarantine_full = true;
++		return false;
++	}
++	g_inj.quarantine[g_inj.quarantine_count++] = nbuf;
++	return true;
++}
++
 +/* Flush every in-flight slot (teardown / stop / SSR path). */
 +static void hdd_mon_inject_slots_flush(void)
 +{
 +	uint32_t i;
-+	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
++	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS * 2];
 +	uint32_t count = 0;
 +
 +	if (!g_inj.lock_inited)
@@ -423,6 +499,17 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		}
 +	}
 +	g_inj.inflight = 0;
++	/*
++	 * Drain the quarantine too.  This function is called ONLY where
++	 * firmware is provably done with our buffers: after the ghost vdev
++	 * is stopped and deleted, or when firmware is unreachable entirely.
++	 * That is exactly the proof the reaper lacked, so this is the point
++	 * where a quarantined mapping may finally be unmapped.
++	 */
++	for (i = 0; i < g_inj.quarantine_count; i++)
++		nbufs[count++] = g_inj.quarantine[i];
++	g_inj.quarantine_count = 0;
++	g_inj.quarantine_full = false;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
 +	for (i = 0; i < count; i++)
@@ -545,9 +632,10 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +static void hdd_mon_inject_reaper(struct work_struct *work)
 +{
 +	uint32_t i;
-+	qdf_nbuf_t nbufs[HDD_MON_INJECT_SLOTS];
 +	uint32_t count = 0;
 +	uint32_t inflight_snap;
++	uint32_t quarantine_snap;
++	bool overflow = false;
 +	bool ready_snap;
 +	unsigned long age;
 +	unsigned int reap_ms;
@@ -578,35 +666,77 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
 +
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
-+		if (g_inj.slots[i].in_use &&
-+		    time_after(jiffies,
-+			       g_inj.slots[i].submit_jiffies + age)) {
-+			nbufs[count++] = g_inj.slots[i].nbuf;
++		if (!g_inj.slots[i].in_use ||
++		    !time_after(jiffies,
++				g_inj.slots[i].submit_jiffies + age))
++			continue;
++
++		/*
++		 * Quarantine the buffer, do NOT unmap it.  Firmware may still
++		 * be DMA-reading it: an age threshold can only bound how long a
++		 * completion is LIKELY to take, never prove one will not still
++		 * arrive.  Move the mapping somewhere it is held, not released.
++		 *
++		 * A slot with no buffer has nothing to hold; release it and
++		 * move on (defensive: in_use implies nbuf, but a NULL here
++		 * must not consume a quarantine entry).
++		 */
++		if (!g_inj.slots[i].nbuf) {
 +			g_inj.slots[i].in_use = false;
-+			g_inj.slots[i].nbuf = NULL;
 +			g_inj.slots[i].desc_id = 0;
 +			if (g_inj.inflight)
 +				g_inj.inflight--;
++			continue;
 +		}
++
++		if (!hdd_mon_inject_quarantine_put(g_inj.slots[i].nbuf)) {
++			/*
++			 * Quarantine full.  Leave this slot exactly as it is
++			 * (in_use, buffer attached) so the buffer stays tracked
++			 * and is never freed underneath firmware.  TX is refused
++			 * from here on; the session stalls loudly rather than
++			 * corrupting memory.
++			 */
++			overflow = true;
++			continue;
++		}
++
++		g_inj.slots[i].in_use = false;
++		g_inj.slots[i].nbuf = NULL;
++		g_inj.slots[i].desc_id = 0;
++		if (g_inj.inflight)
++			g_inj.inflight--;
++		count++;
 +	}
 +	g_inj.reaped += count;
++	g_inj.quarantined += count;
++	if (overflow)
++		g_inj.quarantine_full = true;
 +	inflight_snap = g_inj.inflight;
++	quarantine_snap = g_inj.quarantine_count;
 +	qdf_spin_unlock_bh(&g_inj.lock);
-+
-+	for (i = 0; i < count; i++)
-+		hdd_mon_inject_unmap_free(nbufs[i]);
 +
 +	if (count)
 +		/*
-+		 * hdd_info, not hdd_debug: this is the ONLY path that unmaps
-+		 * on a timer rather than on a completion, so it is the path
-+		 * that can unmap a buffer firmware still holds.  A healthy
-+		 * run must show reaped ~= 0; if this climbs, completions are
-+		 * being lost and the age needs raising.  Leaving it at debug
-+		 * made the previous crash unprovable from the log.
++		 * hdd_info, not hdd_debug: this is the lost-completion path,
++		 * and a healthy run must show reaped ~= 0.  It no longer
++		 * unmaps anything -- the buffers are held in the quarantine
++		 * until teardown -- so a climb here means completions are
++		 * being lost (raise the age), NOT that memory is being
++		 * corrupted.  Leaving it at debug made the previous crash
++		 * unprovable from the log.
 +		 */
-+		hdd_info("Injection: reaped %u nbuf(s), inflight now %u",
-+			 count, inflight_snap);
++		hdd_info("Injection: reaped %u nbuf(s) into quarantine (%u held), inflight now %u",
++			 count, quarantine_snap, inflight_snap);
++
++	if (overflow)
++		/*
++		 * Loud and ratelimited: every reaper pass while full would
++		 * otherwise flood the log, and the condition is persistent
++		 * (TX stays refused until teardown drains the quarantine).
++		 */
++		hdd_err_rl("Injection: quarantine full (%u held), refusing TX - completions are being lost",
++			   quarantine_snap);
 +
 +	/* Reschedule while helper is ready; go faster under pressure. */
 +	if (ready_snap) {
@@ -764,9 +894,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 + *   2. cancel reaper (no concurrent unmap)
 + *   3. PEER_DELETE / VDEV_STOP / VDEV_DELETE, so firmware is provably done
 + *      with every buffer we submitted on this vdev
-+ *   4. flush all still-outstanding slots -- only now is it safe to unmap
++ *   4. flush all still-outstanding slots AND drain the quarantine -- only
++ *      now is it safe to unmap
 + * Flushing before step 3 is what let a buffer be unmapped while firmware was
-+ * still DMA-reading it on a STARTED vdev (the SMMU/NOC fault class).
++ * still DMA-reading it on a STARTED vdev (the SMMU/NOC fault class).  The
++ * quarantine exists because the reaper cannot know when firmware is done;
++ * this teardown is the one place that can prove it, so this is where those
++ * held mappings are released.
 + * Leaving the ghost STA alive after Android turns Wi-Fi off is a
 + * leading suspect for the 10-20 min late reboot; always tear it down
 + * from hdd_stop / hdd_mon_inject_stop.
@@ -837,9 +971,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
 +			qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
 +		}
-+		/* Firmware is unreachable, so its vdev state cannot be
-+		 * quiesced and its buffers cannot be reclaimed.  Unmap as a
-+		 * last resort: leaking the mappings would be worse. */
++		/*
++		 * Firmware is unreachable, so its vdev state cannot be
++		 * quiesced and we can never obtain the proof that it is done
++		 * with our buffers.  Unmap as a last resort: firmware is dead
++		 * (SSR/WMI gone), so a DMA read cannot happen, and leaking the
++		 * mappings would be worse.  This is the one drain without a
++		 * firmware-done proof, and it is only reachable when there is
++		 * no firmware to race.
++		 */
 +		hdd_mon_inject_slots_flush();
 +		return;
 +	}
@@ -942,11 +1082,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 *             with complete=0 and reaped>0 has NOT been fixed.
 +	 *   stale     completions for a token the slot no longer held --
 +	 *             expected (reused slot) and safe; frees nothing.
-+	 *   reaped    the AGE_MS timeout path, the only unmap not driven by
-+	 *             a completion.  Healthy ~= 0; a climb means completions
-+	 *             are being lost.
++	 *   reaped    the AGE_MS timeout path -- the lost-completion path.
++	 *             Healthy ~= 0; a climb means completions are being
++	 *             lost.  These buffers are moved to the quarantine, NOT
++	 *             unmapped, so a climb is a liveness signal, not memory
++	 *             corruption.
 +	 *   flushed   buffers unmapped at teardown, after the ghost vdev is
-+	 *             deleted.
++	 *             deleted -- including anything the quarantine held.
 +	 *   bssid_skipped > 0 after an attack is the proof that the addr1
 +	 *             exclusion kept the AP's own BSSID off the ghost vdev.
 +	 */
@@ -967,6 +1109,14 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			 (unsigned long long)done_s, (unsigned long long)stale_s,
 +			 (unsigned long long)reap_s, (unsigned long long)flush_s,
 +			 (unsigned long long)skip_s);
++		/*
++		 * Anything still in the quarantine here would be a leak: this
++		 * runs after hdd_mon_inject_helper_teardown, whose flush drains
++		 * it.  Warn rather than stay silent, so a leak is visible.
++		 */
++		if (g_inj.quarantine_count)
++			hdd_err("Injection: %u buffer(s) left in quarantine at stop",
++				g_inj.quarantine_count);
 +	}
 +
 +	if (g_inj.lock_inited) {
@@ -1057,7 +1207,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4552,34 @@
+@@ -3523,6 +4702,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -1092,7 +1242,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6932,11 @@
+@@ -5875,6 +7082,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -1104,7 +1254,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8368,500 @@
+@@ -7306,11 +8518,513 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1504,6 +1654,19 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			hdd_err("Injection: helper went down, dropping");
 +			goto drop;
 +		}
++		/*
++		 * Quarantine full: the reaper is holding mappings it cannot
++		 * prove firmware is done with.  Refuse TX rather than keep
++		 * allocating.  This is the fail-safe end of the bounded
++		 * quarantine -- the alternative (force-freeing to make room)
++		 * is the SMMU fault this design exists to prevent.
++		 */
++		if (g_inj.quarantine_full) {
++			qdf_spin_unlock_bh(&g_inj.lock);
++			qdf_nbuf_free(nbuf);
++			hdd_err_rl("Injection: quarantine full, refusing TX");
++			goto drop;
++		}
 +		if (g_inj.inflight >= HDD_MON_INJECT_BACKPRESSURE) {
 +			qdf_spin_unlock_bh(&g_inj.lock);
 +			qdf_nbuf_free(nbuf);
@@ -1607,7 +1770,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12974,25 @@
+@@ -11423,6 +13137,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1633,7 +1796,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24830,14 @@
+@@ -23260,8 +24993,14 @@
  						PM_STA_MODE,
  						NULL);
  
