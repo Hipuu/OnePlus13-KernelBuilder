@@ -73,13 +73,32 @@ absent, you flashed the previous build — the token fix is in it but not the qu
 
 `kernel_modules_*.zip` carries `qca_cld3_peach_v2.ko` — the patched driver. It is built
 with `CONFIG_MODVERSIONS=y`, so its symbol CRCs are checked against the **running**
-Image. The phone currently runs the stock OnePlus kernel (`6.6.142-android15-9-g57394986`,
-built Aug 3), whose CRCs are not this build's, so the pack will not load against it.
-Flash the matching Image first.
+Image. The stock OnePlus kernel's CRCs are not this build's, so the pack will not load
+against it. Flash the matching Image first.
 
 (Note: vermagic *branding* is NOT a barrier — `same_magic()` skips the first
 space-delimited token under MODVERSIONS, so `-OP-WILD` vs `-Hipuu` is irrelevant. It is
 the symbol CRCs that must match. See the `qcacld-module-install` memory.)
+
+## ⚠️ Do NOT use `uname -r` to check the kernel — it is spoofed
+
+This kernel is built with SUSFS, whose `uname()` hook rewrites the release string. On a
+correctly flashed device `uname -r` reports a plausible-looking stock value
+(`6.6.142-android15-9-g<random>`) that matches **no partition on the device**, and the
+random suffix changes between boots. It is not a signal that the flash failed.
+
+The kernel's own banner is not spoofed. Use `/proc/version`:
+
+    adb shell cat /proc/version    # expect: Linux version 6.6.142-android15-8-o-OP-WILD-4k
+
+Or read the value directly:
+
+    adb shell su -c 'cat /proc/sys/kernel/osrelease'   # 6.6.142-android15-8-o-OP-WILD-4k
+
+To confirm independently, read the partition itself — this is ground truth and works
+even before a reboot:
+
+    adb shell su -c 'strings /dev/block/by-name/boot_a | grep -m1 "Linux version"'
 
 ## Steps
 
@@ -90,10 +109,10 @@ the symbol CRCs that must match. See the `qcacld-module-install` memory.)
     adb shell su -c 'ksud boot-patch --kernel /data/local/tmp/Image --flash -o /data/local/tmp/ak3-out'
     adb reboot
 
-**2. Wait for boot, then confirm the Image is the new one:**
+**2. Wait for boot, then confirm the Image is the new one — with `/proc/version`, NOT `uname -r`:**
 
     adb wait-for-device
-    adb shell uname -r          # expect this build's version, not ...-9-g57394986
+    adb shell cat /proc/version   # expect ...6.6.142-android15-8-o-OP-WILD-4k...
 
 **3. Push and load the module pack:**
 
