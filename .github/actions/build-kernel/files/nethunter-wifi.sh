@@ -690,6 +690,19 @@ cmd_conmode() {
 
   echo "=== stopping Wi-Fi framework ==="
   wifi_cmd set-wifi-enabled disabled
+  # With Wi-Fi off but "scanning always available" on, the framework still
+  # runs scan-only sessions that stop/start the adapter while we hold the
+  # chip. These are not the cause of the mid-attack SSR (that is a firmware
+  # hang on monitor-vdev-up; see the injection patch notes), but keeping the
+  # framework fully quiet removes a second userspace writer to the same
+  # driver. Snapshot the setting and turn it off; the sta restore path below
+  # puts it back.
+  _scan_always=$(settings get global wifi_scan_always_enabled 2>/dev/null)
+  case "$_scan_always" in
+    0|1) ;;
+    *) _scan_always=1 ;;
+  esac
+  settings put global wifi_scan_always_enabled 0 2>/dev/null
   sleep 3
   ip link set wlan0 down 2>/dev/null
 
@@ -758,6 +771,9 @@ cmd_conmode() {
     echo "If you must reload in place: $0 conmode sta --force (crash risk accepted)"
   else
     wifi_cmd set-wifi-enabled enabled
+    # Restore the scan-always-available setting snapshot taken when the
+    # framework was stopped above (the snapshot never keeps an invalid value).
+    settings put global wifi_scan_always_enabled "$_scan_always" 2>/dev/null
     echo nethunter-inject > /sys/power/wake_unlock 2>/dev/null
     echo "  Wi-Fi re-enabled; reconnection takes a few seconds"
     # Firmware-health check after leaving monitor mode. The driver logs a
