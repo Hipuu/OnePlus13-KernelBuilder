@@ -2,15 +2,15 @@
 
 **Nothing in this file has been run. Every step is yours to execute.**
 
-Run **36112030043** finished green in 21m3s and produced these artifacts (names are exact,
+Run **36115787771** finished green in 25m15s and produced these artifacts (names are exact,
 copied from the run — no substitution needed):
 
     AK3_OP13_A16_android15-6.6.142_KSUN_33239_SuSFS_v2.2.0.zip     (18 MiB)
     kernel_modules_OP13_A16_android15-6.6.142.zip                  (11 MiB)
 
-    gh run download 36112030043 -R Hipuu/OnePlus13-KernelBuilder -n \
+    gh run download 36115787771 -R Hipuu/OnePlus13-KernelBuilder -n \
         "AK3_OP13_A16_android15-6.6.142_KSUN_33239_SuSFS_v2.2.0.zip"
-    gh run download 36112030043 -R Hipuu/OnePlus13-KernelBuilder -n \
+    gh run download 36115787771 -R Hipuu/OnePlus13-KernelBuilder -n \
         "kernel_modules_OP13_A16_android15-6.6.142.zip"
 
 ## Already verified on the build output — you do not need to re-check these
@@ -20,8 +20,10 @@ The patch is provably in the shipped driver, checked against the artifacts thems
 - `qca_cld3_peach_v2.ko` exports **12** `hdd_mon_inject_*` symbols, including
   `hdd_mon_inject_tx_complete`, `hdd_mon_hard_start_xmit`, `hdd_mon_get_stats`.
 - The 16-bit-lane hardening is in the compiled code: `hdd_mon_inject_tx_complete`
-  disassembles to `and w12, w20, #0xffff` — the `desc_id & 0xFFFFU` mask.
-- The AK3 zip contains `Image` (38,935,040 bytes), so the flash command below is correct.
+  disassembles to `and w12, w20, #0xffff` at offset `0x24bf14` — the `desc_id & 0xFFFFU` mask.
+- The AK3 zip contains `Image`, 38,935,040 bytes,
+  sha256 `d1478248de0d0188cde92dac0ca7b91414bfa06ffa9bcda30076c97b12f05c92`.
+- `qca_cld3_peach_v2.ko` sha256 `8f1f605b57250645dc64e144279d482e9ec1b714ce36bd5890889b67c59b1df4`.
 - vermagic: `6.6.142-android15-8-o-OP-WILD-4k SMP preempt mod_unload modversions aarch64`.
 
 So if the module pack loads at all, it is the patched driver. The remaining question is
