@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1023 @@
+@@ -3449,6 +3456,1025 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -282,18 +282,16 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +}
 +
 +/*
-+ * Unmap + free an injection nbuf.  WMI mapped it on submit (LL path).
++ * Unmap + free an injection nbuf.  WMI mapped it on submit (LL path, see
++ * qdf_nbuf_map_single in send_mgmt_cmd_tlv) and, on the send-failure path,
++ * unmaps it itself before returning E_FAILURE -- so this runs only for a
++ * buffer WMI accepted, whose mapping WMI holds until completion.
 + * Stock mgmt_txrx completion cannot reclaim our nbufs: we bypass its
 + * descriptor pool and use high-range desc_ids.  peach-v2 DOES emit TX
-+ * completion events for the ghost STA helper, but wma_process_mgmt_tx_
-+ * completion only logs "descriptor unavailable" for our ids and never
-+ * unmaps — so the host must reclaim every successfully submitted
-+ * buffer via the reaper or an explicit flush.
-+ *
-+ * NOTE: unmapping a buffer the firmware may still be DMA-reading is
-+ * inherently racy on a ghost vdev.  We mitigate with short ages under
-+ * pressure and a hard flush only on stop/teardown after cancelling
-+ * new submits.  A true fix needs WMA-layer completion ownership.
++ * completion events for the ghost STA helper, and wma_process_mgmt_tx_
++ * completion routes ours to hdd_mon_inject_tx_complete, which calls this
++ * on a strict token match.  The reaper and the teardown flush are the
++ * fallbacks for a completion that never arrives.
 + */
 +static void hdd_mon_inject_unmap_free(qdf_nbuf_t nbuf)
 +{
@@ -463,21 +461,25 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	/*
-+	 * Strict token match, and now it can actually succeed.  The token
-+	 * is built entirely inside the 16 bits firmware echoes
-+	 * (hdd_mon_inject_make_desc_id), so `desc_id` here is the same
-+	 * value slot_put stored -- measured 235/235 on-device.
++	 * Compare in the 16-bit lane, not the full 32-bit word.  The token
++	 * lives entirely in the low 16 bits and firmware echoes exactly the
++	 * 16 bits it was sent (struct wmi_mgmt_params.desc_id is uint16_t, so
++	 * the host widens it with zero high bits).  Masking both sides makes
++	 * the match independent of whatever the completion event carries
++	 * above bit 15 -- which is the safe direction: a spurious high bit
++	 * would otherwise make the compare unsatisfiable, silently returning
++	 * this code to the reaper-only regime that caused the SMMU fault.
 +	 *
 +	 * The match is also what makes this safe.  Because every reuse of a
-+	 * slot bumps that slot's generation, a completion that arrives
-+	 * after the slot was reused carries the previous occupant's token
-+	 * and compares unequal: we free NOTHING.  Without the generation
-+	 * (i.e. with a bare slot index, as the old low16-only fallback
-+	 * did) that stale completion would free the NEW submission's nbuf
-+	 * while firmware is still DMA-reading it -- the UAF the old
-+	 * strict-compare comment was reaching for.  The difference is that
-+	 * the old compare could never be true at all, so no completion was
-+	 * ever consumed and the reaper became the only reclaim path.
++	 * slot bumps that slot's generation, a completion that arrives after
++	 * the slot was reused carries the previous occupant's token and
++	 * compares unequal: we free NOTHING.  Without the generation (i.e.
++	 * with a bare slot index, as the old low16-only fallback did) that
++	 * stale completion would free the NEW submission's nbuf while
++	 * firmware is still DMA-reading it -- the UAF the old strict-compare
++	 * comment was reaching for.  The difference is that the old compare
++	 * could never be true at all, so no completion was ever consumed and
++	 * the reaper became the only reclaim path.
 +	 *
 +	 * A slot that is not in_use, or whose stored token differs, is a
 +	 * stale or duplicate completion: drop it, free nothing, and leave
@@ -485,7 +487,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 */
 +	stored_desc = g_inj.slots[idx].desc_id;
 +	if (g_inj.slots[idx].in_use &&
-+	    stored_desc == desc_id) {
++	    stored_desc == (desc_id & 0xFFFFU)) {
 +		nbuf = g_inj.slots[idx].nbuf;
 +		g_inj.slots[idx].in_use = false;
 +		g_inj.slots[idx].nbuf = NULL;
@@ -536,9 +538,9 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +}
 +
 +/*
-+ * Reaper work: free nbufs older than the age threshold. Safety net only
-+ * when firmware never completes (or completion is lost). Under pressure
-+ * use a shorter age and faster reschedule.
++ * Reaper work: free nbufs older than the age threshold.  This is the
++ * LOST-COMPLETION path only -- the healthy path is
++ * hdd_mon_inject_tx_complete, which reclaims on the firmware event.
 + */
 +static void hdd_mon_inject_reaper(struct work_struct *work)
 +{
@@ -1052,7 +1054,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4547,34 @@
+@@ -3523,6 +4549,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -1087,7 +1089,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6927,11 @@
+@@ -5875,6 +6929,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -1099,7 +1101,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8363,500 @@
+@@ -7306,11 +8365,500 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1602,7 +1604,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12969,25 @@
+@@ -11423,6 +12971,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1628,7 +1630,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24825,14 @@
+@@ -23260,8 +24827,14 @@
  						PM_STA_MODE,
  						NULL);
  
