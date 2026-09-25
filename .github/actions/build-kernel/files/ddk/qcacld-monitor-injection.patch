@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,966 @@
+@@ -3449,6 +3456,1023 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -204,6 +204,32 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 * bssid_skipped=0 did NOT exercise the exclusion.
 +	 */
 +	uint64_t bssid_skipped;
++	/*
++	 * Reclaim-path accounting.  A run can only be diagnosed from its
++	 * counters if it is visible WHICH path freed each buffer, so these
++	 * are the load-bearing diagnostic for the token fix:
++	 *
++	 *   tx_complete  completions that matched their slot's token and
++	 *                freed it -- the healthy path, and the one that was
++	 *                dead code (0/235) before the token moved into the
++	 *                low 16 bits.
++	 *   tx_stale     completions that arrived for a token the slot no
++	 *                longer held (a reused slot's previous occupant, or
++	 *                a duplicate).  Expected and benign: frees nothing.
++	 *   reaped       buffers reclaimed by the AGE_MS timeout, i.e.
++	 *                completions firmware never delivered.  This is the
++	 *                path that unmaps on a timer, so it is the one that
++	 *                caused the SMMU fault; it must stay near zero in a
++	 *                healthy run.  It was previously only hdd_debug, so
++	 *                a crashed run could not prove whether it fired.
++	 *
++	 * Healthy session: tx_complete >> 0, reaped ~= 0.  Before the fix
++	 * the reverse held (tx_complete 0, everything reaped), which is
++	 * exactly what the 987.9s SMMU fault looked like.
++	 */
++	uint64_t tx_stale;
++	uint64_t reaped;
++	uint64_t flushed;
 +};
 +
 +static struct hdd_mon_inject_ctx g_inj;
@@ -404,6 +430,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	for (i = 0; i < count; i++)
 +		hdd_mon_inject_unmap_free(nbufs[i]);
 +
++	g_inj.flushed += count;
 +	if (count)
 +		hdd_info("Injection: flushed %u in-flight nbuf(s)", count);
 +}
@@ -466,6 +493,8 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		if (g_inj.inflight)
 +			g_inj.inflight--;
 +		freed = true;
++	} else {
++		g_inj.tx_stale++;
 +	}
 +	dev = g_inj.mon_dev;
 +	if (freed) {
@@ -558,6 +587,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +				g_inj.inflight--;
 +		}
 +	}
++	g_inj.reaped += count;
 +	inflight_snap = g_inj.inflight;
 +	qdf_spin_unlock_bh(&g_inj.lock);
 +
@@ -565,8 +595,16 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		hdd_mon_inject_unmap_free(nbufs[i]);
 +
 +	if (count)
-+		hdd_debug("Injection: reaped %u nbuf(s), inflight now %u",
-+			  count, inflight_snap);
++		/*
++		 * hdd_info, not hdd_debug: this is the ONLY path that unmaps
++		 * on a timer rather than on a completion, so it is the path
++		 * that can unmap a buffer firmware still holds.  A healthy
++		 * run must show reaped ~= 0; if this climbs, completions are
++		 * being lost and the age needs raising.  Leaving it at debug
++		 * made the previous crash unprovable from the log.
++		 */
++		hdd_info("Injection: reaped %u nbuf(s), inflight now %u",
++			 count, inflight_snap);
 +
 +	/* Reschedule while helper is ready; go faster under pressure. */
 +	if (ready_snap) {
@@ -889,22 +927,41 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	hdd_mon_inject_slots_flush();
 +
 +	/*
-+	 * Surface the counters before the lock goes away: bssid_skipped
-+	 * > 0 after an attack is the on-device proof that the addr1
-+	 * exclusion kept the AP's own BSSID off the ghost vdev.
++	 * Surface the counters before the lock goes away.  This line is the
++	 * on-device diagnostic for the whole reclaim design, so it carries
++	 * every path that can free a buffer:
++	 *
++	 *   complete  completions that matched and freed their slot -- the
++	 *             healthy reclaim path.  It was dead code before the
++	 *             token moved into the low 16 bits, so a run that ends
++	 *             with complete=0 and reaped>0 has NOT been fixed.
++	 *   stale     completions for a token the slot no longer held --
++	 *             expected (reused slot) and safe; frees nothing.
++	 *   reaped    the AGE_MS timeout path, the only unmap not driven by
++	 *             a completion.  Healthy ~= 0; a climb means completions
++	 *             are being lost.
++	 *   flushed   buffers unmapped at teardown, after the ghost vdev is
++	 *             deleted.
++	 *   bssid_skipped > 0 after an attack is the proof that the addr1
++	 *             exclusion kept the AP's own BSSID off the ghost vdev.
 +	 */
 +	if (g_inj.lock_inited) {
-+		uint64_t ok_s, fail_s, done_s, skip_s;
++		uint64_t ok_s, fail_s, done_s, skip_s, stale_s, reap_s, flush_s;
 +
 +		qdf_spin_lock_bh(&g_inj.lock);
 +		ok_s = g_inj.tx_ok;
 +		fail_s = g_inj.tx_fail;
 +		done_s = g_inj.tx_complete;
 +		skip_s = g_inj.bssid_skipped;
++		stale_s = g_inj.tx_stale;
++		reap_s = g_inj.reaped;
++		flush_s = g_inj.flushed;
 +		qdf_spin_unlock_bh(&g_inj.lock);
-+		hdd_info("Injection: session stats ok=%llu fail=%llu complete=%llu bssid_skipped=%llu",
++		hdd_info("Injection: session stats ok=%llu fail=%llu complete=%llu stale=%llu reaped=%llu flushed=%llu bssid_skipped=%llu",
 +			 (unsigned long long)ok_s, (unsigned long long)fail_s,
-+			 (unsigned long long)done_s, (unsigned long long)skip_s);
++			 (unsigned long long)done_s, (unsigned long long)stale_s,
++			 (unsigned long long)reap_s, (unsigned long long)flush_s,
++			 (unsigned long long)skip_s);
 +	}
 +
 +	if (g_inj.lock_inited) {
@@ -995,7 +1052,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4490,34 @@
+@@ -3523,6 +4547,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -1030,7 +1087,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6870,11 @@
+@@ -5875,6 +6927,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -1042,7 +1099,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8306,500 @@
+@@ -7306,11 +8363,500 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1545,7 +1602,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12912,25 @@
+@@ -11423,6 +12969,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1571,7 +1628,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24768,14 @@
+@@ -23260,8 +24825,14 @@
  						PM_STA_MODE,
  						NULL);
  
