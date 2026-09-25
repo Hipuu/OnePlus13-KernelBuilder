@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1178 @@
+@@ -3449,6 +3456,1353 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -66,6 +66,11 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +static void hdd_mon_inject_slots_flush(void);
 +/* Called from wma_process_mgmt_tx_completion (same .ko). */
 +bool hdd_mon_inject_tx_complete(uint32_t desc_id, uint32_t status);
++/* Upstream static helper defined later in this file (wlan_hdd_main.c). */
++static int wlan_hdd_delete_mon_link(struct hdd_adapter *adapter,
++				    struct wlan_hdd_link_info *link_info);
++/* Restore entry point, called from hdd_wlan_re_init (wlan_hdd_power.c). */
++void hdd_mon_inject_restore(struct hdd_context *hdd_ctx);
 +
 +/*
 + * Global injection context.  The spinlock protects ready, chanfreq,
@@ -1185,6 +1190,175 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	hdd_info("Injection: carrier on + TX queues woken (deferred)");
 +}
 +
++/*
++ * Restore the monitor injection session after a mid-run SSR.
++ *
++ * Called from the tail of hdd_wlan_re_init() (wlan_hdd_power.c), right
++ * after hdd_start_all_adapters().  That path rebuilds the monitor vdev
++ * machinery but does NOT re-run the monitor open path (__hdd_mon_open),
++ * so the injection context is left holding its pre-SSR state: ready=true
++ * with a ghost STA vdev id that no longer exists in the freshly
++ * re-downloaded firmware.  Two observed failure signatures follow:
++ *
++ *  - Zombie session: the reinit's own wlan_hdd_set_mon_chan() waits on
++ *    a vdev-up event the wedged firmware never sends, so the interface
++ *    keeps type=monitor with no channel and every later channel set
++ *    fails with -110.  wifite's airodump dies mid-run and the run ends
++ *    with 0 handshakes (evening runs, 2026-09-25).
++ *
++ *  - Stale-vdev assert: the next injected frame targets the ghost vdev
++ *    of the OLD firmware.  PEER_CREATE on a vdev the new firmware never
++ *    VDEV_UP'ed is the exact shape that asserts peach-v2 ~230-250 ms
++ *    later, so a run that survives the reinit can hang the firmware a
++ *    second time (the 2026-09-24 BSSID-peer hang shape).
++ *
++ * Steps, ordered so every unmap stays behind a firmware-done proof:
++ *  1. Snapshot the recorded channel BEFORE the reset.  The stop path
++ *     deliberately leaves g_inj.chanfreq intact, so it survives the SSR.
++ *  2. hdd_mon_inject_stop(): cancel deferred work, block TX, tear down
++ *     the ghost helper (its WMI commands fail benignly against a fresh
++ *     firmware and have nothing to delete), flush slots + quarantine,
++ *     destroy the spinlock.
++ *  3. Force a clean monitor vdev on the recorded channel: delete the
++ *     possibly-zombie mon link and let wlan_hdd_set_mon_chan() re-create
++ *     it, which waits on the vdev-up event itself.  A timeout here means
++ *     the firmware is still wedged -- log a marker and leave TX disabled
++ *     rather than re-arming on a vdev that cannot transmit.
++ *  4. Re-arm injection from scratch on the recorded channel: fresh
++ *     context, ghost STA helper, carrier + queue wake.  The helper is
++ *     created inline, not via the deferred tx-enable work, because the
++ *     monitor vdev is already up here -- the exact state that work was
++ *     waiting for.
++ */
++void hdd_mon_inject_restore(struct hdd_context *hdd_ctx)
++{
++	struct hdd_adapter *adapter;
++	struct wlan_hdd_link_info *link_info;
++	struct hdd_monitor_ctx *mon_ctx;
++	struct wlan_objmgr_vdev *vdev;
++	struct wlan_channel *des_chan;
++	struct net_device *dev;
++	uint32_t chanfreq = 0;
++	bool vdev_ok = false;
++	int ret;
++
++	if (!hdd_ctx)
++		return;
++
++	adapter = hdd_get_adapter(hdd_ctx, QDF_MONITOR_MODE);
++	if (!adapter)
++		return;
++	/*
++	 * Mirror hdd_start_all_adapters(): only an interface-up monitor
++	 * session is restored.  A down adapter re-runs the monitor open
++	 * path (and __hdd_mon_open's reset) when it comes back up, so
++	 * there is nothing to restore here.
++	 */
++	if (!hdd_is_interface_up(adapter) ||
++	    !wlan_hdd_is_session_type_monitor(adapter->device_mode))
++		return;
++	dev = adapter->dev;
++
++	/* Step 1: recorded channel.  g_inj.chanfreq is updated only on a
++	 * successful channel set and the stop path leaves it intact, so it
++	 * is the strongest record across an SSR.  Fall back to the
++	 * driver's own record, then to the open-path default. */
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		chanfreq = g_inj.chanfreq;
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		chanfreq = g_inj.chanfreq;
++	}
++	if (!chanfreq) {
++		hdd_adapter_for_each_active_link_info(adapter, link_info) {
++			mon_ctx = WLAN_HDD_GET_MONITOR_CTX_PTR(link_info);
++			if (mon_ctx && mon_ctx->freq) {
++				chanfreq = mon_ctx->freq;
++				break;
++			}
++		}
++	}
++	if (!chanfreq)
++		chanfreq = 2412; /* same default as __hdd_mon_open */
++	/*
++	 * Make the driver's own record agree so the vdev re-created below
++	 * starts on the attack channel, not on a stale/default one.
++	 */
++	hdd_adapter_for_each_active_link_info(adapter, link_info) {
++		mon_ctx = WLAN_HDD_GET_MONITOR_CTX_PTR(link_info);
++		if (mon_ctx)
++			mon_ctx->freq = chanfreq;
++	}
++
++	hdd_info("Injection: restoring monitor session after reinit (recorded %u MHz)",
++		 chanfreq);
++
++	/* Step 2: full stop; leaves the recorded channel intact. */
++	hdd_mon_inject_stop(adapter);
++
++	/* Step 3: clean monitor vdev on the recorded channel. */
++	hdd_adapter_for_each_active_link_info(adapter, link_info) {
++		vdev = link_info->vdev;
++		if (!vdev ||
++		    QDF_IS_STATUS_ERROR(wlan_vdev_is_up_active_state(vdev)))
++			continue;
++		des_chan = wlan_vdev_mlme_get_des_chan(vdev);
++		if (des_chan && des_chan->ch_freq == chanfreq)
++			vdev_ok = true;
++	}
++	if (!vdev_ok) {
++		hdd_adapter_for_each_active_link_info(adapter, link_info) {
++			if (link_info->vdev)
++				wlan_hdd_delete_mon_link(adapter, link_info);
++		}
++		/*
++		 * Re-creates the vdev if needed and waits on the vdev-up
++		 * event itself, so a still-wedged firmware is detected
++		 * HERE, with this marker, instead of by wifite's next
++		 * channel set.
++		 */
++		ret = wlan_hdd_set_mon_chan(adapter);
++		if (ret) {
++			hdd_err("Injection: monitor restore FAILED (rc %d, %u MHz) - TX disabled until reboot/reload",
++				ret, chanfreq);
++			return;
++		}
++		hdd_info("Injection: monitor vdev re-created on %u MHz",
++			 chanfreq);
++	}
++
++	/* Step 4: re-arm injection from scratch on the recorded channel. */
++	qdf_mem_zero(&g_inj, sizeof(g_inj));
++	qdf_spinlock_create(&g_inj.lock);
++	g_inj.lock_inited = true;
++	g_inj.chanfreq = chanfreq;
++
++	if (hdd_mon_inject_helper_create(adapter, chanfreq) !=
++	    QDF_STATUS_SUCCESS) {
++		hdd_err("Injection: helper re-create FAILED after reinit - TX disabled");
++		if (dev) {
++			netif_tx_stop_all_queues(dev);
++			netif_carrier_off(dev);
++		}
++		return;
++	}
++
++	if (g_inj.lock_inited) {
++		qdf_spin_lock_bh(&g_inj.lock);
++		g_inj.mon_dev = dev;
++		qdf_spin_unlock_bh(&g_inj.lock);
++	} else {
++		g_inj.mon_dev = dev;
++	}
++	if (dev) {
++		netif_carrier_on(dev);
++		netif_tx_wake_all_queues(dev);
++	}
++	hdd_info("Injection: monitor session restored after SSR (vdev %u, %u MHz, helper %pM)",
++		 g_inj.vdev_id, chanfreq, g_inj.helper_mac);
++}
++
 +#else /* !FEATURE_MONITOR_MODE_SUPPORT */
 +
 +/* Stub: forward-declared above; defined here for the !FEATURE case. */
@@ -1201,6 +1375,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	cancel_delayed_work_sync(&hdd_mon_inject_tx_enable_dw);
 +	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
 +}
++void hdd_mon_inject_restore(struct hdd_context *hdd_ctx) {}
 +
 +#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 +
@@ -1853,3 +2028,34 @@ diff --git a/components/mlme/dispatcher/inc/cfg_mlme_generic.h b/components/mlme
  	MONITOR_MODE_CONC_MAX, \
  	MONITOR_MODE_CONC_NO_SUPPORT, \
  	CFG_VALUE_OR_DEFAULT, \
+diff --git a/core/hdd/src/wlan_hdd_power.c b/core/hdd/src/wlan_hdd_power.c
+--- a/core/hdd/src/wlan_hdd_power.c
++++ b/core/hdd/src/wlan_hdd_power.c
+@@ -2178,4 +2178,9 @@
+ }
+ 
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
++/* Monitor injection session restore, defined in wlan_hdd_main.c (same .ko). */
++void hdd_mon_inject_restore(struct hdd_context *hdd_ctx);
++#endif
++
+ QDF_STATUS hdd_wlan_re_init(void)
+ {
+@@ -2212,6 +2212,17 @@
+ 	/* Restart all adapters */
+ 	hdd_start_all_adapters(hdd_ctx, false);
+ 
++#ifdef FEATURE_MONITOR_MODE_SUPPORT
++	/*
++	 * hdd_start_all_adapters() rebuilds the monitor vdev machinery but
++	 * does not re-run the monitor open path, so the injection session
++	 * (ghost STA helper, slot table, recorded channel) still points at
++	 * the pre-SSR firmware state.  Restore it here; see the function
++	 * comment in wlan_hdd_main.c for the failure signatures this fixes.
++	 */
++	hdd_mon_inject_restore(hdd_ctx);
++#endif
++
+ 	hdd_init_scan_reject_params(hdd_ctx);
+ 	hdd_ctx->bt_coex_mode_set = false;
+ 
