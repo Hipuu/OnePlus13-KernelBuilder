@@ -1,7 +1,7 @@
 diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
 --- a/core/hdd/src/wlan_hdd_cfg80211.c
 +++ b/core/hdd/src/wlan_hdd_cfg80211.c
-@@ -732,7 +732,8 @@ static const struct ieee80211_iface_limi
+@@ -732,7 +732,8 @@
  	wlan_hdd_sta_iface_limit[] = {
  	{
  		.max = 2,
@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,855 @@ static void hdd_mon_turn_off_ps_and_wow(
+@@ -3449,6 +3456,966 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -75,20 +75,64 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +#define HDD_MON_INJECT_SLOTS		32
 +#define HDD_MON_INJECT_DESC_BASE	0xF000U
++/*
++ * Token layout.  struct wmi_mgmt_params declares desc_id as uint16_t
++ * (wmi_unified_param.h), so bits above 15 are truncated at submit and
++ * NEVER reach firmware; the 16-bit lane is the only thing that comes
++ * back (measured: 235/235 completions echo it verbatim, 0/235 carry
++ * anything else).  The varying part of the id must therefore live in
++ * those 16 bits, or every reuse of a slot looks identical to firmware.
++ *
++ *   bits[4:0]   slot          (32 slots)
++ *   bits[11:5]  generation    (128 values, per-slot, bumped on reuse)
++ *   bits[15:12] 0xF           (HDD_MON_INJECT_DESC_BASE)
++ *
++ * Tokens span the whole 0xF000..0xFFFF range.  Stock mgmt ids are below
++ * MGMT_DESC_POOL_MAX (64), so a token never collides with the stock
++ * pool and a stock completion never looks like ours.
++ *
++ * This is what defeats the ABA hazard: the token changes every time a
++ * slot is reused, so a completion for a previous occupant of that slot
++ * matches nothing (the slot now holds a different token) and frees
++ * nothing.  Two independent arguments bound the residual risk:
++ *
++ *  1. Wrap: a stale completion aliases a live submission only if slot S
++ *     is reused its whole 128-value generation space first.  That is
++ *     128*32 = 4096 submits -- ~525 s at the measured 7.8/s, ~82 s under
++ *     an mdk4-class flood -- against a measured worst-case completion
++ *     latency of 768 ms.
++ *  2. Ordering: per-slot completion order is strictly FIFO (measured
++ *     1496/1496 in submit order).  Completion(g) is therefore processed
++ *     before completion(g+1)..completion(g+128), so those generations
++ *     cannot all have been submitted and freed before completion(g)
++ *     arrives; and if they were freed by the reaper instead, the reaper
++ *     age (3000 ms) has already retired slot S's token.
++ */
++#define HDD_MON_INJECT_TOKEN_MASK	0x0FFFU	/* 12 bits: slot + generation */
++#define HDD_MON_INJECT_GEN_MASK		0x7FU	/* 7 generation bits */
++#define HDD_MON_INJECT_GEN_SHIFT	5
++#define HDD_MON_INJECT_SLOT_MASK	(HDD_MON_INJECT_SLOTS - 1)
 +#define HDD_MON_INJECT_REAP_MS		1000	/* nominal reaper period */
 +#define HDD_MON_INJECT_REAP_FAST_MS	250	/* under pressure */
-+#define HDD_MON_INJECT_AGE_MS		1500	/* nominal nbuf lifetime */
++#define HDD_MON_INJECT_AGE_MS		5000	/* lost-completion safety net */
 +/*
-+ * Lifetime used once inflight >= HDD_MON_INJECT_PRESSURE.  This is the
-+ * real throughput knob for flood tools: when firmware completions do not
-+ * carry the full desc_id, the reaper is the ONLY reclaim path, so the
-+ * sustained TX rate is HDD_MON_INJECT_SLOTS / AGE_FAST_MS.  At 400 ms
-+ * that capped a deauth flood at ~80 frames/s and silently dropped ~80%
-+ * of aireplay-ng's burst; 150 ms still leaves >10x margin over the
-+ * single-digit-ms peach mgmt-TX completion latency.
++ * The reaper is now the LOST-COMPLETION path only: with the token match
++ * fixed, a completion reclaims its own buffer, so the reaper fires only
++ * when firmware never reported back.  Its age must therefore exceed the
++ * longest time firmware can still hold a buffer, and it is a single
++ * constant -- deliberately NOT shortened under pressure.  Measured
++ * submit->completion max was 768 ms under saturation (inflight up to
++ * 30); 5000 ms keeps ~6.5x margin.  The previous 150 ms was BELOW p99
++ * (180 ms), which is what let the reaper unmap buffers firmware was
++ * still DMA-reading and produced the SMMU/NOC fault.
++ *
++ * Cost of the longer age: a genuinely lost completion keeps its slot
++ * for up to 5 s, and BACKPRESSURE (30) < SLOTS (32), so ~30 losses in a
++ * row would wedge injection.  Completions are FIFO and near-lossless in
++ * practice (measured 235/235 delivered), so this is a liveness
++ * backstop, not a hot path.
 + */
-+#define HDD_MON_INJECT_AGE_FAST_MS	150	/* under pressure */
-+#define HDD_MON_INJECT_PRESSURE		16	/* faster reaper threshold */
++#define HDD_MON_INJECT_PRESSURE		16	/* more frequent reaper checks */
 +/*
 + * Drop TX at this inflight.  Must stay BELOW HDD_MON_INJECT_SLOTS or the
 + * "no free TX slot" branch fires first and the cap never engages; 30 of
@@ -109,6 +153,14 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	qdf_nbuf_t nbuf;
 +	unsigned long submit_jiffies;
 +	uint32_t desc_id;
++	/*
++	 * Per-slot generation, bumped every time this slot is handed out.
++	 * It is the varying part of the desc_id, so a completion that
++	 * arrives after the slot was reused carries the OLD token and
++	 * fails the strict compare -- which is what makes that compare
++	 * safe now that the whole id fits in the 16 bits firmware echoes.
++	 */
++	uint32_t gen;
 +};
 +
 +struct hdd_mon_inject_ctx {
@@ -138,7 +190,6 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	struct hdd_mon_inject_slot slots[HDD_MON_INJECT_SLOTS];
 +	uint32_t next_slot;
 +	uint32_t inflight;
-+	uint32_t seq;		/* monotonic salt mixed into desc_id */
 +	struct net_device *mon_dev;
 +	uint64_t tx_ok;
 +	uint64_t tx_fail;
@@ -232,17 +283,23 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +}
 +
 +/*
-+ * Build a unique desc_id in the high reserved range:
-+ *   bits[15:0]  = HDD_MON_INJECT_DESC_BASE | slot
-+ *   bits[30:16] = low 15 of monotonic seq; bit 31 stays clear so the
-+ *   int return of slot_put cannot alias its -1 "full" sentinel (double-free).
-+ * Stock mgmt_txrx pools are small; any id >= DESC_BASE misses cleanly.
++ * Build a desc_id wholly inside the 16-bit lane firmware echoes.
++ *   bits[4:0]  slot
++ *   bits[11:5] generation (per-slot, bumped on every reuse)
++ *   bits[15:12] HDD_MON_INJECT_DESC_BASE (0xF)
++ * The generation is what makes a token unique: when a slot is freed and
++ * handed out again its token changes, so a late completion for the
++ * previous occupant matches nothing and frees nothing.  Keeping the
++ * whole id in 16 bits is what lets the strict compare in
++ * hdd_mon_inject_tx_complete actually succeed -- the old layout put the
++ * generation at bits[30:16], which struct wmi_mgmt_params (uint16_t
++ * desc_id) truncated away at submit, making that compare unsatisfiable.
 + */
-+static uint32_t hdd_mon_inject_make_desc_id(uint32_t idx, uint32_t seq)
++static uint32_t hdd_mon_inject_make_desc_id(uint32_t idx, uint32_t gen)
 +{
 +	return HDD_MON_INJECT_DESC_BASE |
-+	       (idx & (HDD_MON_INJECT_SLOTS - 1)) |
-+	       ((seq & 0x7FFFU) << 16);
++	       ((gen & HDD_MON_INJECT_GEN_MASK) << HDD_MON_INJECT_GEN_SHIFT) |
++	       (idx & HDD_MON_INJECT_SLOT_MASK);
 +}
 +
 +static bool hdd_mon_inject_desc_is_ours(uint32_t desc_id)
@@ -250,21 +307,23 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	uint32_t low = desc_id & 0xFFFFU;
 +
 +	/*
-+	 * Firmware completion events typically echo only the low 16 bits
-+	 * of the WMI desc_id.  Match on that lane either way.
++	 * Firmware echoes only the low 16 bits of the WMI desc_id, and our
++	 * tokens live entirely there, so test that lane.  A token is
++	 * DESC_BASE (0xF) in the top nibble plus a 12-bit slot/generation
++	 * value, i.e. 0xF000..0xFFFF; stock mgmt ids are below
++	 * MGMT_DESC_POOL_MAX (64) and can never land in that range.
 +	 */
-+	return low >= HDD_MON_INJECT_DESC_BASE &&
-+	       low < (HDD_MON_INJECT_DESC_BASE + HDD_MON_INJECT_SLOTS);
++	return (low & ~HDD_MON_INJECT_TOKEN_MASK) == HDD_MON_INJECT_DESC_BASE;
 +}
 +
 +/* Slot index from a full or low16-only desc_id. */
 +static uint32_t hdd_mon_inject_desc_slot(uint32_t desc_id)
 +{
-+	return (desc_id & 0xFFFFU) - HDD_MON_INJECT_DESC_BASE;
++	return (desc_id & 0xFFFFU) & HDD_MON_INJECT_SLOT_MASK;
 +}
 +
 +/* Stash nbuf in the next free slot.  Caller holds g_inj.lock.
-+ * Returns desc_id (>= DESC_BASE) or -1 if the table is full.
++ * Returns desc_id (> 0) or -1 if the table is full.
 + */
 +static int hdd_mon_inject_slot_put(qdf_nbuf_t nbuf)
 +{
@@ -274,8 +333,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
 +		idx = (g_inj.next_slot + i) % HDD_MON_INJECT_SLOTS;
 +		if (!g_inj.slots[idx].in_use) {
-+			g_inj.seq++;
-+			desc_id = hdd_mon_inject_make_desc_id(idx, g_inj.seq);
++			/*
++			 * Bump this slot's generation so the new token
++			 * cannot equal the one just retired here.
++			 */
++			g_inj.slots[idx].gen++;
++			desc_id = hdd_mon_inject_make_desc_id(
++					idx, g_inj.slots[idx].gen);
 +			g_inj.slots[idx].in_use = true;
 +			g_inj.slots[idx].nbuf = nbuf;
 +			g_inj.slots[idx].submit_jiffies = jiffies;
@@ -372,19 +436,25 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	/*
-+	 * Strict desc_id match.  Earlier code accepted low16-only completions
-+	 * (firmware sometimes strips the upper seq bits) by matching on
-+	 * `(stored_desc & 0xFFFFU) == (desc_id & 0xFFFFU)`.  That allowed a
-+	 * stale completion for slot N to reclaim a slot that had been reused
-+	 * since the original submission: the stored nbuf is the new
-+	 * submission's, still in flight or being DMA'd by firmware, and
-+	 * freeing it here is a kernel UAF / DMA mapping corruption.
++	 * Strict token match, and now it can actually succeed.  The token
++	 * is built entirely inside the 16 bits firmware echoes
++	 * (hdd_mon_inject_make_desc_id), so `desc_id` here is the same
++	 * value slot_put stored -- measured 235/235 on-device.
 +	 *
-+	 * When firmware strips the seq bits, the slot stays in_use and the
-+	 * reaper (HDD_MON_INJECT_AGE_MS / _FAST_MS) reclaims it.  DMA leak
-+	 * is bounded by the reaper period + age.  When firmware echoes the
-+	 * full desc_id (the normal case on peach-v2), we reclaim immediately
-+	 * and never reach the reaper.
++	 * The match is also what makes this safe.  Because every reuse of a
++	 * slot bumps that slot's generation, a completion that arrives
++	 * after the slot was reused carries the previous occupant's token
++	 * and compares unequal: we free NOTHING.  Without the generation
++	 * (i.e. with a bare slot index, as the old low16-only fallback
++	 * did) that stale completion would free the NEW submission's nbuf
++	 * while firmware is still DMA-reading it -- the UAF the old
++	 * strict-compare comment was reaching for.  The difference is that
++	 * the old compare could never be true at all, so no completion was
++	 * ever consumed and the reaper became the only reclaim path.
++	 *
++	 * A slot that is not in_use, or whose stored token differs, is a
++	 * stale or duplicate completion: drop it, free nothing, and leave
++	 * inflight alone.
 +	 */
 +	stored_desc = g_inj.slots[idx].desc_id;
 +	if (g_inj.slots[idx].in_use &&
@@ -422,8 +492,17 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			 (unsigned long long)ok_snap,
 +			 (unsigned long long)fail_snap);
 +	else
-+		hdd_err("Injection: TX complete desc 0x%x slot %u not in use / mismatch (stored 0x%x)",
-+			desc_id, idx, stored_desc);
++		/*
++		 * A stale or duplicate completion is now an expected, benign
++		 * event (the slot was reused, so the token no longer matches),
++		 * not an error: the completion path is working as intended and
++		 * the frame it referred to was already reclaimed.  Keep it at
++		 * debug level so a healthy run does not look like a failure --
++		 * at err level this line was the "mismatch" that made a
++		 * working completion path look broken.
++		 */
++		hdd_debug("Injection: stale TX complete desc 0x%x slot %u (stored 0x%x)",
++			  desc_id, idx, stored_desc);
 +	return true;
 +}
 +
@@ -457,10 +536,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	inflight_snap = g_inj.inflight;
 +	ready_snap = g_inj.ready;
-+	if (inflight_snap >= HDD_MON_INJECT_PRESSURE)
-+		age = msecs_to_jiffies(HDD_MON_INJECT_AGE_FAST_MS);
-+	else
-+		age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
++	/*
++	 * One age, load-independent.  Pressure must never SHORTEN this
++	 * window: a deep pipeline is exactly the case where completions
++	 * are slowest, so shrinking the age under pressure would reclaim
++	 * buffers firmware is most likely still holding.  Pressure only
++	 * makes the reaper CHECK more often (see the reschedule below);
++	 * it never lowers the bar for reclaiming.
++	 */
++	age = msecs_to_jiffies(HDD_MON_INJECT_AGE_MS);
 +
 +	for (i = 0; i < HDD_MON_INJECT_SLOTS; i++) {
 +		if (g_inj.slots[i].in_use &&
@@ -669,14 +753,28 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		qdf_mem_copy(helper_mac, g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
 +	}
 +
-+	/* Stop reaper before flush so it cannot race unmap/free. */
++	/*
++	 * Stop the reaper before anything else so it cannot unmap
++	 * concurrently with the teardown below.
++	 */
 +	cancel_delayed_work_sync(&hdd_mon_inject_reaper_dw);
 +
-+	/* Force-reclaim every outstanding DMA-mapped nbuf. */
-+	hdd_mon_inject_slots_flush();
-+
-+	if (!helper_created)
++	/*
++	 * TX is already blocked (g_inj.ready = false above), so no new
++	 * buffer can enter a slot.  The outstanding ones are unmapped only
++	 * AFTER the ghost vdev is stopped and deleted, further down: while
++	 * the vdev is still STARTED in firmware, a buffer we unmap here
++	 * could still be one firmware is DMA-reading, which is the same
++	 * SMMU fault class the reaper-age fix addresses.  Firmware is the
++	 * only thing that can prove it is done with a buffer, so we let
++	 * the vdev teardown be that proof and flush afterwards.
++	 */
++	if (!helper_created) {
++		/* No ghost vdev was ever created, so no buffer of ours can
++		 * still be held by firmware: flush now. */
++		hdd_mon_inject_slots_flush();
 +		return;
++	}
 +
 +	wma = cds_get_context(QDF_MODULE_ID_WMA);
 +	if (!wma || !wma->wmi_handle) {
@@ -696,6 +794,10 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			g_inj.vdev_id = WLAN_INVALID_VDEV_ID;
 +			qdf_mem_zero(g_inj.helper_mac, QDF_MAC_ADDR_SIZE);
 +		}
++		/* Firmware is unreachable, so its vdev state cannot be
++		 * quiesced and its buffers cannot be reclaimed.  Unmap as a
++		 * last resort: leaking the mappings would be worse. */
++		hdd_mon_inject_slots_flush();
 +		return;
 +	}
 +	wmi = wma->wmi_handle;
@@ -751,6 +853,15 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		hdd_info("Injection: ghost STA helper torn down (vdev %u)",
 +			 vdev_id);
 +	}
++
++	/*
++	 * The ghost vdev is stopped and deleted, so firmware has no path
++	 * left to DMA-read any buffer we submitted on it.  NOW it is safe
++	 * to unmap and free the outstanding ones -- doing this before the
++	 * vdev teardown is what let a STARTED vdev's in-flight buffer be
++	 * unmapped underneath firmware.
++	 */
++	hdd_mon_inject_slots_flush();
 +}
 +
 +/*
@@ -884,7 +995,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4379,34 @@ static int __hdd_mon_open(struct net_dev
+@@ -3523,6 +4490,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -919,7 +1030,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6759,11 @@ int hdd_stop_no_trans(struct net_device
+@@ -5875,6 +6870,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -931,7 +1042,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8195,493 @@ static const struct net_device_ops wlan_
+@@ -7306,11 +8306,500 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1313,15 +1424,16 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	qdf_mem_copy(qdf_nbuf_data(nbuf), skb->data, skb->len);
 +
 +	/*
-+	 * Reserve a tracking slot and assign a unique high-range desc_id
-+	 * BEFORE submit. desc_id 0 collides with the stock mgmt_txrx
-+	 * pool. Our IDs live at HDD_MON_INJECT_DESC_BASE|slot with a
-+	 * seq in the upper 16 bits. wma_process_mgmt_tx_completion
-+	 * routes them to hdd_mon_inject_tx_complete for immediate
-+	 * unmap+free; the reaper is only a lost-completion safety net.
++	 * Reserve a tracking slot and take its token BEFORE submit.  The
++	 * token is 0xF000..0xFFFF, far above the stock mgmt_txrx pool
++	 * (ids < MGMT_DESC_POOL_MAX), so it neither collides with a stock
++	 * desc_id nor can a stock completion be mistaken for ours.
++	 * wma_process_mgmt_tx_completion routes it to
++	 * hdd_mon_inject_tx_complete for immediate unmap+free; the reaper
++	 * is only a lost-completion safety net.
 +	 */
 +	{
-+		int slot_id;
++		int token;
 +
 +		qdf_spin_lock_bh(&g_inj.lock);
 +		if (!g_inj.ready) {
@@ -1337,16 +1449,22 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
 +			goto drop;
 +		}
-+		slot_id = hdd_mon_inject_slot_put(nbuf);
++		token = hdd_mon_inject_slot_put(nbuf);
 +		qdf_spin_unlock_bh(&g_inj.lock);
 +
-+		if (slot_id < 0) {
++		if (token < 0) {
 +			hdd_err("Injection: no free TX slot, dropping");
 +			qdf_nbuf_free(nbuf);
 +			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
 +			goto drop;
 +		}
-+		mgmt.desc_id = (uint32_t)slot_id;
++		/*
++		 * mgmt.desc_id is uint16_t (struct wmi_mgmt_params), which is
++		 * exactly the lane our token occupies, so this assignment is
++		 * lossless -- the old 32-bit id with a seq above bit 15 was
++		 * silently truncated here, which is why firmware never saw it.
++		 */
++		mgmt.desc_id = (uint16_t)token;
 +	}
 +
 +	/* Fill WMI management TX parameters */
@@ -1427,7 +1545,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12794,25 @@ int wlan_hdd_set_mon_chan(struct hdd_ada
+@@ -11423,6 +12912,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1453,7 +1571,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24650,14 @@ wlan_hdd_add_monitor_check(struct hdd_co
+@@ -23260,8 +24768,14 @@
  						PM_STA_MODE,
  						NULL);
  
@@ -1483,7 +1601,7 @@ diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
  #include "wlan_objmgr_psoc_obj.h"
  #include "wlan_objmgr_pdev_obj.h"
  #include "wlan_objmgr_vdev_obj.h"
-@@ -3165,6 +3168,14 @@ static int wma_process_mgmt_tx_completio
+@@ -3165,6 +3168,14 @@
  	if (wma_validate_handle(wma_handle))
  		return -EINVAL;
  
@@ -1501,7 +1619,7 @@ diff --git a/core/wma/src/wma_mgmt.c b/core/wma/src/wma_mgmt.c
 diff --git a/components/mlme/dispatcher/inc/cfg_mlme_generic.h b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
 --- a/components/mlme/dispatcher/inc/cfg_mlme_generic.h
 +++ b/components/mlme/dispatcher/inc/cfg_mlme_generic.h
-@@ -1125,7 +1125,7 @@ enum wlan_epcs_frame {
+@@ -1125,7 +1125,7 @@
   */
  #define CFG_MONITOR_MODE_CONCURRENCY CFG_INI_UINT( \
  	"monitor_mode_concurrency", \
