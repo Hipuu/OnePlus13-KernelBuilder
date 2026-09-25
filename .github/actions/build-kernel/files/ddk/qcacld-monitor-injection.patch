@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1025 @@
+@@ -3449,6 +3456,1028 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -760,10 +760,13 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +/*
 + * Tear down the ghost STA helper.  Must NOT run in atomic context.
 + * Order matters for host safety:
-+ *   1. mark !ready so xmit drops immediately
++ *   1. mark !ready so xmit drops immediately (no new buffer can enter a slot)
 + *   2. cancel reaper (no concurrent unmap)
-+ *   3. flush all DMA-mapped slots
-+ *   4. PEER_DELETE / VDEV_STOP / VDEV_DELETE
++ *   3. PEER_DELETE / VDEV_STOP / VDEV_DELETE, so firmware is provably done
++ *      with every buffer we submitted on this vdev
++ *   4. flush all still-outstanding slots -- only now is it safe to unmap
++ * Flushing before step 3 is what let a buffer be unmapped while firmware was
++ * still DMA-reading it on a STARTED vdev (the SMMU/NOC fault class).
 + * Leaving the ghost STA alive after Android turns Wi-Fi off is a
 + * leading suspect for the 10-20 min late reboot; always tear it down
 + * from hdd_stop / hdd_mon_inject_stop.
@@ -1054,7 +1057,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  /**
   * __hdd_mon_open() - HDD Open function
   * @dev: Pointer to net_device structure
-@@ -3523,6 +4549,34 @@
+@@ -3523,6 +4552,34 @@
  		param.policy = BBM_DRIVER_MODE_POLICY;
  		param.policy_info.driver_mode = QDF_GLOBAL_MONITOR_MODE;
  		ucfg_dp_bbm_apply_independent_policy(hdd_ctx->psoc, &param);
@@ -1089,7 +1092,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +6929,11 @@
+@@ -5875,6 +6932,11 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
@@ -1101,7 +1104,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8365,500 @@
+@@ -7306,11 +8368,500 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1604,7 +1607,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +12971,25 @@
+@@ -11423,6 +12974,25 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
@@ -1630,7 +1633,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		return qdf_status_to_os_return(status);
  }
  #endif
-@@ -23260,8 +24827,14 @@
+@@ -23260,8 +24830,14 @@
  						PM_STA_MODE,
  						NULL);
  
