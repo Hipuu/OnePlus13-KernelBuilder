@@ -51,6 +51,24 @@ of a use-after-free, so the age is no longer load-bearing.
 Concretely, the thing to watch is that the crash does not depend on the age being right:
 `reaped` may be non-zero and the run should still survive.
 
+### Proving the quarantine is in the binary you flashed
+
+The previous build was identified by a disassembly offset in
+`hdd_mon_inject_tx_complete`. The quarantine functions are `static`, so there is no
+symbol to disassemble — use the new log strings instead. They appear nowhere in the
+previous build:
+
+    unzip -p kernel_modules_OP13_A16_android15-6.6.142.zip qca_cld3_peach_v2.ko > /tmp/ko
+    strings /tmp/ko | grep -c 'into quarantine'      # want 1
+    strings /tmp/ko | grep -c 'quarantine full'      # want 2 (the reaper's and the TX gate's)
+
+On-device, the same check against the loaded module:
+
+    adb shell su -c 'strings /sys/module/qca_cld3_peach_v2/sections/.text 2>/dev/null | grep -c quarantine'
+
+If `grep -c hdd_mon_inject /proc/kallsyms` returned 12 but the quarantine strings are
+absent, you flashed the previous build — the token fix is in it but not the quarantine.
+
 ## Why both artifacts, and why the Image must be flashed
 
 `kernel_modules_*.zip` carries `qca_cld3_peach_v2.ko` — the patched driver. It is built
