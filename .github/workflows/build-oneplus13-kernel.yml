@@ -100,6 +100,16 @@ on:
         required: true
         type: boolean
         default: true
+      battery_save:
+        description: 'Battery-first opt-ins: WQ power-efficient workqueues, RCU normal-after-boot, cpuss sleep-stats blacklist (small latency/observability tradeoffs, see README)'
+        required: true
+        type: boolean
+        default: false
+      audit_off:
+        description: 'Disable kernel audit logging via cmdline audit=0 (dmesg hygiene; on this permissive-SELinux device audit churn is otherwise constant)'
+        required: true
+        type: boolean
+        default: false
       kernel_uname:
         description: Kernel uname suffix
         required: true
@@ -338,6 +348,8 @@ jobs:
         env:
           USE_SUSFS: ${{ inputs.use_susfs }}
           USE_OPT_PATCHES: ${{ inputs.use_opt_patches }}
+          BATTERY_SAVE: ${{ inputs.battery_save }}
+          AUDIT_OFF: ${{ inputs.audit_off }}
           LTO_MODE: ${{ inputs.lto }}
           COMPILER_MODE: ${{ inputs.compiler }}
           KERNEL_UNAME: ${{ inputs.kernel_uname }}
@@ -373,6 +385,8 @@ jobs:
           config_json=$(jq -c \
             --argjson susfs "$USE_SUSFS" \
             --argjson opt "$USE_OPT_PATCHES" \
+            --argjson battery_save "$BATTERY_SAVE" \
+            --argjson audit_off "$AUDIT_OFF" \
             --argjson nethunter "$NETHUNTER" \
             --argjson wireless_modules "$WIRELESS_MODULES" \
             --argjson ddk "$ddk" \
@@ -380,7 +394,7 @@ jobs:
             --arg lto "$LTO_MODE" \
             --arg zyc "$zyc_compiler" \
             --arg uname "$KERNEL_UNAME" \
-            '.susfs = $susfs | .opt = $opt | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .ddk = $ddk | .ddk_injection = $ddk_injection | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
+            '.susfs = $susfs | .opt = $opt | .battery_save = $battery_save | .audit_off = $audit_off | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .ddk = $ddk | .ddk_injection = $ddk_injection | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
             "${{ matrix.config }}")
           echo "config_json=$config_json" >> "$GITHUB_OUTPUT"
           jq . <<< "$config_json"

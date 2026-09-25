@@ -64,6 +64,7 @@ ddkart/
 
 # Local test artifacts and session data
 artifacts/
+tmp/
 
 # Private agent instructions (keep local to this checkout)
 AGENTS.md

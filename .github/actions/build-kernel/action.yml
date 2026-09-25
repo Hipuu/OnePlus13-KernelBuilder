@@ -2564,6 +2564,53 @@ runs:
         CONFIG_SCHED_CLUSTER=y
         EOF
 
+    # Opt-in, perf-first battery knobs. Kept out of the stock defconfigs
+    # because each carries a measured tradeoff (documented in README):
+    # workqueue power-efficiency has a small latency cost per its Kconfig
+    # help text, RCU normal-after-boot trades an all-core IPI wakeup pattern
+    # for batched grace periods after boot, and the audit log on this
+    # permissive-SELinux device is constant churn. The user opts in per run
+    # via the workflow inputs (config JSON keys are the recorded defaults).
+    - name: Add Battery save configs
+      if: ${{ env.OP_BATTERY_SAVE == 'true' || env.OP_AUDIT_OFF == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Add Battery save configs"
+        extra=""
+        if [ "$OP_AUDIT_OFF" = "true" ]; then
+          extra="$extra audit=0"
+        fi
+        if [ "$OP_BATTERY_SAVE" = "true" ]; then
+          extra="$extra rcupdate.rcu_normal_after_boot=1"
+        fi
+        # The full CMDLINE line is appended because Kconfig resolves string
+        # symbols last-assignment-wins, so the appended line replaces the
+        # base defconfig's line. rcupdate.rcu_normal_after_boot keeps the
+        # vendor's expedited-GP boot path and only relaxes after boot end.
+        if [ -n "$extra" ]; then
+          cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_CMDLINE="console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard${extra}"
+        EOF
+          # The msm-kernel tree only exists on DDK variants and its Image is
+          # never flashed, but keeping the two defconfigs identical matches
+          # the branding step's two-defconfig pattern.
+          MSM_DEF="$MSM_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+          if [ -f "$MSM_DEF" ]; then
+            cat >> "$MSM_DEF" <<EOF
+        CONFIG_CMDLINE="console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard${extra}"
+        EOF
+          fi
+        fi
+        if [ "$OP_BATTERY_SAVE" = "true" ]; then
+          # Unbound workqueues concentrate async work on fewer CPUs so the
+          # rest stay in deep idle (upstream Kconfig help: per-cpu
+          # workqueues are more power hungry than unbound ones).
+          cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+        EOF
+        fi
+
     - name: Add RUST build configs
       shell: bash
       if: ${{ env.OP_RUST_BUILD == 'true' }}
@@ -2682,6 +2729,19 @@ runs:
         for mod in "${ADDR[@]}"; do
           [[ -n "$mod" ]] && modules+=("$mod")
         done
+
+        # Battery-save opt-in: these two sleep-stats drivers do no per-idle
+        # work (hardware counters read from debugfs) and cost ~0 battery; the
+        # only real effect of blocking them is losing the debugfs node vendor
+        # tooling reads, so they are gated behind the battery flag.
+        if [ "$OP_BATTERY_SAVE" = "true" ]; then
+          if [[ ! " ${modules[*]} " =~ " qcom_cpuss_sleep_stats " ]]; then
+            modules+=("qcom_cpuss_sleep_stats")
+          fi
+          if [[ ! " ${modules[*]} " =~ " qcom_cpuss_sleep_stats_v4 " ]]; then
+            modules+=("qcom_cpuss_sleep_stats_v4")
+          fi
+        fi
 
         if [ "$OP_BBR" = "true" ] || [ "$OP_BBR3" = "true" ]; then
           if [[ ! " ${modules[*]} " =~ " oplus_network_tuning " ]]; then
@@ -3428,6 +3488,18 @@ runs:
         # and kconfig discards the line before the merge even runs.
         assert_config "CONFIG_DEFAULT_FQ=y"
         assert_config "CONFIG_SCHED_CLUSTER=y"
+        # Battery opt-ins: same vendor-fragment-drop risk as above, plus the
+        # resolved CMDLINE must carry the opted-in tokens (the appended line
+        # is the whole string value, last-assignment-wins).
+        if [ "$OP_BATTERY_SAVE" = "true" ]; then
+          assert_config "CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y"
+          grep -q 'CONFIG_CMDLINE="[^"]* rcupdate\.rcu_normal_after_boot=1"' "$DOTCONFIG" \
+            || { echo "::error::Expected rcupdate.rcu_normal_after_boot=1 in resolved CONFIG_CMDLINE"; FAILED=1; }
+        fi
+        if [ "$OP_AUDIT_OFF" = "true" ]; then
+          grep -q 'CONFIG_CMDLINE="[^"]* audit=0"' "$DOTCONFIG" \
+            || { echo "::error::Expected audit=0 in resolved CONFIG_CMDLINE"; FAILED=1; }
+        fi
         if [ "$OP_NTSYNC" = "true" ]; then
           assert_config "CONFIG_NTSYNC=y"
         fi

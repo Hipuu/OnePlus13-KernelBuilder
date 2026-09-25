@@ -21,19 +21,20 @@ The pipeline is a single-device fork of [WildKernels/OnePlus_KernelSU_SUSFS](htt
 - **Perf-stack extras**: **ADIOS** I/O scheduler, **zram lz4/zstd backports**, and **Re-Kernel** freeze-notification LKM, each pinned by commit.
 - **Battery optimizations**: see [Battery & power tweaks](#battery--power-tweaks).
 - **Networking**: BBR / BBRv3, TTL target, IP_SET & IPv6 NAT, qdisc schedulers (FQ/CAKE/PIE), NTSync, TMPFS xattr/ACL.
-- **Feature toggles**: `use_susfs`, `nethunter`, `wireless_modules`, `use_opt_patches`, `hmbird`/`ds`/`bbg`/`ttl`/`ip_set`/`ntsync` (per-config), plus per-run `lto` (none/thin/full) and `optimize_level` (O2/O3).
+- **Feature toggles**: `use_susfs`, `nethunter`, `wireless_modules`, `use_opt_patches`, `battery_save`/`audit_off`, `hmbird`/`ds`/`bbg`/`ttl`/`ip_set`/`ntsync` (per-config), plus per-run `lto` (none/thin/full) and `optimize_level` (O2/O3).
 - **DDK / Bazel-Kleaf builds** (6.6.118 A16): builds `qca_cld3_<chipset>.ko` against the vendor kernel, with an optional **monitor-mode frame-injection patch** for the internal Wi-Fi; stripped `--strip-debug`, `--jobs`/heap computed for the host, and a Bazel disk cache.
 
 ---
 
 ## Supported variants
 
-All six share the same SoC (`SM8750`), Android generation (`android15`), and manifest branch (`wild/sm8750`); they differ in kernel version and OxygenOS generation.
+All seven share the same SoC (`SM8750`), Android generation (`android15`), and manifest branch (`wild/sm8750`); they differ in kernel version and OxygenOS generation.
 
 | Config | Kernel | OS | Manifest |
 |---|---|---|---|
 | `configs/OP13-6.6.89.json` | 6.6.89 | A16 | `manifests/a16/oneplus_13_6.6.89_w.xml` |
 | `configs/OP13-6.6.118.json` | 6.6.118 | A16 | `manifests/a16/oneplus_13_6.6.118_w.xml` |
+| `configs/OP13-6.6.142.json` | 6.6.142 | A16 | `manifests/a16/oneplus_13_6.6.142_w.xml` |
 | `configs/OP13-6.6.66.json` | 6.6.66 | A15 | `manifests/a15/oneplus_13_6.6.66_v.xml` |
 | `configs/OP13-6.6.30.json` | 6.6.30 | A15 | `manifests/a15/oneplus_13_6.6.30_v.xml` |
 | `configs/OP13-CPH-6.6.89.json` | 6.6.89 | A15 global | `manifests/a15/oneplus_13_global_6.6.89_v.xml` |
@@ -53,7 +54,7 @@ gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder
 gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
   -f kernel_version="6.6.118 A16"
 
-# All six variants in parallel
+# All seven variants in parallel
 gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
   -f kernel_version=all
 
@@ -66,13 +67,13 @@ gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
 
 | Input | Options / default | Notes |
 |---|---|---|
-| `kernel_version` | one of the six, or `all` | The build matrix. |
+| `kernel_version` | one of the seven, or `all` | The build matrix. |
 | `ksu_variant` | `KSUN` (default), `KSU` | Root implementation. |
 | `ksu_branch` | free text, empty = default | Empty uses `main` for KSU, `dev` for KSUN (falling back to a pinned compatible commit when recorded). |
 | `use_susfs` | `true` (default) | SUSFS feature set. |
 | `susfs_branch` | free text, empty = auto | Empty selects the GKI branch / pinned compatible commit for the tree. |
 | `nethunter` / `wireless_modules` | `true` (default) | Inline configs / external driver modules. |
-| `ddk` / `ddk_injection` | `true` (default) | Bazel-Kleaf build + qcacld monitor injection (6.6.118 A16 only; ignored elsewhere). |
+| `ddk` / `ddk_injection` | `true` (default) | Bazel-Kleaf build + qcacld monitor injection (6.6.118/6.6.142 A16 only; ignored elsewhere). |
 | `optimize_level` | `O2` (default), `O3` | Compiler optimization. |
 | `lto` | `thin` (default), `full`, `none` | Link-time optimization. `thin` enables the persistent ThinLTO cache. |
 | `compiler` | `zycromerz-19` (default), `manifest` | Toolchain source. |
@@ -153,6 +154,27 @@ A dedicated `Apply battery optimization patches` step (`.github/actions/build-ke
 - **Vendor tasktracker (A1)**: gate the `oplus_bsp_schedinfo` periodic hrtimer on `tasktrack_enable` so it cannot fire ~7.5×/s when disabled. The corresponding patch targets the vendor tree and is applied from `vendor/oplus/kernel` (the parent of the `cpu/sched/...` path).
 
 > These are battery/performance trade-offs: the global wakelock timeout and the reduced freeze timeout change how aggressively the device can suspend. If any breaks a vendor feature you rely on, disable just that patch (they are independent files).
+
+### Opt-in battery knobs (`battery_save` / `audit_off`)
+
+Two opt-in dispatch inputs add zero-perf-cost (or small, measured-latency) savings on top of the always-on patches above. Both default to `false`:
+
+| Knob | What it does | Trade-off |
+|---|---|---|
+| `battery_save` | `CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y` (unbound workqueues concentrate async work on fewer CPUs so the rest stay in deep idle); appends `rcupdate.rcu_normal_after_boot=1` to `CONFIG_CMDLINE` (keeps the vendor's expedited grace periods through boot, then relaxes to batched normal GPs — removing the repeated all-core IPI wakeups every `synchronize_rcu()` causes on the stock `rcu_expedited=1` cmdline); additionally blacklists `qcom_cpuss_sleep_stats`/`qcom_cpuss_sleep_stats_v4` | Small latency overhead on workqueue-heavy paths (per the upstream Kconfig help text); the two sleep-stats drivers cost ~0 battery — blocking them only removes a debugfs node vendor tooling may read |
+| `audit_off` | Appends `audit=0` to `CONFIG_CMDLINE`, disabling kernel audit logging | On this permissive-SELinux device audit churn is constant; the gain is dmesg/logcat hygiene, not battery |
+
+The cmdline appends go to both the common and (when present) msm-kernel `gki_defconfig`s as full `CONFIG_CMDLINE` lines — Kconfig resolves string symbols last-assignment-wins, so the appended line replaces the base one. On DDK variants the post-build "Verify Bazel defconfig" step asserts the opted-in tokens and `CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y` made it into the resolved `.config`.
+
+**On-device service script** (`files/battery/99-battery-tweaks.sh`): two zero-perf-cost runtime tweaks delivered at boot by KernelSU — `vm.page-cluster=0` (zram swap-ins decompress exactly one page instead of 8-page readahead) and `oplus_log_level=1` (drops the charger driver's per-second info spam, keeps errors). Install once:
+
+```bash
+mkdir -p /data/adb/service.d
+cp .github/actions/build-kernel/files/battery/99-battery-tweaks.sh /data/adb/service.d/
+chmod 755 /data/adb/service.d/99-battery-tweaks.sh
+```
+
+The gain is unmeasurable — these are hygiene tweaks delivered at zero cost, not a headline battery saver.
 
 ---
 
