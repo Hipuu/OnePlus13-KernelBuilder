@@ -2,6 +2,11 @@
 
 **Nothing in this file has been run. Every step is yours to execute.**
 
+> **Build status:** run **36125391570** is building `15e5fda` (the bounded-quarantine
+> fix). The artifact names below are stable across runs; the sha256s are **not** —
+> they will change. Re-read them from the finished run before flashing, or use the
+> `gh run download` commands as-is (they fetch by name, not hash).
+
 Run **36115787771** finished green in 25m15s and produced these artifacts (names are exact,
 copied from the run — no substitution needed):
 
@@ -15,7 +20,9 @@ copied from the run — no substitution needed):
 
 ## Already verified on the build output — you do not need to re-check these
 
-The patch is provably in the shipped driver, checked against the artifacts themselves:
+The patch is provably in the shipped driver, checked against the artifacts themselves
+(these hashes are from run **36115787771**; the rebuild changes them, so re-check with
+`sha256sum` if you want to confirm you flashed the newer build):
 
 - `qca_cld3_peach_v2.ko` exports **12** `hdd_mon_inject_*` symbols, including
   `hdd_mon_inject_tx_complete`, `hdd_mon_hard_start_xmit`, `hdd_mon_get_stats`.
@@ -28,6 +35,21 @@ The patch is provably in the shipped driver, checked against the artifacts thems
 
 So if the module pack loads at all, it is the patched driver. The remaining question is
 only whether the reclaim fix holds under a real attack, which needs the phone.
+
+## What changed in this build versus the one before it
+
+The previous build fixed the token compare (so completions match) and raised the reaper
+age to 5000 ms. Both are still in. This build additionally makes the reaper **stop
+unmapping**: an aged buffer now moves into a bounded quarantine and its DMA mapping is
+released only at vdev teardown, where firmware is provably done with it.
+
+That matters because the previous build's safety rested on the age being long enough,
+and an age can only be a heuristic — a host cannot tell "completion lost" from
+"completion very late". This build makes firing too early cost a *held mapping* instead
+of a use-after-free, so the age is no longer load-bearing.
+
+Concretely, the thing to watch is that the crash does not depend on the age being right:
+`reaped` may be non-zero and the run should still survive.
 
 ## Why both artifacts, and why the Image must be flashed
 
@@ -78,7 +100,7 @@ From the Arch container (which shares the host netns), with `wlan0` in monitor m
 
 The whole point of this build is that the reclaim path is now **visible**. Watch:
 
-    adb shell su -c 'dmesg | grep -iE "Injection: (session stats|TX complete|reaped|stale)"'
+    adb shell su -c 'dmesg | grep -iE "Injection: (session stats|TX complete|reaped|quarantine)"'
 
 | line | healthy | the old crash |
 |---|---|---|
@@ -92,8 +114,16 @@ The whole point of this build is that the reclaim path is now **visible**. Watch
   match, so `complete` was structurally 0 (measured 0/235) and `reaped` did all the work
   on a 150 ms timer — which unmapped buffers firmware was still DMA-reading and produced
   the SMMU/NOC fault at 987.9s.
-- **`reaped ~= 0` is the crash being gone.** If `reaped` climbs, completions are being
-  lost and `HDD_MON_INJECT_AGE_MS` needs raising.
+- **`reaped ~= 0` is the healthy case**, but a non-zero `reaped` is no longer fatal in
+  this build: those buffers go to the quarantine and their mappings are released at
+  teardown instead. If you see `reaped > 0`, look for the follow-on line
+  `Injection: reaped N nbuf(s) into quarantine (M held)` — that is the safe path firing,
+  and the run should continue normally.
+- **`quarantine full` is the one loud failure.** If you see
+  `Injection: quarantine full (32 held), refusing TX`, completions are being lost faster
+  than the safety net can absorb them and injection has stopped. That is a real bug to
+  report (the log line is ratelimited, so it will not flood) — but note it is a *stall*,
+  not a crash: no memory is corrupted and a reboot clears it.
 - A run that ends `complete=0 reaped>0` has **not** been fixed — report it.
 - **`bssid_skipped` is a separate, still-unproven claim.** The driver deliberately refuses
   to create a WMI peer for a frame whose addr1 is a BSSID rather than a station
@@ -117,3 +147,7 @@ restores the stock driver and normal Wi-Fi.
 
 Capture the whole dmesg and the `Injection:` counter lines before rebooting — with the
 new counters, the log alone should say which reclaim path fired and how many times.
+The three lines that matter are the `session stats` line, any
+`reaped ... into quarantine` line, and any `quarantine full` line; between them they
+distinguish "completions were lost but held safely" from "the reclaim path still freed
+something firmware held".
