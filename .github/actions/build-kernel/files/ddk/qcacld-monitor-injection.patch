@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1380 @@
+@@ -3449,6 +3456,1389 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -1235,11 +1235,8 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	struct hdd_adapter *adapter;
 +	struct wlan_hdd_link_info *link_info;
 +	struct hdd_monitor_ctx *mon_ctx;
-+	struct wlan_objmgr_vdev *vdev;
-+	struct wlan_channel *des_chan;
 +	struct net_device *dev;
 +	uint32_t chanfreq = 0;
-+	bool vdev_ok = false;
 +	int ret;
 +
 +	if (!hdd_ctx)
@@ -1325,35 +1322,47 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	hdd_mon_inject_stop(adapter);
 +
 +	/* Step 3: clean monitor vdev on the recorded channel. */
++	/*
++	 * Delete the (possibly zombie) mon link UNCONDITIONALLY and let
++	 * wlan_hdd_set_mon_chan() re-create it.  Do NOT skip this when the
++	 * vdev already looks up: after hdd_start_all_adapters() it is up on
++	 * the recorded freq, and wlan_hdd_set_mon_chan() early-outs on that
++	 * match (its des_chan->ch_freq == mon_ctx->freq branch), so the
++	 * channel-change path never runs and the netdev's cfg80211 channel
++	 * is left unset.  Userspace then sees channel -1 -- aireplay logs
++	 * "Couldn't determine current channel for wlan0" -- and can no
++	 * longer transmit, which is the livelock measured on-device
++	 * 2026-10-06 (27 restores, 0 of them reaching a channel set, 0 new
++	 * frames after the first SSR).
++	 */
 +	hdd_adapter_for_each_active_link_info(adapter, link_info) {
-+		vdev = link_info->vdev;
-+		if (!vdev ||
-+		    QDF_IS_STATUS_ERROR(wlan_vdev_is_up_active_state(vdev)))
-+			continue;
-+		des_chan = wlan_vdev_mlme_get_des_chan(vdev);
-+		if (des_chan && des_chan->ch_freq == chanfreq)
-+			vdev_ok = true;
++		if (link_info->vdev)
++			wlan_hdd_delete_mon_link(adapter, link_info);
 +	}
-+	if (!vdev_ok) {
-+		hdd_adapter_for_each_active_link_info(adapter, link_info) {
-+			if (link_info->vdev)
-+				wlan_hdd_delete_mon_link(adapter, link_info);
-+		}
-+		/*
-+		 * Re-creates the vdev if needed and waits on the vdev-up
-+		 * event itself, so a still-wedged firmware is detected
-+		 * HERE, with this marker, instead of by wifite's next
-+		 * channel set.
-+		 */
-+		ret = wlan_hdd_set_mon_chan(adapter);
-+		if (ret) {
-+			hdd_err("Injection: monitor restore FAILED (rc %d, %u MHz) - TX disabled until reboot/reload",
-+				ret, chanfreq);
-+			return;
-+		}
-+		hdd_info("Injection: monitor vdev re-created on %u MHz",
-+			 chanfreq);
++	/*
++	 * Re-assert the channel AFTER the delete: wlan_hdd_set_mon_chan()
++	 * reads mon_ctx->freq and returns 0 without touching the hardware
++	 * if it is zero, so if the vdev teardown cleared it the channel set
++	 * below would silently do nothing and we would be back to a channel
++	 * -1 netdev.  The recorded value is known-good; restore it.
++	 */
++	hdd_adapter_for_each_active_link_info(adapter, link_info) {
++		mon_ctx = WLAN_HDD_GET_MONITOR_CTX_PTR(link_info);
++		if (mon_ctx)
++			mon_ctx->freq = chanfreq;
 +	}
++	/*
++	 * Re-creates the vdev and waits on the vdev-up event itself, so a
++	 * still-wedged firmware is detected HERE, with this marker, instead
++	 * of by wifite's next channel set.
++	 */
++	ret = wlan_hdd_set_mon_chan(adapter);
++	if (ret) {
++		hdd_err("Injection: monitor restore FAILED (rc %d, %u MHz) - TX disabled until reboot/reload",
++			ret, chanfreq);
++		return;
++	}
++	hdd_info("Injection: monitor vdev re-created on %u MHz", chanfreq);
 +
 +	/* Step 4: re-arm injection from scratch on the recorded channel. */
 +	qdf_mem_zero(&g_inj, sizeof(g_inj));
