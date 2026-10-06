@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1389 @@
+@@ -3449,6 +3456,1413 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -166,6 +166,17 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 + * ghost vdev).  16 covers a busy BSS without unbounded firmware peers.
 + */
 +#define HDD_MON_INJECT_PEER_MAX		16	/* unicast DA peer cache */
++/*
++ * Do not issue a WMI PEER_CREATE once inflight reaches this many frames.
++ *
++ * A peer create on the ghost vdev concurrent with a saturated TX path
++ * hangs firmware (reproduced 2026-10-06; see the long comment in
++ * hdd_mon_inject_ensure_peer).  Well below BACKPRESSURE (30) so the
++ * create is only ever attempted when the pipeline is genuinely quiet;
++ * a skipped create just costs that frame a status 1/3, which is
++ * already tolerated.
++ */
++#define HDD_MON_INJECT_PEER_QUIET	4
 +
 +struct hdd_mon_inject_slot {
 +	bool in_use;
@@ -251,6 +262,14 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 * bssid_skipped=0 did NOT exercise the exclusion.
 +	 */
 +	uint64_t bssid_skipped;
++	/*
++	 * Unicast DA peer creates skipped because inflight was above
++	 * HDD_MON_INJECT_PEER_QUIET.  Expected and benign -- the frame
++	 * just gets status 1/3 instead of a peer -- but non-zero here on a
++	 * unicast flood is the proof this guard is what keeps firmware
++	 * alive, so it is surfaced in the teardown log.
++	 */
++	uint64_t peer_deferred;
 +	/*
 +	 * Reclaim-path accounting.  A run can only be diagnosed from its
 +	 * counters if it is visible WHICH path freed each buffer, so these
@@ -1096,9 +1115,12 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 *             deleted -- including anything the quarantine held.
 +	 *   bssid_skipped > 0 after an attack is the proof that the addr1
 +	 *             exclusion kept the AP's own BSSID off the ghost vdev.
++	 *   peer_deferred > 0 proves the peer-create-under-load guard fired;
++	 *             on a unicast flood this is what keeps firmware alive.
 +	 */
 +	if (g_inj.lock_inited) {
 +		uint64_t ok_s, fail_s, done_s, skip_s, stale_s, reap_s, flush_s;
++		uint64_t defer_s;
 +
 +		qdf_spin_lock_bh(&g_inj.lock);
 +		ok_s = g_inj.tx_ok;
@@ -1108,12 +1130,14 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		stale_s = g_inj.tx_stale;
 +		reap_s = g_inj.reaped;
 +		flush_s = g_inj.flushed;
++		defer_s = g_inj.peer_deferred;
 +		qdf_spin_unlock_bh(&g_inj.lock);
-+		hdd_info("Injection: session stats ok=%llu fail=%llu complete=%llu stale=%llu reaped=%llu flushed=%llu bssid_skipped=%llu",
++		hdd_info("Injection: session stats ok=%llu fail=%llu complete=%llu stale=%llu reaped=%llu flushed=%llu bssid_skipped=%llu peer_deferred=%llu",
 +			 (unsigned long long)ok_s, (unsigned long long)fail_s,
 +			 (unsigned long long)done_s, (unsigned long long)stale_s,
 +			 (unsigned long long)reap_s, (unsigned long long)flush_s,
-+			 (unsigned long long)skip_s);
++			 (unsigned long long)skip_s,
++			 (unsigned long long)defer_s);
 +		/*
 +		 * Anything still in the quarantine here would be a leak: this
 +		 * runs after hdd_mon_inject_helper_teardown, whose flush drains
@@ -1471,7 +1495,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8518,513 @@
+@@ -7306,11 +8518,544 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1569,6 +1593,37 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	 */
 +	if (g_inj.ap_bssid_valid && ether_addr_equal(g_inj.ap_bssid, mac))
 +		return;
++
++	/*
++	 * NEVER create a peer while the TX path is saturated.
++	 *
++	 * Reproduced on-device 2026-10-06: a unicast deauth flood (wifite
++	 * deauths every client with aireplay-ng -0) puts a PEER_CREATE on
++	 * the ghost STA vdev at the same moment inflight pins at the
++	 * BACKPRESSURE cap, and firmware hangs ~135 ms later -> SSR.  The
++	 * same flood sent BROADCAST is completely safe (1234 frames at
++	 * 500/s, 0 hangs, every completion status 0), and unicast at a low
++	 * rate is safe too -- so it is the peer-create-under-load
++	 * combination, not the rate, not unicast, and not injection itself.
++	 *
++	 * Skipping the create costs nothing: without a peer firmware simply
++	 * DISCARDs/NO_ACKs that one frame (status 1/3, already observed and
++	 * harmless), whereas the create hangs the chip.  The MAC is left
++	 * uncached on purpose so a later, quiet frame retries it -- and
++	 * once a peer exists the cache hit returns above, so the steady
++	 * state converges to "peer created once during a quiet moment".
++	 */
++	{
++		bool quiet;
++
++		qdf_spin_lock_bh(&g_inj.lock);
++		quiet = (g_inj.inflight < HDD_MON_INJECT_PEER_QUIET);
++		if (!quiet)
++			g_inj.peer_deferred++;
++		qdf_spin_unlock_bh(&g_inj.lock);
++		if (!quiet)
++			return;
++	}
 +
 +	qdf_spin_lock_bh(&g_inj.lock);
 +	count = g_inj.peer_count;
