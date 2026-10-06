@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1353 @@
+@@ -3449,6 +3456,1380 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -1249,14 +1249,41 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	if (!adapter)
 +		return;
 +	/*
-+	 * Mirror hdd_start_all_adapters(): only an interface-up monitor
-+	 * session is restored.  A down adapter re-runs the monitor open
-+	 * path (and __hdd_mon_open's reset) when it comes back up, so
-+	 * there is nothing to restore here.
++	 * Gate on the RECORDED injection state, not on the adapter's mode.
++	 *
++	 * wlan_hdd_is_session_type_monitor() must NOT be used here: it
++	 * returns true only when cds_get_conparam() !=
++	 * QDF_GLOBAL_MONITOR_MODE, i.e. it tests for a monitor session
++	 * riding STA concurrency.  This device brings the driver up with
++	 * con_mode=4 (QDF_GLOBAL_MONITOR_MODE), so that predicate is ALWAYS
++	 * false and the restore could never fire.  Proved on-device
++	 * 2026-10-06: hdd_wlan_re_init logged "reinitiation completed" with
++	 * zero "restoring monitor session" lines and the session stayed a
++	 * zombie (0 handshakes, wlan0 NO-CARRIER).  The adapter is already
++	 * known to be the monitor adapter (hdd_get_adapter above), so the
++	 * mode check was redundant anyway.
++	 *
++	 * g_inj.ready is set when the ghost helper is armed and cleared only
++	 * by hdd_mon_inject_stop().  The SSR path never calls stop() (proved:
++	 * no "session stats" line in the SSR log), so ready survives the
++	 * reinit and is the correct record of "injection was live".  It also
++	 * covers the legitimate skip: a monitor interface never opened has
++	 * ready=false and there is nothing to restore.
 +	 */
-+	if (!hdd_is_interface_up(adapter) ||
-+	    !wlan_hdd_is_session_type_monitor(adapter->device_mode))
++	if (!g_inj.ready) {
++		hdd_info("Injection: restore skipped (no live injection session)");
 +		return;
++	}
++	/*
++	 * A down interface re-runs the monitor open path (and __hdd_mon_open's
++	 * reset) when it comes back up, so there is nothing to restore.
++	 * Unlike the mode predicate above, this mirrors hdd_start_all_adapters()'s
++	 * own gate and is a real precondition.
++	 */
++	if (!hdd_is_interface_up(adapter)) {
++		hdd_info("Injection: restore skipped (monitor interface not up)");
++		return;
++	}
 +	dev = adapter->dev;
 +
 +	/* Step 1: recorded channel.  g_inj.chanfreq is updated only on a
@@ -1417,12 +1444,18 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  		ucfg_dp_set_current_throughput_level(hdd_ctx->psoc,
  						     PLD_BUS_WIDTH_VERY_HIGH);
  	}
-@@ -5875,6 +7082,11 @@
+@@ -5875,6 +7082,17 @@
  	if (WLAN_HDD_IS_NDI(adapter))
  		goto reset_iface_opened;
  
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
-+	if (wlan_hdd_is_session_type_monitor(adapter->device_mode))
++	/*
++	 * Same predicate trap as hdd_mon_inject_restore(): key off the
++	 * recorded injection state.  wlan_hdd_is_session_type_monitor() is
++	 * always false under con_mode=4, which left the injection session
++	 * armed across an interface stop (slots + quarantine leaked).
++	 */
++	if (g_inj.ready)
 +		hdd_mon_inject_stop(adapter);
 +#endif
 +
@@ -1945,12 +1978,18 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  };
  
  /**
-@@ -11423,6 +13137,25 @@
+@@ -11423,6 +13137,31 @@
  			adapter->monitor_mode_vdev_up_in_progress = false;
  		}
  	}
 +#ifdef FEATURE_MONITOR_MODE_SUPPORT
-+	if (wlan_hdd_is_session_type_monitor(adapter->device_mode)) {
++	/*
++	 * Same predicate trap again: under con_mode=4
++	 * wlan_hdd_is_session_type_monitor() is always false, so the
++	 * recorded channel never tracked the live one and stayed at the
++	 * open-path default.  Gate on the live injection session instead.
++	 */
++	if (g_inj.ready) {
 +		{
 +			uint32_t chanfreq_snap = 0;
 +
