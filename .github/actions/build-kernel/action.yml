@@ -2113,7 +2113,13 @@ runs:
         # Re-Kernel v11+ is version-agnostic: no KERNEL_x_y gate to uncomment.
         grep -q 'CONFIG_REKERNEL=' arch/arm64/configs/gki_defconfig || \
           {
-            echo 'CONFIG_REKERNEL=m'
+            # REKERNEL is `bool` in Re-Kernel's Kconfig, not tristate, so
+            # "=m" is invalid: Kconfig emits
+            #   warning: symbol value 'm' invalid for REKERNEL
+            # and falls back to the default (n), so Re-Kernel was silently
+            # NOT BUILT -- the build still went green.  REKERNEL_NETWORK
+            # depends on REKERNEL, so it was dead too.
+            echo 'CONFIG_REKERNEL=y'
             echo 'CONFIG_REKERNEL_NETWORK=y'
           } >> arch/arm64/configs/gki_defconfig
         echo "✅ Re-Kernel wired into drivers/rekernel"
