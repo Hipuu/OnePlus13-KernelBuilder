@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1436 @@
+@@ -3449,6 +3456,1454 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -158,7 +158,14 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 + * 32 keeps the self-peer plus a little slack while allowing a much
 + * deeper TX pipeline than the original 24, which throttled deauth floods.
 + */
-+#define HDD_MON_INJECT_BACKPRESSURE	30	/* drop TX at this inflight */
++#define HDD_MON_INJECT_BACKPRESSURE	30	/* stop the TX queue at this inflight */
++/*
++ * Wake the TX queue again once inflight drains to here.  Deliberately
++ * far below BACKPRESSURE so a congested link does not oscillate
++ * stop/wake every completion; the gap is what turns a flood into a
++ * stream paced by firmware's own completion rate.
++ */
++#define HDD_MON_INJECT_RESUME		8
 +/*
 + * Unicast DA peer cache.  A deauth flood walks the same handful of
 + * station MACs repeatedly; 8 entries thrashed and re-created peers
@@ -624,6 +631,17 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +
 +	if (nbuf)
 +		hdd_mon_inject_unmap_free(nbuf);
++
++	/*
++	 * Re-open the TX queue once the backlog has drained below the
++	 * low-water mark.  hdd_mon_hard_start_xmit stops the queue at
++	 * HDD_MON_INJECT_BACKPRESSURE (see there); without this wake a
++	 * congestion episode would wedge injection permanently.  The
++	 * hysteresis (stop at 30, wake at 8) keeps it from oscillating.
++	 */
++	if (freed && dev && inflight_snap <= HDD_MON_INJECT_RESUME) {
++		netif_tx_wake_all_queues(dev);
++	}
 +
 +	if (dev && status && freed)
 +		dev->stats.tx_errors++;
@@ -1518,7 +1536,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  	/*
  	 * The interface is marked as down for outside world (aka kernel)
  	 * But the driver is pretty much alive inside. The driver needs to
-@@ -7306,11 +8518,544 @@
+@@ -7306,11 +8518,569 @@
  };
  
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -1770,8 +1788,33 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +		}
 +
 +		if (inflight_snap >= HDD_MON_INJECT_BACKPRESSURE) {
-+			hdd_err("Injection: backpressure (inflight %u), dropping",
++			hdd_err("Injection: backpressure (inflight %u), stopping queue",
 +				inflight_snap);
++			/*
++			 * STOP the queue rather than drop-and-continue.
++			 *
++			 * Dropping here still accepts the next frame at full
++			 * rate, so a fast injector keeps hammering firmware's
++			 * TX ring even though we refuse to submit.  Measured
++			 * 2026-10-07: 800 frames @100/s -> 275 drops, survives;
++			 * 1500 frames @200/s -> 302 drops, firmware HANGS
++			 * (isolated by flooding a non-existent MAC, so it is
++			 * injection rate, not client churn).  The reference
++			 * qcacld injection implementation instead PACES when
++			 * congested (wma_apply_injection_backpressure(): 2-10 ms
++			 * delay at >85-95% queue use); stopping the netdev queue
++			 * is the equivalent Linux mechanism and blocks at the
++			 * source rather than after the fact.
++			 *
++			 * The queue is woken from hdd_mon_inject_tx_complete
++			 * once inflight drains below the low-water mark, so a
++			 * sustained flood becomes rate-limited by firmware's
++			 * own completion rate -- which is exactly what keeps it
++			 * alive.
++			 */
++			dev = g_inj.mon_dev;
++			if (dev)
++				netif_tx_stop_all_queues(dev);
 +			/* Nudge the reaper to reclaim sooner. */
 +			mod_delayed_work(system_wq, &hdd_mon_inject_reaper_dw, 0);
 +			goto drop;
