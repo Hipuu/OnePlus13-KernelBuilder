@@ -28,7 +28,7 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
  #include "wlan_p2p_cfg_api.h"
  #include "wlan_cfg80211_p2p.h"
  #include "wlan_cfg80211_interop_issues_ap.h"
-@@ -3449,6 +3456,1413 @@
+@@ -3449,6 +3456,1436 @@
  	ucfg_pmo_set_wow_enable(hdd_ctx->psoc, PMO_WOW_DISABLE_BOTH);
  }
  
@@ -845,8 +845,31 @@ diff --git a/core/hdd/src/wlan_hdd_main.c b/core/hdd/src/wlan_hdd_main.c
 +	vstart.vdev_id = vdev_id;
 +	vstart.channel.mhz = chanfreq;
 +	vstart.channel.cfreq1 = chanfreq;
-+	/* Bandwidth is encoded in phy_mode, no separate ch_width field. */
-+	vstart.channel.phy_mode = WLAN_PHYMODE_11G;
++	vstart.channel.cfreq2 = 0;
++	/*
++	 * Bandwidth is encoded in phy_mode, no separate ch_width field.
++	 * 2.4 GHz -> 11G, 5 GHz -> 11A.  Hardcoding 11G worked only because
++	 * every test ran on channel 1.
++	 */
++	vstart.channel.phy_mode = (chanfreq < 4000) ?
++		WLAN_PHYMODE_11G : WLAN_PHYMODE_11A;
++	/*
++	 * TX POWER.  This is the field that made injection silently do
++	 * nothing: wmi_unified_tlv.c logs req->channel.maxregpower as
++	 * "req->max_txpow", and it reaches the firmware as WMI max_txpow.
++	 * Left zero, the ghost vdev is started at ZERO transmit power, so
++	 * firmware accepts the frame, reports status 0 (COMPLETE_OK), and
++	 * the frame is observable on the phone's own monitor interface --
++	 * but nothing is ever radiated, so no other station receives it.
++	 * Measured on-device 2026-10-07: monitor vdev 0 started with
++	 * max_txpow 0x24 (18 dBm), ghost vdev 1 with 0x0.
++	 *
++	 * 20 dBm matches the value used by the known-working qcacld
++	 * injection implementation (Loukious, sm8150).  Values are int8_t;
++	 * the regulatory domain still caps the real EIRP in firmware.
++	 */
++	vstart.channel.maxregpower = 20;
++	vstart.channel.maxpower = 20;
 +	vstart.beacon_interval = 0;
 +	vstart.dtim_period = 0;
 +	vstart.preferred_rx_streams = 1;
