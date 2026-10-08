@@ -155,7 +155,17 @@ It is a working, on-device-verified capability, and it was hard-won. The design 
 - **Stop the TX queue under backpressure rather than dropping.** A fast injector that is merely *dropped* keeps hammering firmware's TX ring and eventually hangs it. The patch calls `netif_tx_stop_all_queues()` at the cap and wakes from the completion path once the backlog drains.
 - **The monitor netdev never gets a `cfg80211` channel** on this driver (the channel-set times out), so `airodump-ng`/`wifite` cannot capture — they block on the channel set and show `CH 0`. Capture with `tcpdump` instead.
 
-**Verified on-device** (6.6.142 A16, OnePlus 13): injected deauths measurably disconnect a station on the target AP (24–26 of 40 samples on an independent receiver), and a complete crackable WPA 4-way handshake was captured with the internal radio alone — no external adapter.
+**Verified on-device** (6.6.142 A16, OnePlus 13):
+
+- Injected deauths measurably disconnect a station on the target AP — 24–26 of 40 samples on an independent receiver, where the same test before the TX-power fix produced **0**.
+- A **complete, crackable WPA 4-way handshake** was captured with the internal radio alone — no external adapter. `aircrack-ng` reports `WPA (1 handshake)`; the capture converts cleanly to a hashcat 22000 hash.
+- Sustained injection at 200 frames/s no longer hangs firmware (the TX-queue flow control paces it by firmware's own completion rate).
+
+**Known limitations:**
+
+- **`airodump-ng` and `wifite` cannot capture on this driver.** The monitor netdev never receives a `cfg80211` channel, so `airodump` blocks on the channel set and shows `CH 0` — it captures roughly 2% of what `tcpdump` does. Use `tcpdump`. This is why stock wifite is not usable end-to-end here even though injection works.
+- Monitor-mode sessions can still wedge the firmware under heavy use (hang → session DOWN). **Reboot** to recover.
+- Cracking needs a machine with a hashcat compute backend.
 
 > Monitor-mode sessions can wedge the firmware and leave Wi-Fi dead. **Reboot** to recover rather than switching modes in place (an in-place teardown has a documented panic class). See `TESTING.md` for the full on-device procedure.
 
