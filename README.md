@@ -1,0 +1,248 @@
+# OnePlus13-KernelBuilder
+
+A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for the **OnePlus 13** (Qualcomm SM8750, codename `sun`). For each variant it produces:
+
+- A flashable **AnyKernel3 ZIP** (`AK3_*.zip`)
+- A raw ARM64 **`Image`**
+- A **wireless/CAN modules pack** (`kernel_modules_*.zip`) plus a **firmware passthrough ZIP**
+
+The pipeline is a single-device fork of [WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS), pinned to a specific commit and reduced to the OnePlus 13 `sun` platform only. It builds from a pinned `repo`-style manifest, applies a curated series of patches (KernelSU/SUSFS, NetHunter, scheduler and power tweaks, battery optimizations), and packages the results without constructing any boot/vendor/DLKM images.
+
+> **This repository intentionally produces no `boot.img`, `vendor_boot.img`, `vendor_dlkm.img`, or `system_dlkm.img`.**
+
+---
+
+## Features
+
+- **Root**: KernelSU-Next (KSUN, `dev` branch default) or KernelSU (KSU, `main` branch default), resolved to a concrete commit SHA before building.
+- **SUSFS** (optional, default on) with the simonpunk patch set and the fork-specific kernel compat fixes.
+- **NetHunter**: inline configs (Bluetooth, SDR/AirSpy/HackRF, CAN bus, USB-serial) **plus** external Wi-Fi adapter drivers (`ath9k_htc`/AR9271, `ath10k_usb`, `carl9170`, `rtl8187`, `rtl8xxxu`, `rtw88`, `rt2x00`, `zd1211rw`, `p54`, `mt76`) shipped as loadable modules.
+- **`feat/perf-stack` kernel series** (via the Hipuu common-kernel fork): MGLRU rework + workingset/refault fixes, `af_unix` GC rewrite (Tarjan SCC), BPF optimizations, `f2fs` GC/sparse-read/deadlock fixes, THP `__GFP_THISNODE` reclaim fix, cpufreq/sched `NEED_UPDATE_LIMITS` fixes, workqueue/videobuf2 tweaks, `zsmalloc` enabled + zram tracking, UKSM + HMBIRD hardening, migration vendor hooks + ZTE symbols.
+- **Perf-stack extras**: **ADIOS** I/O scheduler, **zram lz4/zstd backports**, and **Re-Kernel** freeze-notification LKM, each pinned by commit.
+- **Battery optimizations**: see [Battery & power tweaks](#battery--power-tweaks).
+- **Networking**: BBR / BBRv3, TTL target, IP_SET & IPv6 NAT, qdisc schedulers (FQ/CAKE/PIE), NTSync, TMPFS xattr/ACL.
+- **Feature toggles**: `use_susfs`, `nethunter`, `wireless_modules`, `use_opt_patches`, `battery_save`/`audit_off`, `hmbird`/`ds`/`bbg`/`ttl`/`ip_set`/`ntsync` (per-config), plus per-run `lto` (none/thin/full) and `optimize_level` (O2/O3).
+- **DDK / Bazel-Kleaf builds** (6.6.118 A16): builds `qca_cld3_<chipset>.ko` against the vendor kernel, with an optional **monitor-mode frame-injection patch** for the internal Wi-Fi; stripped `--strip-debug`, `--jobs`/heap computed for the host, and a Bazel disk cache. See [Internal Wi-Fi monitor-mode injection](#internal-wi-fi-monitor-mode-injection).
+
+---
+
+## Supported variants
+
+All seven share the same SoC (`SM8750`), Android generation (`android15`), and manifest branch (`wild/sm8750`); they differ in kernel version and OxygenOS generation.
+
+| Config | Kernel | OS | Manifest |
+|---|---|---|---|
+| `configs/OP13-6.6.89.json` | 6.6.89 | A16 | `manifests/a16/oneplus_13_6.6.89_w.xml` |
+| `configs/OP13-6.6.118.json` | 6.6.118 | A16 | `manifests/a16/oneplus_13_6.6.118_w.xml` |
+| `configs/OP13-6.6.142.json` | 6.6.142 | A16 | `manifests/a16/oneplus_13_6.6.142_w.xml` |
+| `configs/OP13-6.6.66.json` | 6.6.66 | A15 | `manifests/a15/oneplus_13_6.6.66_v.xml` |
+| `configs/OP13-6.6.30.json` | 6.6.30 | A15 | `manifests/a15/oneplus_13_6.6.30_v.xml` |
+| `configs/OP13-CPH-6.6.89.json` | 6.6.89 | A15 global | `manifests/a15/oneplus_13_global_6.6.89_v.xml` |
+| `configs/OP13-CPH-6.6.56.json` | 6.6.56 | A15 global | `manifests/a15/oneplus_13_global_6.6.56_v.xml` |
+
+---
+
+## Running a build
+
+Builds are only triggered through GitHub Actions (`workflow_dispatch`). There is no local build script.
+
+```bash
+# Default build (6.6.89 A16, KSUN + SUSFS + NetHunter + wireless modules)
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder
+
+# A single non-default variant
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f kernel_version="6.6.118 A16"
+
+# All seven variants in parallel
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f kernel_version=all
+
+# Self-hosted runner pool (requires labels: self-hosted, linux, X64)
+gh workflow run "Build OnePlus 13 Kernel" -R Hipuu/OnePlus13-KernelBuilder \
+  -f runner=self-hosted
+```
+
+### Key dispatch inputs
+
+| Input | Options / default | Notes |
+|---|---|---|
+| `kernel_version` | one of the seven, or `all` | The build matrix. |
+| `ksu_variant` | `KSUN` (default), `KSU` | Root implementation. |
+| `ksu_branch` | free text, empty = default | Empty uses `main` for KSU, `dev` for KSUN (falling back to a pinned compatible commit when recorded). |
+| `use_susfs` | `true` (default) | SUSFS feature set. |
+| `susfs_branch` | free text, empty = auto | Empty selects the GKI branch / pinned compatible commit for the tree. |
+| `nethunter` / `wireless_modules` | `true` (default) | Inline configs / external driver modules. |
+| `ddk` / `ddk_injection` | `true` (default) | Bazel-Kleaf build + qcacld monitor injection (6.6.118/6.6.142 A16 only; ignored elsewhere). |
+| `optimize_level` | `O2` (default), `O3` | Compiler optimization. |
+| `lto` | `thin` (default), `full`, `none` | Link-time optimization. `thin` enables the persistent ThinLTO cache. |
+| `compiler` | `zycromerz-19` (default), `manifest` | Toolchain source. |
+| `release_type` | `none` (default), `prerelease`, `release` | Publish the build to a GitHub release. |
+| `runner` | `github-hosted` (default), `self-hosted` | Runner pool. |
+
+---
+
+## Self-hosted runner requirements
+
+The `self-hosted` pool is optional, not required, for the DDK/Bazel variant (`feat/perf-stack`): the DDK build completes on GitHub-hosted `ubuntu-latest` (16 GB RAM plus the 16 GB swap this action configures). Register a runner with labels `self-hosted`, `linux`, `X64` to use it.
+
+- **RAM**: no ≥32 GB floor. GitHub-hosted's 16 GB + 16 GB swap is the proven configuration for the DDK build. The action clamps the Bazel JVM heap to 24 GB (host RAM − 6 GB, floored at 8 GB), so the clamp starts binding at ~30 GB of host RAM — past that point more RAM does not make a DDK build faster.
+- **Disk**: a variant-aware "Check free disk space" step enforces the floor: 150 GiB for the Bazel DDK variants (whose output base alone can exceed a 100 GB disk) and 50 GiB otherwise, on self-hosted hosts. GitHub-hosted VMs ship ~35-45 GiB free and are only warned, since builds have historically fit. Budget well above the floor if you run variants concurrently. The workspace is wiped at the start of every `build` job.
+- **OS**: Ubuntu 22.04+; the workflow installs its own dependencies via `apt-get`.
+- **No sudo required**: the `repo` binary and all temp files live under `$RUNNER_TEMP`; the workspace cleanup also prunes stale `~/.cache/bazel` output bases.
+- **Concurrency**: matrix jobs serialize via a top-level `concurrency:` group, since they share the physical host (`/dev/shm`, disk I/O, RAM). GitHub-hosted is unaffected (each job gets its own VM).
+
+Swap is only configured for GitHub-hosted runners (16 GB, via `pierotofy/set-swap-space`). The step is skipped on self-hosted hosts because it needs passwordless sudo and write access to `/`, which a locked-down runner host may not grant — on a self-hosted host the Bazel heap clamp (host RAM − 6 GB, 24 GB ceiling) keeps the JVM below physical RAM, so the swap file is not needed for the heap to fit. The only proven DDK configuration remains hosted 16 GB + swap; no self-hosted DDK build has completed on record.
+
+---
+
+## Build caches
+
+Caches are stored in **GitHub Releases** via the custom `cache/restore` and `cache/save` composite actions, not the `actions/cache` service.
+
+| Cache | Bucket | Gating |
+|---|---|---|
+| ccache | `ccache-cache` | make-based, non-clean builds |
+| Bazel disk cache | `bazel-disk-cache` | DDK (`OP_DDK`) builds |
+| **ThinLTO cache** | `lto-cache` | make-based + `lto=thin`, non-clean builds |
+
+**ThinLTO cache** (`ld-cache`): on make-based thin-LTO builds, `ld-wrapper` invokes `ld.lld "$@" --thinlto-cache-dir=… --thinlto-jobs=$((nproc/2))`, so unchanged modules skip re-importing/re-optimizing between runs. The cache dir (`ldcache_<KERNEL_FULL_VER>` under the workspace) is restored and saved with both a primary key and `restore_keys` fallbacks; the saved side uses `delete_after_upload` so it does not bloat the disk. DDK/Kleaf builds never use `ld-wrapper` and skip this cache.
+
+Version keys include the KernelSU variant, model, OS version, full kernel version, and Clang fingerprint, so caches never cross-link across toolchains or variants.
+
+---
+
+## Artifacts
+
+- `AK3_<MODEL>_<OS>_<KERNEL>_<KSU>_<VER>[_SuSFS_<ver>].zip` — flashable AnyKernel3 package.
+- `Image` — raw ARM64 kernel image.
+- `kernel_modules_<MODEL>_<OS>_<KERNEL>.zip` — external Wi-Fi/CAN modules, a flattened `modules.dep`, and the `nethunter-wifi.sh` loader.
+- `Nethunter-Wireless-Firmware-<VER>.zip` — re-published unmodified from `nullptr-t-oss/Nethunter-Wireless-Firmware`.
+- `qca_cld3_peach_v2.ko` (DDK builds) — the vendor Wi-Fi module as a standalone artifact.
+- Debug artifacts when `debug=true` (build/install logs, `vmlinux`, `Module.symvers`, modules tree).
+
+Modules are built with `CONFIG_MODVERSIONS=y`, so a modules ZIP loads **only** on the exact kernel build it shipped with.
+
+### Using wireless modules on-device
+
+```bash
+# from the extracted module pack, as root
+./nethunter-wifi.sh            # interactive menu
+./nethunter-wifi.sh load       # ath9k_htc by default
+./nethunter-wifi.sh status
+./nethunter-wifi.sh restore
+./nethunter-wifi.sh conmode monitor 6   # internal Wi-Fi -> monitor mode
+./nethunter-wifi.sh conmode sta         # back to normal
+```
+
+The loader displaces the platform Wi-Fi stack only when a loaded driver actually needs `mac80211`; a reboot (or `restore`) brings the internal Wi-Fi back. See the scroll header inside `nethunter-wifi.sh` for the full rationale.
+
+---
+
+## Internal Wi-Fi monitor-mode injection
+
+The DDK build can patch the vendor Wi-Fi driver (`qcacld-3.0` → `qca_cld3_<chipset>.ko`) so the **internal** radio can transmit arbitrary 802.11 management frames while in monitor mode — deauthentication, probe requests, and the rest. This is the `ddk_injection` input; it applies `.github/actions/build-kernel/files/ddk/qcacld-monitor-injection.patch`.
+
+It is a working, on-device-verified capability, and it was hard-won. The design and the traps are worth knowing before touching it:
+
+**How it works.** Firmware drops management TX on a plain monitor vdev, so the patch creates a hidden **ghost STA vdev** via direct WMI (`VDEV_CREATE`/`VDEV_START`/`PEER_CREATE`), then routes injected frames out on *that* vdev. It bypasses `wlan_mgmt_txrx` entirely and submits with `wmi_mgmt_unified_cmd_send()`, tracking each buffer in a 32-slot table keyed by a 16-bit token (the only lane firmware echoes back — `desc_id` is `uint16_t`, so anything above bit 15 is silently truncated).
+
+**The traps, each of which cost real time:**
+
+- **The ghost vdev must be started with real TX power.** `wmi_unified_tlv.c` reports `channel.maxregpower` as `max_txpow`; left zero the vdev radiates **nothing**, yet firmware still returns `status 0` and the frame is still visible on the phone's *own* monitor interface. Injection looked like it worked while nothing left the chip. The patch sets `maxregpower`/`maxpower`.
+- **Deauth must spoof `addr2` = the AP's BSSID.** Clients ignore deauth from an unknown source address.
+- **Never `PEER_CREATE` for the monitored AP's own BSSID** — it asserts the firmware ~230-250 ms later. The patch also defers peer creation while the TX path is congested; a peer create under load is enough to hang firmware on its own.
+- **Stop the TX queue under backpressure rather than dropping.** A fast injector that is merely *dropped* keeps hammering firmware's TX ring and eventually hangs it. The patch calls `netif_tx_stop_all_queues()` at the cap and wakes from the completion path once the backlog drains.
+- **The monitor netdev never gets a `cfg80211` channel** on this driver (the channel-set times out), so `airodump-ng`/`wifite` cannot capture — they block on the channel set and show `CH 0`. Capture with `tcpdump` instead.
+
+**Verified on-device** (6.6.142 A16, OnePlus 13): injected deauths measurably disconnect a station on the target AP (24–26 of 40 samples on an independent receiver), and a complete crackable WPA 4-way handshake was captured with the internal radio alone — no external adapter.
+
+> Monitor-mode sessions can wedge the firmware and leave Wi-Fi dead. **Reboot** to recover rather than switching modes in place (an in-place teardown has a documented panic class). See `TESTING.md` for the full on-device procedure.
+
+---
+
+## Battery & power tweaks
+
+A dedicated `Apply battery optimization patches` step (`.github/actions/build-kernel/files/battery/`) applies an idempotent, `--forward`-safe series on every base:
+
+- **Wakelock entropy**: a **global 500 ms timeout** on newly-created wakelocks (`kernel/power/wakelock.c`), so stray locks like `tx_swr_ctrl` cannot pin the CPU awake.
+- **s2idle wakeups**: only wake once from s2idle (`pm_system_wakeup`).
+- **Freeze timeout**: reduced to 1 s for Android, and made non-tunable from userspace.
+- **ext4/f2fs commit windows**: larger default commit age / `min_fsync_blocks` so writes batch and the CPU stays idle longer.
+- **`alarmtimer` wakeup**: minimized wake timeout to the nearest timer expiration.
+- **PCI PME checks**: `PME_TIMEOUT` 1000 → 4000 ms.
+- **Log spam**: silence `devkmsg` and IRQ-affinity log spam.
+- **hrtimer**: avoid pointless reprogramming when the hrtimer tick is already running (upstream stable commit).
+- **Vendor tasktracker (A1)**: gate the `oplus_bsp_schedinfo` periodic hrtimer on `tasktrack_enable` so it cannot fire ~7.5×/s when disabled. The corresponding patch targets the vendor tree and is applied from `vendor/oplus/kernel` (the parent of the `cpu/sched/...` path).
+
+> These are battery/performance trade-offs: the global wakelock timeout and the reduced freeze timeout change how aggressively the device can suspend. If any breaks a vendor feature you rely on, disable just that patch (they are independent files).
+
+### Opt-in battery knobs (`battery_save` / `audit_off`)
+
+Two opt-in dispatch inputs add zero-perf-cost (or small, measured-latency) savings on top of the always-on patches above. Both default to `false`:
+
+| Knob | What it does | Trade-off |
+|---|---|---|
+| `battery_save` | `CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y` (unbound workqueues concentrate async work on fewer CPUs so the rest stay in deep idle); appends `rcupdate.rcu_normal_after_boot=1` to `CONFIG_CMDLINE` (keeps the vendor's expedited grace periods through boot, then relaxes to batched normal GPs — removing the repeated all-core IPI wakeups every `synchronize_rcu()` causes on the stock `rcu_expedited=1` cmdline); additionally blacklists `qcom_cpuss_sleep_stats`/`qcom_cpuss_sleep_stats_v4` | Small latency overhead on workqueue-heavy paths (per the upstream Kconfig help text); the two sleep-stats drivers cost ~0 battery — blocking them only removes a debugfs node vendor tooling may read |
+| `audit_off` | Appends `audit=0` to `CONFIG_CMDLINE`, disabling kernel audit logging | On this permissive-SELinux device audit churn is constant; the gain is dmesg/logcat hygiene, not battery |
+
+The cmdline appends go to both the common and (when present) msm-kernel `gki_defconfig`s as full `CONFIG_CMDLINE` lines — Kconfig resolves string symbols last-assignment-wins, so the appended line replaces the base one. On DDK variants the post-build "Verify Bazel defconfig" step asserts the opted-in tokens and `CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y` made it into the resolved `.config`.
+
+**On-device service script** (`files/battery/99-battery-tweaks.sh`): two zero-perf-cost runtime tweaks delivered at boot by KernelSU — `vm.page-cluster=0` (zram swap-ins decompress exactly one page instead of 8-page readahead) and `oplus_log_level=1` (drops the charger driver's per-second info spam, keeps errors). Install once:
+
+```bash
+mkdir -p /data/adb/service.d
+cp .github/actions/build-kernel/files/battery/99-battery-tweaks.sh /data/adb/service.d/
+chmod 755 /data/adb/service.d/99-battery-tweaks.sh
+```
+
+The gain is unmeasurable — these are hygiene tweaks delivered at zero cost, not a headline battery saver.
+
+---
+
+## Repository layout
+
+```
+.github/
+  workflows/build-oneplus13-kernel.yml   # Top-level workflow (workflow_dispatch)
+  compatible-commits.json                # Pinned, verified SUSFS/KSUN commits
+  actions/
+    build-kernel/action.yml              # The actual build (patches, make/Kleaf, packaging)
+    build-kernel/files/                  # battery/*.patch, ddk/*, nethunter-wifi.sh, apply-susfs-main-patch.sh
+    kernel-source-sync/action.yml        # Downloads pinned sources/toolchains from the manifest
+    cache/restore|save/action.yml        # Release-backed ccache / Bazel / ThinLTO caches
+configs/                                 # JSON device configs (one per variant)
+manifests/                               # XML repo manifests (one per variant)
+README.md                                # This file
+```
+
+The published repository is deliberately just the pipeline: `.github/**`, `configs/`, `manifests/`, and `.gitattributes`. Local tooling (`validate_workflow.sh`, `debug_workflow.sh`), `TESTING.md`, and `AGENTS.md` are kept in the working checkout but untracked — see `.gitignore`. (`.gitattributes` stays tracked because it pins `*.sh` to `eol=lf`; the on-device loader does not execute from a CRLF checkout.)
+
+---
+
+## Development
+
+### Local validation
+
+```bash
+SKIP_NETWORK=1 bash validate_workflow.sh
+```
+
+(omit `SKIP_NETWORK` to also check pinned toolchain-cache assets are reachable). The validator checks YAML/JSON/XML parseability, DDK **and** battery patch hunk counts, workflow/action structure, config↔manifest alignment, full-SHA pins, absence of boot-image construction, and POSIX/LF conformance of the on-device loader.
+
+Note that `validate_workflow.sh` and `debug_workflow.sh` are **untracked** (see `.gitignore`) — they exist in a working checkout, not in the published repository. A fresh clone has neither the scripts nor any ignore rules, so take care with `git add -A` after a build: `out/`, `*.zip`, `Image`, and `kernel_workspace/` are only ignored where a `.gitignore` is present.
+
+### Debug helper
+
+```bash
+./debug_workflow.sh [status|logs|failed|watch|rerun|artifacts|download] [run_id]
+```
+
+To read **compiler** warnings from a run, use the live job log rather than the post-completion summary — `gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs --allow-escape-sequences`. The summary omits them, and a real failure can hide there (e.g. `CONFIG_REKERNEL=m` on a `bool` symbol made Kconfig silently fall back to `n`, so Re-Kernel was not built while the build stayed green).
+
+### Notes
+
+- Comments, docs, and commit messages are in English.
+- `.sh` files keep **LF** line endings (enforced by `.gitattributes`); the on-device loader is POSIX `sh`.
+- Do not loosen SHA pinning on manifests or the pinned perf-stack commits — rebuilds depend on reproducibility.
+- This repo does **not** build boot images by design; do not add `mkbootimg`/`avbtool`/`boot.img`/DLKM construction commands.
