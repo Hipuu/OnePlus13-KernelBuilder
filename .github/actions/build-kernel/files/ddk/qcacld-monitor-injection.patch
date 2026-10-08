@@ -11,9 +11,9 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
  	},
  };
  
-@@ -31301,2 +31302,70 @@
+@@ -31301,3 +31302,70 @@
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
-+ *
++/*
 + * Resolve the monitor channel-change wait when the vdev is ALREADY on the
 + * requested channel.
 + *
@@ -23,21 +23,20 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
 + * channel is a cfg80211_ch_switch_notify() from the driver.  Our vdev
 + * never sends one here, because LIM's "same channel" shortcut
 + * (lim_process_sme_req_messages.c: curr_op_freq == target_freq &&
-+ * ch_width == ch_width) calls lim_abort_channel_change() ->
-+ * WLAN_VDEV_SM_EV_CHAN_SWITCH_DISABLED, so
-+ * lim_handle_mon_switch_channel_rsp() never posts
-+ * eWNI_SME_MONITOR_MODE_VDEV_UP and this function's
-+ * qdf_wait_for_event_completion() times out.
++ * ch_width == ch_width) calls lim_abort_channel_change(), which delivers
++ * WLAN_VDEV_SM_EV_CHAN_SWITCH_DISABLED.  lim_handle_mon_switch_channel_rsp()
++ * only posts eWNI_SME_MONITOR_MODE_VDEV_UP on a successful switch, so the
++ * message is never posted and this function's wait times out.
 + *
 + * The timeout is reported to cfg80211 as failure, so the wdev keeps no
-+ * channel: `iw dev <if> info` shows none, airodump-ng shows CH 0 and
-+ * blocks on the channel set (capturing ~2% of tcpdump's frames), and
-+ * wifite -- which is built on airodump -- cannot capture at all.  The
-+ * vdev itself is fine; only the notification is missing.
++ * channel: iw dev <if> info shows none, airodump-ng shows CH 0 and blocks
++ * on the channel set (capturing about 2 percent of tcpdump's frames), and
++ * wifite -- which is built on airodump -- cannot capture at all.  The vdev
++ * itself is fine; only the notification is missing.
 + *
 + * Detect exactly that state (vdev up, already on the requested freq and
-+ * width) and synthesise the notification.  Any other timeout is left as
-+ * a genuine failure.
++ * width) and synthesise the notification.  Any other timeout is left as a
++ * genuine failure.
 + */
 +static bool hdd_mon_already_on_chan(struct hdd_adapter *adapter,
 +				    struct cfg80211_chan_def *chandef)
@@ -62,8 +61,8 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
 +
 +/*
 + * Tell cfg80211 the monitor channel the vdev is already operating on.
-+ * Mirrors the SAP path (hdd_hostapd.c), which is the only other place
-+ * this driver notifies a channel switch.
++ * Mirrors the SAP path (hdd_hostapd.c), the only other place this driver
++ * notifies a channel switch.
 + */
 +static void hdd_mon_notify_chan(struct hdd_adapter *adapter,
 +				struct cfg80211_chan_def *chandef)
@@ -82,6 +81,7 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
 +				       puncture_bitmap);
 +}
  /**
+  * __wlan_hdd_cfg80211_set_mon_ch() - Set monitor mode capture channel
 @@ -31445,5 +31509,21 @@
  	/* block on a completion variable until vdev up success*/
  	status = qdf_wait_for_event_completion(
