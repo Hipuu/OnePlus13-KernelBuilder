@@ -11,7 +11,7 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
  	},
  };
  
-@@ -31301,3 +31302,70 @@
+@@ -31301,3 +31302,67 @@
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
 +/*
 + * Resolve the monitor channel-change wait when the vdev is ALREADY on the
@@ -67,18 +67,15 @@ diff --git a/core/hdd/src/wlan_hdd_cfg80211.c b/core/hdd/src/wlan_hdd_cfg80211.c
 +static void hdd_mon_notify_chan(struct hdd_adapter *adapter,
 +				struct cfg80211_chan_def *chandef)
 +{
-+	struct wlan_hdd_link_info *link_info;
-+	uint16_t puncture_bitmap = 0;
-+
-+	link_info = hdd_get_link_info_by_vdev(
-+			WLAN_HDD_GET_CTX(adapter), adapter->deflink->vdev_id);
-+	if (link_info)
-+		puncture_bitmap = wlan_hdd_get_puncture_bitmap(link_info);
-+
++	/*
++	 * No puncture bitmap: hdd_get_puncture_bitmap() is static to
++	 * wlan_hdd_hostapd.c, and a monitor channel is 20 MHz with no
++	 * puncturing anyway.  0 is the correct value here, and passing it
++	 * avoids reaching across translation units for a static helper.
++	 */
 +	hdd_info("Injection: monitor channel already set (%u MHz) - notifying cfg80211",
 +		 chandef->chan->center_freq);
-+	wlan_cfg80211_ch_switch_notify(adapter->dev, chandef, 0,
-+				       puncture_bitmap);
++	wlan_cfg80211_ch_switch_notify(adapter->dev, chandef, 0, 0);
 +}
  /**
   * __wlan_hdd_cfg80211_set_mon_ch() - Set monitor mode capture channel
