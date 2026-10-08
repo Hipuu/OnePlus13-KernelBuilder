@@ -1354,6 +1354,102 @@ runs:
         echo "✅ KSU hooks applied"
         echo "::endgroup::"
 
+    # BORE (Burst-Oriented Response Enhancer, by Masahito Suzuki) is opt-in and
+    # runs here -- ahead of everything else that touches kernel/sched -- so its
+    # hunks match the freshly synced tree rather than a half-patched one.
+    #
+    # The patch is vendored in files/bore/ instead of fetched at build time:
+    # upstream (palazik/actions_oplus_sm8750, patches/bore.patch, blob
+    # f25f29ed) applies it with `patch -F 3` against a tree whose sched_init()
+    # still used WARN_ON_ONCE() and whose core.c carried an extra
+    # CONFIG_HMBIRD_SCHED include block. Neither of our pinned trees matches
+    # that text, so upstream's two core.c hunks landed through fuzz -- and
+    # fuzz is exactly what wedged the hrtimer patch into the middle of a stock
+    # comment on 6.6.118. Our copy re-anchors those two changes (the bore.h
+    # include moves to kernel/sched/sched.h, the sched_bore_init() call moves
+    # to the end of sched_init()) so the whole patch applies with --fuzz=0 on
+    # the 6.6.118 and 6.6.142 trees, which is asserted by the strict dry run
+    # recorded in the BORE port notes. Every other hunk is byte-for-byte
+    # upstream's.
+    #
+    # A failed hunk must fail the build: fair.c dereferences se.bore_stats
+    # outside its #ifdef, so a half-applied patch cannot compile anyway, and
+    # stopping here attaches the patch output instead of leaving a confusing
+    # compiler error hundreds of lines later. The dry run comes first so the
+    # tree is never left half-patched on the way to that failure.
+    #
+    # Scope: verified against the two A16 trees (6.6.118 OnePlusOSS, 6.6.142
+    # Hipuu). It does NOT fit the A15 trees -- their fair.c still carries the
+    # older EEVDF shape (normalized_sysctl_sched_base_slice +
+    # get_update_sysctl_factor, "0.75 msec"), which BORE's fair.c hunks
+    # rewrite, and no amount of fuzz bridges that. Enabling bore on an A15
+    # variant therefore fails here by design, with the reason spelled out.
+    - name: Apply BORE scheduler
+      if: ${{ env.OP_BORE == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply BORE scheduler"
+        cd "$COMMON_KERNEL_FOLDER"
+        BORE_PATCH="$GITHUB_ACTION_PATH/files/bore/bore.patch"
+        BORE_LOG="$RUNNER_TEMP/bore.log"
+        if ! patch -p1 --dry-run --fuzz=0 < "$BORE_PATCH" >"$BORE_LOG" 2>&1; then
+          echo "::error::BORE did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
+          echo "::error::The port is anchored on the A16 EEVDF layout; the A15 trees carry an older fair.c that these hunks rewrite."
+          grep -E 'FAILED|malformed|Reversed|garbage' "$BORE_LOG" || cat "$BORE_LOG"
+          exit 1
+        fi
+        patch -p1 --fuzz=0 < "$BORE_PATCH"
+        # The patch carries `config SCHED_BORE` in init/Kconfig. Without that
+        # symbol the line appended below is dropped by olddefconfig as an
+        # unknown option, and the kernel silently builds without BORE while
+        # every #ifdef CONFIG_SCHED_BORE block vanishes -- so check the
+        # plumbing that proves the patch landed where it had to.
+        grep -q '^config SCHED_BORE$' init/Kconfig
+        grep -q 'sched_bore_init' kernel/sched/core.c
+        grep -q 'sched/bore.h' kernel/sched/sched.h
+        echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
+        echo "✅ BORE scheduler applied"
+        echo "::endgroup::"
+    - name: Apply LRNG v60
+      if: ${{ env.OP_LRNG == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply LRNG v60"
+        cd "$COMMON_KERNEL_FOLDER"
+        LRNG_PATCH="$GITHUB_ACTION_PATH/files/lrng/lrng_v60_android15-6.6.patch"
+        LRNG_LOG="$RUNNER_TEMP/lrng.log"
+        if ! patch -p1 --dry-run --fuzz=0 < "$LRNG_PATCH" >"$LRNG_LOG" 2>&1; then
+          echo "::error::LRNG did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
+          grep -E 'FAILED|malformed|Reversed|garbage' "$LRNG_LOG" || cat "$LRNG_LOG"
+          exit 1
+        fi
+        patch -p1 --fuzz=0 < "$LRNG_PATCH"
+        # The patch gates random.o on CONFIG_RANDOM_DEFAULT_IMPL, a brand-new
+        # symbol it defines in the new drivers/char/lrng/Kconfig. If either the
+        # Kconfig source line or that Makefile gate went missing, olddefconfig
+        # would drop both new symbols as unknown and the tree would build with
+        # *no* RNG: random.c stops being compiled (CONFIG_RANDOM_DEFAULT_IMPL
+        # expands to empty) while LRNG is not selected either, so the link dies
+        # on get_random_bytes/add_device_randomness -- or, worse, quietly loses
+        # /dev/random. Check the plumbing that proves the patch landed where it
+        # had to.
+        grep -q '^source "drivers/char/lrng/Kconfig"$' drivers/char/Kconfig
+        grep -q '^obj-$(CONFIG_RANDOM_DEFAULT_IMPL) += random.o$' drivers/char/Makefile
+        grep -q '^obj-$(CONFIG_LRNG)' drivers/char/Makefile
+        grep -q '^config RANDOM_DEFAULT_IMPL$' drivers/char/lrng/Kconfig
+        grep -q '^config LRNG$' drivers/char/lrng/Kconfig
+        grep -q 'add_sched_randomness(p, cpu);' kernel/sched/core.c
+        # RANDOM_DEFAULT_IMPL off hands /dev/random, /dev/urandom and
+        # getrandom(2) to LRNG_RANDOM_IF, which defaults on exactly when it is
+        # off; LRNG itself is a plain `bool default n`.
+        cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+        # CONFIG_RANDOM_DEFAULT_IMPL is not set
+        CONFIG_LRNG=y
+        EOF
+        echo "✅ LRNG v60 applied"
+        echo "::endgroup::"
     - name: Apply Other Patches
       shell: bash
       run: |
@@ -3475,6 +3571,20 @@ runs:
         if [ "$OP_SUSFS" = "true" ]; then
           assert_config "CONFIG_KSU_SUSFS=y"
         fi
+        if [ "$OP_BORE" = "true" ]; then
+          assert_config "CONFIG_SCHED_BORE=y"
+        fi
+        if [ "$OP_LRNG" = "true" ]; then
+          assert_config "CONFIG_LRNG=y"
+          # RANDOM_DEFAULT_IMPL is the gate the patch adds around random.o. If
+          # it came back on, random.c and LRNG_RANDOM_IF would both define the
+          # RNG interface and the link would die on duplicate symbols.
+          if ! grep -qx '# CONFIG_RANDOM_DEFAULT_IMPL is not set' "$DOTCONFIG"; then
+            echo "::error::CONFIG_RANDOM_DEFAULT_IMPL must be off when LRNG is enabled"
+            grep -E 'RANDOM_DEFAULT_IMPL' "$DOTCONFIG" || echo "  (option absent entirely)"
+            FAILED=1
+          fi
+        fi
         # UKSM: the pinned KSM/UKSM values exist so kleaf's syncconfig never
         # sees a (NEW) symbol — an unset UKSM reintroduces the interactive
         # prompt loop that hung "Creating kernel config" for 20+ min (the
@@ -3740,6 +3850,28 @@ runs:
 
 
         make LD="$LD_CMD" HOSTLD="$LD_CMD" O="$OUT" olddefconfig
+        # The non-DDK path has no whole-file defconfig check, so assert the
+        # opt-ins that would otherwise fail silently: an unknown symbol is
+        # dropped by olddefconfig without a word. BORE's absence is worse
+        # than a missing feature here -- fair.c references se.bore_stats
+        # outside its #ifdef, so a dropped symbol fails the compile. LRNG is
+        # the same shape: its Kconfig carries RANDOM_DEFAULT_IMPL, so if the
+        # source line is missing both symbols vanish and the tree builds with
+        # no RNG at all.
+        if [ "$OP_BORE" = "true" ] && ! grep -qx 'CONFIG_SCHED_BORE=y' "$OUT/.config"; then
+          echo "::error::CONFIG_SCHED_BORE did not survive olddefconfig (BORE Kconfig symbol missing from the tree)"
+          exit 1
+        fi
+        if [ "$OP_LRNG" = "true" ]; then
+          if ! grep -qx 'CONFIG_LRNG=y' "$OUT/.config"; then
+            echo "::error::CONFIG_LRNG did not survive olddefconfig (LRNG Kconfig symbol missing from the tree)"
+            exit 1
+          fi
+          if ! grep -qx '# CONFIG_RANDOM_DEFAULT_IMPL is not set' "$OUT/.config"; then
+            echo "::error::CONFIG_RANDOM_DEFAULT_IMPL must be off when LRNG is enabled (random.c and LRNG would both provide the RNG interface)"
+            exit 1
+          fi
+        fi
 
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"

@@ -110,6 +110,16 @@ on:
         required: true
         type: boolean
         default: false
+      bore:
+        description: 'Apply the BORE scheduler (Burst-Oriented Response Enhancer: scores tasks by burst time so interactive work wins under load). Scheduler change, off by default. A16 trees only (6.6.118/6.6.142); an A15 variant fails the build'
+        required: true
+        type: boolean
+        default: false
+      lrng:
+        description: 'Replace the kernel RNG with LRNG v60 (Linux Random Number Generator: independent IRQ/scheduler/CPU/Jitter entropy sources feeding a ChaCha20 DRBG, instead of one BLAKE2s pool). Entropy subsystem change, off by default; applies to all seven variants'
+        required: true
+        type: boolean
+        default: false
       kernel_uname:
         description: Kernel uname suffix
         required: true
@@ -350,6 +360,8 @@ jobs:
           USE_OPT_PATCHES: ${{ inputs.use_opt_patches }}
           BATTERY_SAVE: ${{ inputs.battery_save }}
           AUDIT_OFF: ${{ inputs.audit_off }}
+          BORE: ${{ inputs.bore }}
+          LRNG: ${{ inputs.lrng }}
           LTO_MODE: ${{ inputs.lto }}
           COMPILER_MODE: ${{ inputs.compiler }}
           KERNEL_UNAME: ${{ inputs.kernel_uname }}
@@ -387,6 +399,8 @@ jobs:
             --argjson opt "$USE_OPT_PATCHES" \
             --argjson battery_save "$BATTERY_SAVE" \
             --argjson audit_off "$AUDIT_OFF" \
+            --argjson bore "$BORE" \
+            --argjson lrng "$LRNG" \
             --argjson nethunter "$NETHUNTER" \
             --argjson wireless_modules "$WIRELESS_MODULES" \
             --argjson ddk "$ddk" \
@@ -394,7 +408,7 @@ jobs:
             --arg lto "$LTO_MODE" \
             --arg zyc "$zyc_compiler" \
             --arg uname "$KERNEL_UNAME" \
-            '.susfs = $susfs | .opt = $opt | .battery_save = $battery_save | .audit_off = $audit_off | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .ddk = $ddk | .ddk_injection = $ddk_injection | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
+            '.susfs = $susfs | .opt = $opt | .battery_save = $battery_save | .audit_off = $audit_off | .bore = $bore | .lrng = $lrng | .nethunter = $nethunter | .wireless_modules = $wireless_modules | .ddk = $ddk | .ddk_injection = $ddk_injection | .lto = $lto | .zyc_compiler = $zyc | .uname = $uname' \
             "${{ matrix.config }}")
           echo "config_json=$config_json" >> "$GITHUB_OUTPUT"
           jq . <<< "$config_json"

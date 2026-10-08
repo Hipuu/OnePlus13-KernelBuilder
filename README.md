@@ -45,6 +45,8 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 > - 📡 **Monitor-mode injection** — the internal Qualcomm radio can transmit arbitrary 802.11 management frames. See [below](#-monitor-mode-injection).
 > - ⚡ **`feat/perf-stack`** — MGLRU rework, `af_unix` GC rewrite, BPF opts, f2fs fixes, THP reclaim fix, cpufreq/sched `NEED_UPDATE_LIMITS`, zsmalloc + zram, UKSM, HMBIRD.
 > - 🧩 **Extras** — **ADIOS** I/O scheduler, **zram lz4/zstd backports**, **Re-Kernel** freeze-notification LKM.
+> - 🧠 **BORE scheduler** — opt-in burst-time scoring on top of EEVDF, so interactive work wins under load. A scheduler change, so it stays off by default. See [BORE scheduler](#-bore-scheduler).
+> - 🎲 **LRNG v60** — opt-in replacement for the kernel RNG: independent IRQ/CPU/Jitter entropy sources feeding a ChaCha20 DRBG instead of one BLAKE2s pool. An entropy-subsystem change, so it stays off by default. See [LRNG v60](#-lrng-v60).
 > - 🔋 **Battery** — an always-on patch series plus opt-in `battery_save` / `audit_off` knobs. See [Battery](#-battery--power-tweaks).
 > - 🌐 **Networking** — BBR / BBRv3, TTL target, IP_SET & IPv6 NAT, FQ/CAKE/PIE, NTSync, TMPFS xattr/ACL.
 > - 🖥️ **Droidspaces** — SYSVIPC / PID_NS / POSIX_MQUEUE for portable Linux containers.
@@ -114,6 +116,8 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 | `optimize_level` / `lto` | `O2` / `thin` | Compiler optimization; `thin` enables the persistent ThinLTO cache. |
 | `compiler` | `zycromerz-19` | Or `manifest` for the pinned Clang. |
 | `battery_save` / `audit_off` | `false` | Opt-in power knobs. |
+| `bore` | `false` | Opt-in BORE scheduler patch — A16 variants only, see [BORE scheduler](#-bore-scheduler). |
+| `lrng` | `false` | Opt-in LRNG v60 RNG replacement — all seven variants, see [LRNG v60](#-lrng-v60). |
 | `kernel_uname` | `OP-WILD` | Release-string suffix. |
 | `clean_build` / `debug` | `false` | Force a full rebuild / emit debug artifacts. |
 | `release_type` | `none` | `none`, `prerelease`, or `release`. |
@@ -172,6 +176,47 @@ An always-on, idempotent, `--forward`-safe patch series (`.github/actions/build-
 | `audit_off` | Appends `audit=0` to `CONFIG_CMDLINE` | On this permissive-SELinux device audit churn is constant; the gain is log hygiene, not battery |
 
 A `service.d` script (`files/battery/99-battery-tweaks.sh`) adds `vm.page-cluster=0` and `oplus_log_level=1` at boot.
+
+---
+> [!IMPORTANT]
+> ## BORE scheduler
+>
+> **BORE** (Burst-Oriented Response Enhancer, v5.9.7, by Masahito Suzuki) scores each task by its *burst time* — the runtime since it last slept or yielded — and boosts the shorter, burstier ones. That is the profile of a compositor, a launcher, a game loop or a scroll gesture, so interactive work keeps its latency while a background compile or download runs. It costs some scheduling fairness, which is why it is a knob and not a default.
+>
+> Enable it with `bore=true`. The step applies `.github/actions/build-kernel/files/bore/bore.patch` with `--fuzz=0` and appends `CONFIG_SCHED_BORE=y` to the common `gki_defconfig`. It runs before every other patch that touches `kernel/sched/`, so its hunks always see the freshly synced tree.
+>
+> **Provenance.** A port of [`palazik/actions_oplus_sm8750`](https://github.com/palazik/actions_oplus_sm8750) `patches/bore.patch` (blob `f25f29ed`). Upstream applies it with `patch -F 3`, and at that fuzz its two `kernel/sched/core.c` hunks still land — but they land *fuzzily*, which is how an earlier patch in this repo wedged itself into the middle of a stock comment on 6.6.118. Our copy moves those two changes onto anchors both of our trees share, so the whole 41-hunk patch applies with `--fuzz=0`:
+> - `#include <linux/sched/bore.h>` moves to `kernel/sched/sched.h` (which `core.c` already includes), because the two trees disagree about the include block that follows `../smpboot.h`.
+> - `sched_bore_init()` moves to the end of `sched_init()`, because the two trees disagree about the `sched_class_above()` checks upstream anchors to — one uses `BUG_ON`, the other `WARN_ON_ONCE` plus a `CONFIG_HMBIRD_SCHED` block.
+>
+> Every other hunk is byte-for-byte upstream's, including the single non-English comment line in `bore.c`. BORE edits the fair class only (`fair.c`, `core.c`, `debug.c`, `features.h`, `fork.c`); it touches neither `sched_ext` nor the HMBIRD code, so it composes with both.
+>
+> **Variants.** A16 only — 6.6.118 and 6.6.142. The five A15 trees still carry the older EEVDF shape in `fair.c` (`normalized_sysctl_sched_base_slice` + `get_update_sysctl_factor`, `0.75 msec`), which BORE's rewrite hunks replace, and no fuzz factor bridges that gap. Asking for `bore=true` on an A15 variant **fails the build** with the offending hunks printed, rather than half-patching the tree. Applicability is checked by strict dry-run — against both pinned A16 trees directly, and against the five A15 trees by fetching the ten patched files at each pin.
+>
+> **At runtime** the tunables are sysctls under `/proc/sys/kernel/` (`sched_bore` and the `sched_burst_*` knobs, mode `0644`). `echo 0 > /proc/sys/kernel/sched_bore` puts the fair class back to plain EEVDF without reflashing.
+>
+> **Status.** Verified at the patch level only: it applies and reverts cleanly on both A16 trees, and `validate_workflow.sh` re-checks its hunk counts. It has **not** been compiled or booted yet — the first `bore=true` run is the compile check.
+
+---
+
+> [!IMPORTANT]
+> ## LRNG v60
+>
+> **LRNG** (Linux Random Number Generator, v60, by Stephan Mueller) replaces `drivers/char/random.c` with a different architecture: independent entropy sources — interrupt timing, per-CPU timing, and optionally Jitter and the scheduler — each credited separately, feeding a ChaCha20 DRBG. The stock kernel funnels everything into a single BLAKE2s pool. The practical difference is faster, better-credited boot entropy: the LRNG reports a fully seeded DRNG early instead of waiting for the pool to reach its threshold, which matters on a phone that has to have a usable `/dev/random` before user space is far along.
+>
+> Enable it with `lrng=true`. The step applies `.github/actions/build-kernel/files/lrng/lrng_v60_android15-6.6.patch` with `--fuzz=0` and appends `# CONFIG_RANDOM_DEFAULT_IMPL is not set` plus `CONFIG_LRNG=y` to the common `gki_defconfig`.
+>
+> **Provenance.** Ported from [`palazik/kernel_patches`](https://github.com/palazik/kernel_patches) blob `7567dc0c`, which consolidates upstream [`smuellerDD/lrng`](https://github.com/smuellerDD/lrng) `kernel_patches/v6.18` with `backports/v60-6.6.119` for the android15-6.6 GKI. The vendored copy is sha256 `17a872f6f160004c26ab025409656f8b6df394f4e1dedbda3766b182f8c47c3a`. It modifies five files (`crypto/drbg.c`, `drivers/char/Kconfig`, `drivers/char/Makefile`, `include/crypto/drbg.h`, `kernel/sched/core.c`) and creates 56 under `drivers/char/lrng/`, 71 hunks in all.
+>
+> **Variants.** All seven — A15 and A16. Unlike BORE, the LRNG patch does not rewrite version-specific scheduler code: its only `kernel/sched/core.c` hunks are an include line and a two-line call in `ttwu_stat`, both of which sit on anchors every pinned tree shares. Applicability is checked by strict dry-run against all seven trees, by fetching the five modified files at each pin.
+>
+> **Config shape.** The patch gates `random.o` behind a new `CONFIG_RANDOM_DEFAULT_IMPL` (default `y`) and adds `CONFIG_LRNG` (default `n`). Turning the former off makes `LRNG_RANDOM_IF` — which defaults on exactly when it is off — provide `/dev/random`, `/dev/urandom` and `getrandom(2)` from the LRNG, and pulls in the ChaCha20 DRBG and the sysctl interface. If the Kconfig source line or the Makefile gate were ever lost, `olddefconfig` would drop both symbols as unknown and the tree would build with **no RNG at all** (the link dies on `get_random_bytes`), so the step greps the plumbing that proves the patch landed where it had to, and both build paths assert `CONFIG_LRNG=y` in the resolved `.config`.
+>
+> **What stays off.** `LRNG_SCHED` (the scheduler entropy source) is left at its `n` default: it adds a call on every context switch, and the IRQ and CPU sources are on by default and sufficient. The optional `/dev/lrng` device and the kernel-crypto-API/hwrng registrations are likewise off.
+>
+> **At runtime** `/proc/sys/kernel/random/` is the LRNG's own table (`entropy_avail`, `poolsize`, `write_wakeup_threshold`, `boot_id`, `uuid`, `urandom_min_reseed_secs`), and `/proc/lrng_type` prints the DRNG name, security strength and per-source state. `dmesg | grep -i lrng` shows `LRNG minimally seeded with N bits of entropy` and `LRNG fully seeded with N bits of entropy`.
+>
+> **Status.** Verified at the patch level only: it applies cleanly with `--fuzz=0` on all seven pinned trees, composes with BORE in either order, and `validate_workflow.sh` re-checks its hunk counts. It has **not** been compiled or booted yet — the first `lrng=true` run is the compile check.
 
 ---
 
