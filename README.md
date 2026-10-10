@@ -116,7 +116,7 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 | `optimize_level` / `lto` | `O2` / `thin` | Compiler optimization; `thin` enables the persistent ThinLTO cache. |
 | `compiler` | `zycromerz-19` | Or `manifest` for the pinned Clang. |
 | `battery_save` / `audit_off` | `false` | Opt-in power knobs. |
-| `bore` | `false` | Opt-in BORE scheduler patch — A16 variants only, see [BORE scheduler](#-bore-scheduler). |
+| `bore` | `false` | Opt-in BORE scheduler patch — **6.6.118/6.6.142 only** (not "A16": 6.6.89 A16 also fails), see [BORE scheduler](#-bore-scheduler). |
 | `lrng` | `false` | Opt-in LRNG v60 RNG replacement — all seven variants, see [LRNG v60](#-lrng-v60). |
 | `kernel_uname` | `OP-WILD` | Release-string suffix. |
 | `clean_build` / `debug` | `false` | Force a full rebuild / emit debug artifacts. |
@@ -181,21 +181,19 @@ A `service.d` script (`files/battery/99-battery-tweaks.sh`) adds `vm.page-cluste
 > [!IMPORTANT]
 > ## BORE scheduler
 >
-> **BORE** (Burst-Oriented Response Enhancer, v5.9.7, by Masahito Suzuki) scores each task by its *burst time* — the runtime since it last slept or yielded — and boosts the shorter, burstier ones. That is the profile of a compositor, a launcher, a game loop or a scroll gesture, so interactive work keeps its latency while a background compile or download runs. It costs some scheduling fairness, which is why it is a knob and not a default.
+> **BORE** (Burst-Oriented Response Enhancer, v7.0.0, by Masahito Suzuki) scores each task by its *burst time* — the runtime since it last slept or yielded — and boosts the shorter, burstier ones. That is the profile of a compositor, a launcher, a game loop or a scroll gesture, so interactive work keeps its latency while a background compile or download runs. It costs some scheduling fairness, which is why it is a knob and not a default.
 >
-> Enable it with `bore=true`. The step applies `.github/actions/build-kernel/files/bore/bore.patch` with `--fuzz=0` and appends `CONFIG_SCHED_BORE=y` to the common `gki_defconfig`. It runs before every other patch that touches `kernel/sched/`, so its hunks always see the freshly synced tree.
+> Enable it with `bore=true`. The step applies `.github/actions/build-kernel/files/bore/bore-7.0.0.patch` with `--fuzz=0` and appends `CONFIG_SCHED_BORE=y` to the common `gki_defconfig`. It runs before every other patch that touches `kernel/sched/`, so its hunks always see the freshly synced tree.
 >
-> **Provenance.** A port of [`palazik/actions_oplus_sm8750`](https://github.com/palazik/actions_oplus_sm8750) `patches/bore.patch` (blob `f25f29ed`). Upstream applies it with `patch -F 3`, and at that fuzz its two `kernel/sched/core.c` hunks still land — but they land *fuzzily*, which is how an earlier patch in this repo wedged itself into the middle of a stock comment on 6.6.118. Our copy moves those two changes onto anchors both of our trees share, so the whole 41-hunk patch applies with `--fuzz=0`:
-> - `#include <linux/sched/bore.h>` moves to `kernel/sched/sched.h` (which `core.c` already includes), because the two trees disagree about the include block that follows `../smpboot.h`.
-> - `sched_bore_init()` moves to the end of `sched_init()`, because the two trees disagree about the `sched_class_above()` checks upstream anchors to — one uses `BUG_ON`, the other `WARN_ON_ONCE` plus a `CONFIG_HMBIRD_SCHED` block.
+> **Provenance.** A backport of firelzrd's canonical `patches/stable/0001-linux6.12.37-bore-7.0.0.patch` to this tree's 6.6 EEVDF. firelzrd ships 7.0.0 only for 6.12/6.18/7.1/7.2/7.3; 34 of its hunks reject against 6.6 because they depend on the 6.12 EEVDF (`do_preempt_short`, `do_preempt_weight`, `protect_slice`, `cancel_protect_slice`, `requeue_delayed_entity`, `rel_deadline`, `custom_slice`, `sched_delayed`). Each rejected site was re-derived here against the 6.6 forms — `protect_slice()` is inlined as `vlag == deadline`, and `place_entity()`'s deferred `vslice` replaces the `rel_deadline` dance — and the `ctl_table` handler signatures were changed from `const struct ctl_table *` (6.12) to `struct ctl_table *` (6.6). Everything else is firelzrd's text.
 >
-> Every other hunk is byte-for-byte upstream's, including the single non-English comment line in `bore.c`. BORE edits the fair class only (`fair.c`, `core.c`, `debug.c`, `features.h`, `fork.c`); it touches neither `sched_ext` nor the HMBIRD code, so it composes with both.
+> **Why 7.0.0 and not the older 5.9.7.** The previously vendored 5.9.7 patch (palazik/brokestar233) **bootlooped on device**. The embedded-config delta between a booting kernel and that one was exactly `CONFIG_SCHED_BORE=y` plus `CONFIG_MIN_BASE_SLICE_NS=2000000` — nothing else — so the fault was in 5.9.7 itself against this tree's newer `fair.c`. 7.0.0 is the maintained line and restructures the burst accounting onto static keys and a per-task `bore_ctx`.
 >
-> **Variants.** A16 only — 6.6.118 and 6.6.142. The five A15 trees still carry the older EEVDF shape in `fair.c` (`normalized_sysctl_sched_base_slice` + `get_update_sysctl_factor`, `0.75 msec`), which BORE's rewrite hunks replace, and no fuzz factor bridges that gap. Asking for `bore=true` on an A15 variant **fails the build** with the offending hunks printed, rather than half-patching the tree. Applicability is checked by strict dry-run — against both pinned A16 trees directly, and against the five A15 trees by fetching the ten patched files at each pin.
+> **Scope.** **6.6.118 and 6.6.142 only — not "A16".** The label is misleading: 6.6.89 is also an A16 variant, but its `fair.c` still carries the older EEVDF shape (`sysctl_sched_base_slice = 750000ULL`, `0.75 msec`), which BORE's rewrite hunks replace, and no fuzz factor bridges that gap. So both the five A15 trees *and* 6.6.89 A16 fail the strict dry-run, and asking for `bore=true` there **fails the build** with the offending hunks printed, rather than half-patching the tree. Note that 6.6.89 A16 is the default dispatch variant, so this is the first thing a `bore=true` user hits if they do not name a version.
 >
-> **At runtime** the tunables are sysctls under `/proc/sys/kernel/` (`sched_bore` and the `sched_burst_*` knobs, mode `0644`). `echo 0 > /proc/sys/kernel/sched_bore` puts the fair class back to plain EEVDF without reflashing.
+> **At runtime** the tunables are sysctls under `/proc/sys/kernel/` (`sched_bore`, `sched_burst_inherit_type`, `sched_burst_protect_slice_lv`, `sched_credit_cap_us` and the other `sched_burst_*` knobs, mode `0644`). `echo 0 > /proc/sys/kernel/sched_bore` puts the fair class back to plain EEVDF without reflashing.
 >
-> **Status.** Verified at the patch level only: it applies and reverts cleanly on both A16 trees, and `validate_workflow.sh` re-checks its hunk counts. It has **not** been compiled or booted yet — the first `bore=true` run is the compile check.
+> **Status.** Verified to apply with `--fuzz=0` and to compile against both 6.6.118 and 6.6.142 (locally, `kernel/sched/*.o`, with BORE both on and off), and `validate_workflow.sh` re-checks its hunk counts. It has **not been booted** — a green compile proves it links, not that the scheduler is sound at runtime.
 
 ---
 

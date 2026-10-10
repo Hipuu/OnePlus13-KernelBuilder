@@ -1358,32 +1358,42 @@ runs:
     # runs here -- ahead of everything else that touches kernel/sched -- so its
     # hunks match the freshly synced tree rather than a half-patched one.
     #
-    # The patch is vendored in files/bore/ instead of fetched at build time:
-    # upstream (palazik/actions_oplus_sm8750, patches/bore.patch, blob
-    # f25f29ed) applies it with `patch -F 3` against a tree whose sched_init()
-    # still used WARN_ON_ONCE() and whose core.c carried an extra
-    # CONFIG_HMBIRD_SCHED include block. Neither of our pinned trees matches
-    # that text, so upstream's two core.c hunks landed through fuzz -- and
-    # fuzz is exactly what wedged the hrtimer patch into the middle of a stock
-    # comment on 6.6.118. Our copy re-anchors those two changes (the bore.h
-    # include moves to kernel/sched/sched.h, the sched_bore_init() call moves
-    # to the end of sched_init()) so the whole patch applies with --fuzz=0 on
-    # the 6.6.118 and 6.6.142 trees, which is asserted by the strict dry run
-    # recorded in the BORE port notes. Every other hunk is byte-for-byte
-    # upstream's.
+    # This is BORE 7.0.0, backported from firelzrd's 6.12 patch to the 6.6 EEVDF.
+    # The earlier vendored copy (files/bore/bore.patch, BORE 5.9.7 via
+    # palazik/brokestar233) bootlooped on device; the config delta between a
+    # booting kernel and that one was exactly SCHED_BORE + MIN_BASE_SLICE_NS, so
+    # the fault was in BORE 5.9.7 itself against this tree's newer fair.c.
+    # 7.0.0 is the maintained line and restructures the burst accounting onto
+    # static keys and a per-task bore_ctx.
     #
-    # A failed hunk must fail the build: fair.c dereferences se.bore_stats
-    # outside its #ifdef, so a half-applied patch cannot compile anyway, and
+    # The backport, not the original: firelzrd ships 7.0.0 only for 6.12/6.18/
+    # 7.1/7.2/7.3 (patches/stable/), and 34 of its hunks reject against 6.6. The
+    # rejected sites are the ones that depend on the 6.12 EEVDF, which this tree
+    # does not have: do_preempt_short/do_preempt_weight, protect_slice,
+    # cancel_protect_slice, requeue_delayed_entity, rel_deadline, custom_slice,
+    # sched_delayed. Each was re-derived here against the 6.6 forms
+    # (protect_slice() is inlined as `vlag == deadline`, the place_entity vslice
+    # deferral replaces the rel_deadline dance), and the ctl_table handler
+    # signatures were changed from `const struct ctl_table *` (6.12) to
+    # `struct ctl_table *` (6.6). Everything else is firelzrd's text.
+    #
+    # The bore.h include for core.c is inserted below with sed rather than
+    # carried in the patch: the surrounding lines differ between the 6.6.118 and
+    # 6.6.142 trees (HMBIRD vs trace/hooks includes), so any hunk context long
+    # enough to be unambiguous on one fails on the other.
+    #
+    # A failed hunk must fail the build: fair.c calls the BORE helpers outside
+    # their #ifdefs in places, so a half-applied patch cannot compile anyway, and
     # stopping here attaches the patch output instead of leaving a confusing
     # compiler error hundreds of lines later. The dry run comes first so the
     # tree is never left half-patched on the way to that failure.
     #
-    # Scope: verified against the two A16 trees (6.6.118 OnePlusOSS, 6.6.142
-    # Hipuu). It does NOT fit the A15 trees -- their fair.c still carries the
-    # older EEVDF shape (normalized_sysctl_sched_base_slice +
-    # get_update_sysctl_factor, "0.75 msec"), which BORE's fair.c hunks
-    # rewrite, and no amount of fuzz bridges that. Enabling bore on an A15
-    # variant therefore fails here by design, with the reason spelled out.
+    # Scope: verified to apply with --fuzz=0 and to compile against 6.6.118
+    # (OnePlusOSS) and 6.6.142 (Hipuu). It does NOT fit the A15 trees or 6.6.89
+    # A16 -- those carry the older EEVDF shape (750000ULL / "0.75 msec") that the
+    # base_slice hunks rewrite. They fail the dry run below with the offending
+    # hunks printed, rather than leaving a half-patched tree. Scope is
+    # "6.6.118 + 6.6.142", not "A16".
     - name: Apply BORE scheduler
       if: ${{ env.OP_BORE == 'true' }}
       shell: bash
@@ -1391,22 +1401,28 @@ runs:
         set -euo pipefail
         echo "::group::Apply BORE scheduler"
         cd "$COMMON_KERNEL_FOLDER"
-        BORE_PATCH="$GITHUB_ACTION_PATH/files/bore/bore.patch"
+        BORE_PATCH="$GITHUB_ACTION_PATH/files/bore/bore-7.0.0.patch"
         BORE_LOG="$RUNNER_TEMP/bore.log"
         if ! patch -p1 --dry-run --fuzz=0 < "$BORE_PATCH" >"$BORE_LOG" 2>&1; then
-          echo "::error::BORE did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
-          echo "::error::The port is anchored on the A16 EEVDF layout; the A15 trees carry an older fair.c that these hunks rewrite."
+          echo "::error::BORE 7.0.0 did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
+          echo "::error::Supported trees are 6.6.118 and 6.6.142. Both the A15 trees and 6.6.89 A16 carry an older fair.c (750000ULL / '0.75 msec') that these hunks rewrite."
           grep -E 'FAILED|malformed|Reversed|garbage' "$BORE_LOG" || cat "$BORE_LOG"
           exit 1
         fi
         patch -p1 --fuzz=0 < "$BORE_PATCH"
+        # core.c needs the bore.h include; added here because its neighbours
+        # differ per tree (see the note above).
+        if ! grep -q 'linux/sched/bore.h' kernel/sched/core.c; then
+          sed -i 's|^#include "\.\./smpboot\.h"$|#include "../smpboot.h"\n\n#ifdef CONFIG_SCHED_BORE\n#include <linux/sched/bore.h>\n#endif /* CONFIG_SCHED_BORE */|' kernel/sched/core.c
+        fi
         # The patch carries `config SCHED_BORE` in init/Kconfig. Without that
         # symbol the line appended below is dropped by olddefconfig as an
         # unknown option, and the kernel silently builds without BORE while
         # every #ifdef CONFIG_SCHED_BORE block vanishes -- so check the
         # plumbing that proves the patch landed where it had to.
         grep -q '^config SCHED_BORE$' init/Kconfig
-        grep -q 'sched_bore_init' kernel/sched/core.c
+        grep -q 'sched_init_bore' kernel/sched/core.c
+        grep -q 'linux/sched/bore.h' kernel/sched/core.c
         grep -q 'sched/bore.h' kernel/sched/sched.h
         echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
         echo "✅ BORE scheduler applied"
@@ -4605,15 +4621,22 @@ runs:
         set -euo pipefail
         KO=$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -type f -name 'qca_cld3_*.ko' -print -quit)
         [ -n "$KO" ] || { echo "::error::qca_cld3 DDK module not found"; exit 1; }
-        cp -f "$KO" "$ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
-        echo "Staged qcacld DDK module for artifact upload: $ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
+        # Derive the name from the configured chipset, not a literal: the
+        # rest of this file builds qca_cld3_<chipset> from OP_DDK_CHIPSET
+        # (see the closure canary and the vermagic check), and hardcoding
+        # peach-v2 here would silently mislabel the artifact for any other
+        # chipset. Module names use underscores; the config value uses a dash.
+        DDK_KO_NAME="qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_').ko"
+        cp -f "$KO" "$ARTIFACTS_FOLDER/$DDK_KO_NAME"
+        echo "DDK_KO_NAME=$DDK_KO_NAME" >> "$GITHUB_ENV"
+        echo "Staged qcacld DDK module for artifact upload: $ARTIFACTS_FOLDER/$DDK_KO_NAME"
 
     - name: Upload qcacld DDK module
       if: success() && env.OP_DDK == 'true'
       uses: actions/upload-artifact@v7
       with:
-        name: qca_cld3_peach_v2
-        path: ${{ env.ARTIFACTS_FOLDER }}/qca_cld3_peach_v2.ko
+        name: ${{ env.DDK_KO_NAME }}
+        path: ${{ env.ARTIFACTS_FOLDER }}/${{ env.DDK_KO_NAME }}
         archive: false
         compression-level: 0
         retention-days: 90
