@@ -1423,7 +1423,7 @@ runs:
         grep -q '^config SCHED_BORE$' init/Kconfig
         grep -q 'sched_init_bore' kernel/sched/core.c
         grep -q 'linux/sched/bore.h' kernel/sched/core.c
-        grep -q 'sched/bore.h' kernel/sched/sched.h
+        grep -q 'sched_update_min_base_slice' kernel/sched/sched.h
         echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
         echo "✅ BORE scheduler applied"
         echo "::endgroup::"
