@@ -111,7 +111,7 @@ on:
         type: boolean
         default: false
       bore:
-        description: 'Apply the BORE scheduler (Burst-Oriented Response Enhancer: scores tasks by burst time so interactive work wins under load). Scheduler change, off by default. A16 trees only (6.6.118/6.6.142); an A15 variant fails the build'
+        description: 'Apply the BORE scheduler (Burst-Oriented Response Enhancer: scores tasks by burst time so interactive work wins under load). Scheduler change, off by default. Only 6.6.118/6.6.142 (and not every A16 tree: 6.6.89 A16 is unsupported); any other variant fails the build'
         required: true
         type: boolean
         default: false

@@ -1366,6 +1366,24 @@ runs:
     # 7.0.0 is the maintained line and restructures the burst accounting onto
     # static keys and a per-task bore_ctx.
     #
+    # ABI-NEUTRAL STORAGE IS LOAD-BEARING, and is the one deliberate deviation
+    # from firelzrd's text. Upstream 7.0.0 embeds `struct bore_ctx bore;` in
+    # task_struct, which grows it. genksyms CRCs propagate transitively through
+    # the type graph, so that shifts the CRC of every exported symbol whose
+    # signature reaches task_struct (e.g. via hci_dev -> sk_buff -> sock ->
+    # mem_cgroup). The vendor tree has its own include/linux/sched.h and is NOT
+    # patched, so with DDK builds the GKI and vendor Module.symvers then disagree
+    # for ~430 symbols, and modpost dies with "<sym> exported twice. Previous
+    # export was in <same .ko>" in //vendor/qcom/opensource/wlan/platform
+    # (proved 2026-10-13: bore=true+ddk=true fails, bore=false+ddk=true passes,
+    # everything else identical). So the ctx is a POINTER in task_struct's free
+    # KABI reserve slot 5: android_kabi.h expands _ANDROID_KABI_REPLACE to bare
+    # _orig under __GENKSYMS__, so the slot stays an 8-byte u64 for CRC purposes
+    # and the layout never moves. This is how palazik's 5.9.7 did it, and why
+    # 5.9.7 never hit the failure. The ctx is kzalloc'd in dup_task_struct and
+    # freed in free_task; the assertion below fails the build if the slot is
+    # ever lost, because that would silently reintroduce the ABI break.
+    #
     # The backport, not the original: firelzrd ships 7.0.0 only for 6.12/6.18/
     # 7.1/7.2/7.3 (patches/stable/), and 34 of its hunks reject against 6.6. The
     # rejected sites are the ones that depend on the 6.12 EEVDF, which this tree
@@ -1424,6 +1442,15 @@ runs:
         grep -q 'sched_init_bore' kernel/sched/core.c
         grep -q 'linux/sched/bore.h' kernel/sched/core.c
         grep -q 'sched_update_min_base_slice' kernel/sched/sched.h
+        # The bore ctx MUST live in the KABI reserve slot, not inline in
+        # task_struct: inline grows the struct, which shifts genksyms CRCs and
+        # breaks the DDK build (see the note above). Assert both halves -- the
+        # slot is claimed, and no inline field reappeared.
+        grep -q 'ANDROID_KABI_USE(5, struct bore_ctx \*bore);' include/linux/sched.h
+        if grep -q 'struct bore_ctx[[:space:]]*bore;' include/linux/sched.h; then
+          echo "::error::BORE's task_struct storage is inline again; that breaks the GKI/vendor ABI (see the BORE note above)."
+          exit 1
+        fi
         echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
         echo "✅ BORE scheduler applied"
         echo "::endgroup::"
