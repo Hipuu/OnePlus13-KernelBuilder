@@ -1376,13 +1376,16 @@ runs:
     # for ~430 symbols, and modpost dies with "<sym> exported twice. Previous
     # export was in <same .ko>" in //vendor/qcom/opensource/wlan/platform
     # (proved 2026-10-13: bore=true+ddk=true fails, bore=false+ddk=true passes,
-    # everything else identical). So the ctx is a POINTER in task_struct's free
-    # KABI reserve slot 5: android_kabi.h expands _ANDROID_KABI_REPLACE to bare
+    # everything else identical). So the ctx is a POINTER in sched_entity's free
+    # KABI reserve slot 1: android_kabi.h expands _ANDROID_KABI_REPLACE to bare
     # _orig under __GENKSYMS__, so the slot stays an 8-byte u64 for CRC purposes
     # and the layout never moves. This is how palazik's 5.9.7 did it, and why
     # 5.9.7 never hit the failure. The ctx is kzalloc'd in dup_task_struct and
     # freed in free_task; the assertion below fails the build if the slot is
     # ever lost, because that would silently reintroduce the ABI break.
+    #
+    # The slot is sched_entity's, not task_struct's, for a second and
+    # independent reason -- see the assertion below.
     #
     # The backport, not the original: firelzrd ships 7.0.0 only for 6.12/6.18/
     # 7.1/7.2/7.3 (patches/stable/), and 34 of its hunks reject against 6.6. The
@@ -1442,13 +1445,24 @@ runs:
         grep -q 'sched_init_bore' kernel/sched/core.c
         grep -q 'linux/sched/bore.h' kernel/sched/core.c
         grep -q 'sched_update_min_base_slice' kernel/sched/sched.h
-        # The bore ctx MUST live in the KABI reserve slot, not inline in
-        # task_struct: inline grows the struct, which shifts genksyms CRCs and
-        # breaks the DDK build (see the note above). Assert both halves -- the
-        # slot is claimed, and no inline field reappeared.
-        grep -q 'ANDROID_KABI_USE(5, struct bore_ctx \*bore);' include/linux/sched.h
+        # The bore ctx MUST live in a KABI reserve slot, not inline in a
+        # struct: inline grows it, which shifts genksyms CRCs and breaks the
+        # DDK build (see the note above). Assert both halves -- the slot is
+        # claimed, and no inline field reappeared.
+        #
+        # It is sched_entity's slot 1, NOT a task_struct slot, and that is
+        # load-bearing too: ~30 patches in WildKernels/kernel_patches touch
+        # task_struct's KABI region, and the Droidspaces SYSVIPC step probes
+        # with `patch -R --dry-run` against a context that lists every free
+        # task_struct slot. Taking one there makes that probe fail, so the
+        # step falls through to a forward apply that hard-fails under set -e
+        # (run 38541385542). No patch in the set touches sched_entity's KABI
+        # block, so slot 1 is collision-free -- which is exactly why
+        # palazik's 5.9.7 used it.
+        grep -q 'ANDROID_KABI_USE(1, struct bore_ctx \*bore);' include/linux/sched.h
+        grep -q '^struct bore_ctx;' include/linux/sched.h
         if grep -q 'struct bore_ctx[[:space:]]*bore;' include/linux/sched.h; then
-          echo "::error::BORE's task_struct storage is inline again; that breaks the GKI/vendor ABI (see the BORE note above)."
+          echo "::error::BORE's ctx storage is inline again; that breaks the GKI/vendor ABI (see the BORE note above)."
           exit 1
         fi
         echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
