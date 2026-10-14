@@ -171,7 +171,12 @@ runs:
                     if attempt < MAX_ATTEMPTS:
                         time.sleep(5)
                 except Exception as e:
-                    print(f"  [RETRY {attempt}/{MAX_ATTEMPTS}] {name} failed with exit code {e.returncode}. Command: {e.cmd}")
+                    # NOT a CalledProcessError: this is a Python-level failure
+                    # (requests/urllib error, OSError from shutil, KeyError on a
+                    # malformed manifest). Such exceptions have no .returncode or
+                    # .cmd, so the old message raised AttributeError from inside
+                    # the handler and killed the whole job instead of retrying.
+                    print(f"  [RETRY {attempt}/{MAX_ATTEMPTS}] {name} failed: {type(e).__name__}: {e}")
                     print(f"  [ERROR] Failed to sync {name}")
                     if attempt < MAX_ATTEMPTS:
                         time.sleep(5)
