@@ -1354,6 +1354,159 @@ runs:
         echo "✅ KSU hooks applied"
         echo "::endgroup::"
 
+    # BORE (Burst-Oriented Response Enhancer, by Masahito Suzuki) is opt-in and
+    # runs here -- ahead of everything else that touches kernel/sched -- so its
+    # hunks match the freshly synced tree rather than a half-patched one.
+    #
+    # This is BORE 7.0.0, backported from firelzrd's 6.12 patch to the 6.6 EEVDF.
+    # The earlier vendored copy (files/bore/bore.patch, BORE 5.9.7 via
+    # palazik/brokestar233) bootlooped on device; the config delta between a
+    # booting kernel and that one was exactly SCHED_BORE + MIN_BASE_SLICE_NS, so
+    # the fault was in BORE 5.9.7 itself against this tree's newer fair.c.
+    # 7.0.0 is the maintained line and restructures the burst accounting onto
+    # static keys and a per-task bore_ctx.
+    #
+    # ABI-NEUTRAL STORAGE IS LOAD-BEARING, and is the one deliberate deviation
+    # from firelzrd's text. Upstream 7.0.0 embeds `struct bore_ctx bore;` in
+    # task_struct, which grows it. genksyms CRCs propagate transitively through
+    # the type graph, so that shifts the CRC of every exported symbol whose
+    # signature reaches task_struct (e.g. via hci_dev -> sk_buff -> sock ->
+    # mem_cgroup). The vendor tree has its own include/linux/sched.h and is NOT
+    # patched, so with DDK builds the GKI and vendor Module.symvers then disagree
+    # for ~430 symbols, and modpost dies with "<sym> exported twice. Previous
+    # export was in <same .ko>" in //vendor/qcom/opensource/wlan/platform
+    # (proved 2026-10-13: bore=true+ddk=true fails, bore=false+ddk=true passes,
+    # everything else identical). So the ctx is a POINTER in sched_entity's free
+    # KABI reserve slot 1: android_kabi.h expands _ANDROID_KABI_REPLACE to bare
+    # _orig under __GENKSYMS__, so the slot stays an 8-byte u64 for CRC purposes
+    # and the layout never moves. This is how palazik's 5.9.7 did it, and why
+    # 5.9.7 never hit the failure. The ctx is kzalloc'd in dup_task_struct and
+    # freed in free_task; the assertion below fails the build if the slot is
+    # ever lost, because that would silently reintroduce the ABI break.
+    #
+    # The slot is sched_entity's, not task_struct's, for a second and
+    # independent reason -- see the assertion below.
+    #
+    # The backport, not the original: firelzrd ships 7.0.0 only for 6.12/6.18/
+    # 7.1/7.2/7.3 (patches/stable/), and 34 of its hunks reject against 6.6. The
+    # rejected sites are the ones that depend on the 6.12 EEVDF, which this tree
+    # does not have: do_preempt_short/do_preempt_weight, protect_slice,
+    # cancel_protect_slice, requeue_delayed_entity, rel_deadline, custom_slice,
+    # sched_delayed. Each was re-derived here against the 6.6 forms
+    # (protect_slice() is inlined as `vlag == deadline`, the place_entity vslice
+    # deferral replaces the rel_deadline dance), and the ctl_table handler
+    # signatures were changed from `const struct ctl_table *` (6.12) to
+    # `struct ctl_table *` (6.6). Everything else is firelzrd's text.
+    #
+    # The bore.h include for core.c is inserted below with sed rather than
+    # carried in the patch: the surrounding lines differ between the 6.6.118 and
+    # 6.6.142 trees (HMBIRD vs trace/hooks includes), so any hunk context long
+    # enough to be unambiguous on one fails on the other.
+    #
+    # A failed hunk must fail the build: fair.c calls the BORE helpers outside
+    # their #ifdefs in places, so a half-applied patch cannot compile anyway, and
+    # stopping here attaches the patch output instead of leaving a confusing
+    # compiler error hundreds of lines later. The dry run comes first so the
+    # tree is never left half-patched on the way to that failure.
+    #
+    # Scope: verified to apply with --fuzz=0 and to compile against 6.6.118
+    # (OnePlusOSS) and 6.6.142 (Hipuu). It does NOT fit the A15 trees or 6.6.89
+    # A16 -- those carry the older EEVDF shape (750000ULL / "0.75 msec") that the
+    # base_slice hunks rewrite. They fail the dry run below with the offending
+    # hunks printed, rather than leaving a half-patched tree. Scope is
+    # "6.6.118 + 6.6.142", not "A16".
+    - name: Apply BORE scheduler
+      if: ${{ env.OP_BORE == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply BORE scheduler"
+        cd "$COMMON_KERNEL_FOLDER"
+        BORE_PATCH="$GITHUB_ACTION_PATH/files/bore/bore-7.0.0.patch"
+        BORE_LOG="$RUNNER_TEMP/bore.log"
+        if ! patch -p1 --dry-run --fuzz=0 < "$BORE_PATCH" >"$BORE_LOG" 2>&1; then
+          echo "::error::BORE 7.0.0 did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
+          echo "::error::Supported trees are 6.6.118 and 6.6.142. Both the A15 trees and 6.6.89 A16 carry an older fair.c (750000ULL / '0.75 msec') that these hunks rewrite."
+          grep -E 'FAILED|malformed|Reversed|garbage' "$BORE_LOG" || cat "$BORE_LOG"
+          exit 1
+        fi
+        patch -p1 --fuzz=0 < "$BORE_PATCH"
+        # core.c needs the bore.h include; added here because its neighbours
+        # differ per tree (see the note above).
+        if ! grep -q 'linux/sched/bore.h' kernel/sched/core.c; then
+          sed -i 's|^#include "\.\./smpboot\.h"$|#include "../smpboot.h"\n\n#ifdef CONFIG_SCHED_BORE\n#include <linux/sched/bore.h>\n#endif /* CONFIG_SCHED_BORE */|' kernel/sched/core.c
+        fi
+        # The patch carries `config SCHED_BORE` in init/Kconfig. Without that
+        # symbol the line appended below is dropped by olddefconfig as an
+        # unknown option, and the kernel silently builds without BORE while
+        # every #ifdef CONFIG_SCHED_BORE block vanishes -- so check the
+        # plumbing that proves the patch landed where it had to.
+        grep -q '^config SCHED_BORE$' init/Kconfig
+        grep -q 'sched_init_bore' kernel/sched/core.c
+        grep -q 'linux/sched/bore.h' kernel/sched/core.c
+        grep -q 'sched_update_min_base_slice' kernel/sched/sched.h
+        # The bore ctx MUST live in a KABI reserve slot, not inline in a
+        # struct: inline grows it, which shifts genksyms CRCs and breaks the
+        # DDK build (see the note above). Assert both halves -- the slot is
+        # claimed, and no inline field reappeared.
+        #
+        # It is sched_entity's slot 1, NOT a task_struct slot, and that is
+        # load-bearing too: ~30 patches in WildKernels/kernel_patches touch
+        # task_struct's KABI region, and the Droidspaces SYSVIPC step probes
+        # with `patch -R --dry-run` against a context that lists every free
+        # task_struct slot. Taking one there makes that probe fail, so the
+        # step falls through to a forward apply that hard-fails under set -e
+        # (run 38541385542). No patch in the set touches sched_entity's KABI
+        # block, so slot 1 is collision-free -- which is exactly why
+        # palazik's 5.9.7 used it.
+        grep -q 'ANDROID_KABI_USE(1, struct bore_ctx \*bore);' include/linux/sched.h
+        grep -q '^struct bore_ctx;' include/linux/sched.h
+        if grep -q 'struct bore_ctx[[:space:]]*bore;' include/linux/sched.h; then
+          echo "::error::BORE's ctx storage is inline again; that breaks the GKI/vendor ABI (see the BORE note above)."
+          exit 1
+        fi
+        echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
+        echo "✅ BORE scheduler applied"
+        echo "::endgroup::"
+    - name: Apply LRNG v60
+      if: ${{ env.OP_LRNG == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Apply LRNG v60"
+        cd "$COMMON_KERNEL_FOLDER"
+        LRNG_PATCH="$GITHUB_ACTION_PATH/files/lrng/lrng_v60_android15-6.6.patch"
+        LRNG_LOG="$RUNNER_TEMP/lrng.log"
+        if ! patch -p1 --dry-run --fuzz=0 < "$LRNG_PATCH" >"$LRNG_LOG" 2>&1; then
+          echo "::error::LRNG did not apply cleanly to $OP_MODEL (${KERNEL_FULL_VER:-unknown})."
+          grep -E 'FAILED|malformed|Reversed|garbage' "$LRNG_LOG" || cat "$LRNG_LOG"
+          exit 1
+        fi
+        patch -p1 --fuzz=0 < "$LRNG_PATCH"
+        # The patch gates random.o on CONFIG_RANDOM_DEFAULT_IMPL, a brand-new
+        # symbol it defines in the new drivers/char/lrng/Kconfig. If either the
+        # Kconfig source line or that Makefile gate went missing, olddefconfig
+        # would drop both new symbols as unknown and the tree would build with
+        # *no* RNG: random.c stops being compiled (CONFIG_RANDOM_DEFAULT_IMPL
+        # expands to empty) while LRNG is not selected either, so the link dies
+        # on get_random_bytes/add_device_randomness -- or, worse, quietly loses
+        # /dev/random. Check the plumbing that proves the patch landed where it
+        # had to.
+        grep -q '^source "drivers/char/lrng/Kconfig"$' drivers/char/Kconfig
+        grep -q '^obj-$(CONFIG_RANDOM_DEFAULT_IMPL) += random.o$' drivers/char/Makefile
+        grep -q '^obj-$(CONFIG_LRNG)' drivers/char/Makefile
+        grep -q '^config RANDOM_DEFAULT_IMPL$' drivers/char/lrng/Kconfig
+        grep -q '^config LRNG$' drivers/char/lrng/Kconfig
+        grep -q 'add_sched_randomness(p, cpu);' kernel/sched/core.c
+        # RANDOM_DEFAULT_IMPL off hands /dev/random, /dev/urandom and
+        # getrandom(2) to LRNG_RANDOM_IF, which defaults on exactly when it is
+        # off; LRNG itself is a plain `bool default n`.
+        cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+        # CONFIG_RANDOM_DEFAULT_IMPL is not set
+        CONFIG_LRNG=y
+        EOF
+        echo "✅ LRNG v60 applied"
+        echo "::endgroup::"
     - name: Apply Other Patches
       shell: bash
       run: |
@@ -3482,6 +3635,20 @@ runs:
         if [ "$OP_SUSFS" = "true" ]; then
           assert_config "CONFIG_KSU_SUSFS=y"
         fi
+        if [ "$OP_BORE" = "true" ]; then
+          assert_config "CONFIG_SCHED_BORE=y"
+        fi
+        if [ "$OP_LRNG" = "true" ]; then
+          assert_config "CONFIG_LRNG=y"
+          # RANDOM_DEFAULT_IMPL is the gate the patch adds around random.o. If
+          # it came back on, random.c and LRNG_RANDOM_IF would both define the
+          # RNG interface and the link would die on duplicate symbols.
+          if ! grep -qx '# CONFIG_RANDOM_DEFAULT_IMPL is not set' "$DOTCONFIG"; then
+            echo "::error::CONFIG_RANDOM_DEFAULT_IMPL must be off when LRNG is enabled"
+            grep -E 'RANDOM_DEFAULT_IMPL' "$DOTCONFIG" || echo "  (option absent entirely)"
+            FAILED=1
+          fi
+        fi
         # UKSM: the pinned KSM/UKSM values exist so kleaf's syncconfig never
         # sees a (NEW) symbol — an unset UKSM reintroduces the interactive
         # prompt loop that hung "Creating kernel config" for 20+ min (the
@@ -3750,6 +3917,28 @@ runs:
 
 
         make LD="$LD_CMD" HOSTLD="$LD_CMD" O="$OUT" olddefconfig
+        # The non-DDK path has no whole-file defconfig check, so assert the
+        # opt-ins that would otherwise fail silently: an unknown symbol is
+        # dropped by olddefconfig without a word. BORE's absence is worse
+        # than a missing feature here -- fair.c references se.bore_stats
+        # outside its #ifdef, so a dropped symbol fails the compile. LRNG is
+        # the same shape: its Kconfig carries RANDOM_DEFAULT_IMPL, so if the
+        # source line is missing both symbols vanish and the tree builds with
+        # no RNG at all.
+        if [ "$OP_BORE" = "true" ] && ! grep -qx 'CONFIG_SCHED_BORE=y' "$OUT/.config"; then
+          echo "::error::CONFIG_SCHED_BORE did not survive olddefconfig (BORE Kconfig symbol missing from the tree)"
+          exit 1
+        fi
+        if [ "$OP_LRNG" = "true" ]; then
+          if ! grep -qx 'CONFIG_LRNG=y' "$OUT/.config"; then
+            echo "::error::CONFIG_LRNG did not survive olddefconfig (LRNG Kconfig symbol missing from the tree)"
+            exit 1
+          fi
+          if ! grep -qx '# CONFIG_RANDOM_DEFAULT_IMPL is not set' "$OUT/.config"; then
+            echo "::error::CONFIG_RANDOM_DEFAULT_IMPL must be off when LRNG is enabled (random.c and LRNG would both provide the RNG interface)"
+            exit 1
+          fi
+        fi
 
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
@@ -4483,15 +4672,22 @@ runs:
         set -euo pipefail
         KO=$(find "$COMMON_KERNEL_FOLDER/out/install/lib/modules" -type f -name 'qca_cld3_*.ko' -print -quit)
         [ -n "$KO" ] || { echo "::error::qca_cld3 DDK module not found"; exit 1; }
-        cp -f "$KO" "$ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
-        echo "Staged qcacld DDK module for artifact upload: $ARTIFACTS_FOLDER/qca_cld3_peach_v2.ko"
+        # Derive the name from the configured chipset, not a literal: the
+        # rest of this file builds qca_cld3_<chipset> from OP_DDK_CHIPSET
+        # (see the closure canary and the vermagic check), and hardcoding
+        # peach-v2 here would silently mislabel the artifact for any other
+        # chipset. Module names use underscores; the config value uses a dash.
+        DDK_KO_NAME="qca_cld3_$(echo "$OP_DDK_CHIPSET" | tr '-' '_').ko"
+        cp -f "$KO" "$ARTIFACTS_FOLDER/$DDK_KO_NAME"
+        echo "DDK_KO_NAME=$DDK_KO_NAME" >> "$GITHUB_ENV"
+        echo "Staged qcacld DDK module for artifact upload: $ARTIFACTS_FOLDER/$DDK_KO_NAME"
 
     - name: Upload qcacld DDK module
       if: success() && env.OP_DDK == 'true'
       uses: actions/upload-artifact@v7
       with:
-        name: qca_cld3_peach_v2
-        path: ${{ env.ARTIFACTS_FOLDER }}/qca_cld3_peach_v2.ko
+        name: ${{ env.DDK_KO_NAME }}
+        path: ${{ env.ARTIFACTS_FOLDER }}/${{ env.DDK_KO_NAME }}
         archive: false
         compression-level: 0
         retention-days: 90
