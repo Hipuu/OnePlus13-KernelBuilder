@@ -1431,6 +1431,27 @@ runs:
           exit 1
         fi
         patch -p1 --fuzz=0 < "$BORE_PATCH"
+        # scoped_guard(write_lock_irq, ...) needs the lock-guard wrapper that
+        # only the newer tree defines: 6.6.142 has
+        # DEFINE_LOCK_GUARD_1(write_lock_irq, rwlock_t, ...) in spinlock.h,
+        # while 6.6.118 has neither the guard nor any write_lock* name in
+        # spinlock.h at all -- the plain macros live in rwlock.h. Applying
+        # BORE 7.0.0 to 6.6.118 therefore failed to compile with
+        # "use of undeclared identifier 'class_write_lock_irq_t'" (run
+        # 39613475444, kernel/sched/bore.o). Rewrite that one construct into
+        # the explicit lock/unlock pair, which both trees support. Only
+        # readjust_all_task_weights() uses it, and the body is a straight
+        # fall-through, so the guard's scope maps 1:1 onto the loop.
+        if ! grep -q 'DEFINE_LOCK_GUARD_1(write_lock_irq' include/linux/spinlock.h 2>/dev/null; then
+          # sed, not a heredoc: the substitution is one construct on two lines
+          # and a nested heredoc would break this block scalar's indentation.
+          sed -i 's|scoped_guard(write_lock_irq, &tasklist_lock)|write_lock_irq(\&tasklist_lock);|' kernel/sched/bore.c
+          # the guard closed at the end of the for-loop body; add the unlock
+          # right after that loop's closing brace.
+          python3 -c "import sys;p='kernel/sched/bore.c';s=open(p).read();a=s.index('write_lock_irq(&tasklist_lock);');b=s.index(chr(10)+'}'+chr(10),a);open(p,'w').write(s[:b]+chr(10)+chr(9)+'write_unlock_irq(&tasklist_lock);'+s[b:])"
+          grep -q 'write_unlock_irq(&tasklist_lock)' kernel/sched/bore.c
+          echo "  rewrote scoped_guard(write_lock_irq) for a tree without lock guards"
+        fi
         # core.c needs the bore.h include; added here because its neighbours
         # differ per tree (see the note above).
         if ! grep -q 'linux/sched/bore.h' kernel/sched/core.c; then
