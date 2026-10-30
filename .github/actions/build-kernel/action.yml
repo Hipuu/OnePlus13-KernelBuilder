@@ -742,6 +742,16 @@ runs:
         echo "Current ccache configuration:"
         ccache -p
 
+        # Depend mode skips the preprocessor on cache hits; the kernel's
+        # -Wp,-MMD dependency output keeps the header list accurate. Enable it
+        # only where the installed ccache knows the option (older builds would
+        # ignore the variable silently, which is harmless but confusing).
+        if ccache -p 2>/dev/null | grep -q 'depend_mode'; then
+          export CCACHE_DEPEND=true
+          echo "CCACHE_DEPEND=true" >> "$GITHUB_ENV"
+          echo "ccache depend mode enabled"
+        fi
+
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -maxdepth 2 -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Restored cache found"
           echo ""
@@ -1993,6 +2003,14 @@ runs:
         CONFIG_TCP_CONG_ADVANCED=y
         CONFIG_TCP_CONG_BBR=y
         EOF
+        # RoCCet ships in the Hipuu fork as net/ipv4/tcp_roccet.c; the stock
+        # OnePlusOSS bases do not carry it, so enable it only where it exists.
+        if [ -f "$COMMON_KERNEL_FOLDER/net/ipv4/tcp_roccet.c" ]; then
+          BBR_DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+          sed -i -e '/^# CONFIG_TCP_CONG_ROCCET is not set$/d' -e '/^CONFIG_TCP_CONG_ROCCET=/d' "$BBR_DEFCONFIG"
+          echo "CONFIG_TCP_CONG_ROCCET=y" >> "$BBR_DEFCONFIG"
+          echo "RoCCet congestion control enabled"
+        fi
 
     - name: Apply BBRv3
       if: ${{ env.OP_BBR3 == 'true' }}
@@ -2114,6 +2132,11 @@ runs:
           local patch_file="$1"
           if patch -R -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
             echo "Already applied: $(basename "$patch_file")"
+          elif ! patch -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
+            # Neither applied nor applicable: the tree's context has drifted.
+            # Skip with an annotation (which survives log truncation) instead
+            # of aborting the build; the SYSVIPC KABI may then be incomplete.
+            echo "::warning::$(basename "$patch_file") does not apply to this tree; SYSVIPC KABI patch skipped"
           else
             patch -p1 --forward < "$patch_file"
           fi
@@ -2151,6 +2174,12 @@ runs:
         CONFIG_NETFILTER_XT_MATCH_RECENT=y
         CONFIG_USER_NS=y
         EOF
+        # MACVLAN backs Droidspaces' macvlan container networking (upstream
+        # a9e03004). Strip any prior line before appending: a negation plus a
+        # positive for the same symbol makes the DDK defconfig merge abort.
+        DS_DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+        sed -i -e '/^# CONFIG_MACVLAN is not set$/d' -e '/^CONFIG_MACVLAN=/d' "$DS_DEFCONFIG"
+        echo "CONFIG_MACVLAN=y" >> "$DS_DEFCONFIG"
 
         if [ "${{ env.OP_RUST_BUILD }}" = "true" ]; then
           echo "Add IPC NS missing symbols for rust binder"

@@ -150,7 +150,7 @@ on:
         type: boolean
         default: false
       runner:
-        description: 'Runner pool: github-hosted (ubuntu-latest, 16 GB + swap) or self-hosted (no RAM floor; Bazel heap is clamped to 24 GB)'
+        description: 'Runner pool: github-hosted (ubuntu-24.04, 16 GB + swap) or self-hosted (no RAM floor; Bazel heap is clamped to 24 GB)'
         required: true
         type: choice
         options:
@@ -161,7 +161,9 @@ on:
 jobs:
   plan:
     name: Plan build matrix
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest so a runner-image rollover cannot
+    # change the toolchain or Bazel behavior under a green build.
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       runs_on: ${{ steps.plan.outputs.runs_on }}
@@ -219,7 +221,7 @@ jobs:
           if [ "${{ inputs.runner }}" = "self-hosted" ]; then
             echo 'runs_on=["self-hosted","linux","X64"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'runs_on=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
           fi
 
   build:
