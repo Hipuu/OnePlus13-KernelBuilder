@@ -44,11 +44,18 @@ runs:
         import time
         import glob
         import hashlib
+        import threading
         from concurrent.futures import ThreadPoolExecutor
         import requests
 
         MAX_WORKERS = (os.cpu_count() or 2) * 4
         NPROC = int(subprocess.check_output("nproc", shell=True).strip())
+        # git.codelinaro.org truncates large archives and then refuses the
+        # follow-up requests (aria2c exit 3) when it is hit with many
+        # concurrent archive downloads -- the same anti-bot behaviour the
+        # SUSFS fetcher works around in build-kernel/action.yml. Run 42020526964
+        # died here: four prebuilts came back "incomplete deflate data".
+        CODELINARO_SLOTS = threading.Semaphore(2)
         TARGET_REPO = "WildKernels/OnePlus_KernelSU_SUSFS"
         TOOLCHAIN_MAP = {
             "clang/host/linux-x86": "clang",
@@ -93,6 +100,9 @@ runs:
 
                 print(f"Syncing: {name} -> {path}")
                 print(f"  [PENDING] {name}")
+                limited = "git.codelinaro.org" in url
+                if limited:
+                    CODELINARO_SLOTS.acquire()
                 try:
                     label = None
                     for repo_key, type_label in TOOLCHAIN_MAP.items():
@@ -157,7 +167,15 @@ runs:
                         archive_path = os.path.join(shm_workspace, direct_file)
                         aria_cmd = f"aria2c -x16 -s16 -k1M -j16 --allow-overwrite=true --retry-wait=5 --max-tries=10 -d {shm_workspace} -o {direct_file} {aria_quiet_flags} {aria2_headers} '{url}'"
                         if DEBUG: print(f"  [DIRECT] Fetching: {url}")
-                        subprocess.run(aria_cmd, shell=True, check=True, capture_output=not DEBUG)
+                        try:
+                            subprocess.run(aria_cmd, shell=True, check=True, capture_output=not DEBUG)
+                        except subprocess.CalledProcessError:
+                            # Parallel range requests get refused (exit 3) once
+                            # Codelinaro throttles. A single-stream curl usually
+                            # still succeeds, so try it before burning a retry.
+                            print(f"  [FALLBACK] aria2c failed for {name}; retrying with curl")
+                            curl_cmd = f"curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 {curl_headers} -o {archive_path} '{url}'"
+                            subprocess.run(curl_cmd, shell=True, check=True, capture_output=not DEBUG)
                         extract_cmd = f"tar -I 'pigz -p {NPROC} -b 256' -x --record-size=1M -f {archive_path} -C {path} {strip}"
                         subprocess.run(extract_cmd, shell=True, check=True)
 
@@ -181,6 +199,8 @@ runs:
                     if attempt < MAX_ATTEMPTS:
                         time.sleep(5)
                 finally:
+                    if limited:
+                        CODELINARO_SLOTS.release()
                     if os.path.exists(shm_workspace):
                         shutil.rmtree(shm_workspace, ignore_errors=True)
             return False
