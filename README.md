@@ -113,7 +113,7 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 | `use_susfs` / `susfs_branch` | `true` / *(empty)* | SUSFS feature set; empty branch auto-selects the GKI branch. |
 | `nethunter` / `wireless_modules` | `true` | Inline configs / external driver modules. |
 | `ddk` / `ddk_injection` | `true` | Bazel-Kleaf build + qcacld injection (6.6.118/6.6.142 A16 only). |
-| `optimize_level` / `lto` | `O2` / `thin` | Compiler optimization; `thin` enables the persistent ThinLTO cache. |
+| `optimize_level` / `lto` | `O2` / `thin` | Compiler optimization. `thin` enables the persistent ThinLTO cache; `none` maps to `CONFIG_LTO_NONE` and is now asserted in the resolved `.config` (see note below). |
 | `compiler` | `zycromerz-19` | Or `manifest` for the pinned Clang. |
 | `battery_save` / `audit_off` | `false` | Opt-in power knobs. |
 | `bore` | `false` | Opt-in BORE scheduler patch — **6.6.118/6.6.142 only** (not "A16": 6.6.89 A16 also fails), see [BORE scheduler](#-bore-scheduler). |
@@ -122,6 +122,14 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 | `clean_build` / `debug` | `false` | Force a full rebuild / emit debug artifacts. |
 | `release_type` | `none` | `none`, `prerelease`, or `release`. |
 | `runner` | `github-hosted` | Or `self-hosted`. |
+
+> **On `lto`:** the three Kconfig choice members are `LTO_NONE`,
+> `LTO_CLANG_THIN` and `LTO_CLANG_FULL` — there is no `LTO_CLANG_NONE`. The
+> action previously wrote `-e LTO_CLANG_NONE`, which `scripts/config` appends
+> verbatim and `olddefconfig` then discards as unknown, so the request was
+> carried only by the choice *default* rather than by intent. `none` now sets
+> `LTO_NONE` explicitly, and the resolved `.config` is asserted for every mode
+> ([palazik `b4777f8`](https://github.com/palazik/actions_oplus_sm8750/commit/b4777f8f022741b810e9ea073292e8eca71a0ac3)).
 
 ---
 
@@ -197,7 +205,20 @@ A `service.d` script (`files/battery/99-battery-tweaks.sh`) adds `vm.page-cluste
 >
 > **At runtime** the tunables are sysctls under `/proc/sys/kernel/` (`sched_bore`, `sched_burst_inherit_type`, `sched_burst_protect_slice_lv`, `sched_credit_cap_us` and the other `sched_burst_*` knobs, mode `0644`). `echo 0 > /proc/sys/kernel/sched_bore` puts the fair class back to plain EEVDF without reflashing.
 >
-> **Status.** Verified to apply with `--fuzz=0` and to compile against both 6.6.118 and 6.6.142 (locally, `kernel/sched/*.o` plus `fork.o`/`exit.o`/`futex/waitwake.o`, with BORE both on and off), and `validate_workflow.sh` re-checks its hunk counts. It has **not been booted** — a green compile proves it links, not that the scheduler is sound at runtime.
+> **Status.** Verified to apply with `--fuzz=0` and to compile against both 6.6.118 and 6.6.142 (locally, `kernel/sched/*.o` plus `fork.o`/`exit.o`/`futex/waitwake.o`, with BORE both on and off), and `validate_workflow.sh` re-checks its hunk counts.
+>
+> **Re-verified by compilation** (clang 22 / `LLVM=1`, aarch64). On **both** supported trees the patch applied at `--fuzz=0` and these objects all built:
+>
+> | tree | bore.o | core.o | fair.o | fork.o | exit.o |
+> |---|---|---|---|---|---|
+> | 6.6.118 | 179 KB | 939 KB | 497 KB | 452 KB | 312 KB |
+> | 6.6.142 | 179 KB | 930 KB | 497 KB | 463 KB | 313 KB |
+>
+> The step's post-apply assertions were checked against both patched trees and all hold — `config SCHED_BORE` in `init/Kconfig`, `sched_init_bore` in `core.c`, the `bore.h` include, `sched_update_min_base_slice` in `sched.h`, the `ANDROID_KABI_USE(1, struct bore_ctx *bore)` slot claimed, the forward declaration present, and **no inline `bore_ctx`** (the ABI guarantee). `CONFIG_SCHED_BORE=y` survived `olddefconfig` on both.
+>
+> On `6.6.89` the patch correctly **rejects** at `--fuzz=0` (2 of 19 hunks), which is the documented fail-fast scope.
+>
+> It has **not been booted** — a green compile proves it links, not that the scheduler is sound at runtime.
 
 ---
 
@@ -218,7 +239,73 @@ A `service.d` script (`files/battery/99-battery-tweaks.sh`) adds `vm.page-cluste
 >
 > **At runtime** `/proc/sys/kernel/random/` is the LRNG's own table (`entropy_avail`, `poolsize`, `write_wakeup_threshold`, `boot_id`, `uuid`, `urandom_min_reseed_secs`), and `/proc/lrng_type` prints the DRNG name, security strength and per-source state. `dmesg | grep -i lrng` shows `LRNG minimally seeded with N bits of entropy` and `LRNG fully seeded with N bits of entropy`.
 >
-> **Status.** Verified at the patch level only: it applies cleanly with `--fuzz=0` on all seven pinned trees, composes with BORE in either order, and `validate_workflow.sh` re-checks its hunk counts. It has **not** been compiled or booted yet — the first `lrng=true` run is the compile check.
+> **Status.** Applies cleanly with `--fuzz=0` on all seven pinned trees, composes with BORE in either order, and `validate_workflow.sh` re-checks its hunk counts.
+>
+> **Compiled** (clang 22 / `LLVM=1`, aarch64, 6.6.89). The patch applied at `--fuzz=0`, all six of the step's plumbing assertions held, and `make rc=0` produced the whole RNG: 15 objects under `drivers/char/lrng/` plus `crypto/drbg.o`, `kernel/sched/core.o` and `init/main.o`. The resolved config matches the intent above — `CONFIG_LRNG=y`, `# CONFIG_RANDOM_DEFAULT_IMPL is not set`, `LRNG_DRNG_CHACHA20=y`, `LRNG_IRQ=y`, `LRNG_CPU=y`, and **`LRNG_SCHED` off**.
+>
+> The failure mode that actually matters was checked directly rather than assumed: `random.o` and `lrng_interface_random_kernel.o` both define `get_random_bytes`, so a build linking both would die on duplicate symbols. Inspecting `drivers/char/built-in.a` shows **`random.o` is absent** — the `obj-$(CONFIG_RANDOM_DEFAULT_IMPL)` gate keeps it out, leaving the LRNG interface as the sole provider of `get_random_bytes`, `add_device_randomness` and `add_input_randomness`. That is exactly what the "would build with no RNG" warning below is about, now verified end-to-end instead of by grep.
+>
+> It has **not been booted** — a compile proves the RNG links and the config resolves, not that entropy is credited correctly at runtime or that `/dev/random` behaves. `dmesg | grep -i lrng` on a real boot is still the check that matters.
+
+---
+
+## SUSFS / KernelSU version pairing
+
+SUSFS has a kernel half *and* a KernelSU half, and the two must agree on the
+`selinux_hide` dispatch shape. The pins live in
+`.github/compatible-commits.json`, keyed per KSU variant.
+
+| | Pinned | Notes |
+|---|---|---|
+| SUSFS (`android15-6.6`, both variants) | `f98f0822` — **v2.4.0** (2026-11-15) | `SUSFS_VERSION` read from `kernel_patches/include/linux/susfs.h` at that ref |
+| KernelSU (`main`) | `64833c00` | "feat(kernel): Add LSM hook for inode_setxattr (#3996)" |
+| KernelSU-Next (`dev`) | `7ccf6147` | same LSM hook, carried into KSUN |
+
+v2.4.0's commit message names `64833c00` as its KernelSU sync point, so the
+SUSFS and KernelSU pins are matched by construction rather than by guesswork.
+Pairing v2.4.0 with an older KernelSU still applies the kernel-side half, but
+the `susfs_selinux_inode_setxattr` / `_post_setxattr` handlers it registers
+have nothing to dispatch into.
+
+**v2.3.0/v2.4.0 are KSUN-capable.** An earlier revision of the action
+hard-failed `v2.3.0` + KSUN on the belief that WildKernels' fix patch sets
+stopped at v2.2.0. They do not: `next/susfs_fix_patches/v2.3.0/` and `v2.4.0/`
+both exist upstream and both ship the same `fix_<file>.patch` set plus
+`overwrite_hook_mode.patch` and `ksu_toolkit.patch`. The fix patches are
+resolved from the detected `$susfs_version`, so a v2.4.0 pin automatically
+pulls the v2.4.0 fix set — there is no cross-version mix.
+
+### Does the pin fit the trees?
+
+Checked by fetching each of the 27 files the v2.4.0 patch touches from the tree
+the manifest actually names — including the `hipuu` remote for 6.6.142, which is
+the only variant whose common kernel is not from OnePlusOSS — applying the
+prepatch this repo already performs, then dry-running the whole patch:
+
+| Variant | v2.4.0 patch |
+|---|---|
+| `6.6.30_v` | CLEAN |
+| `6.6.66_v` | CLEAN |
+| `global_6.6.56_v` | CLEAN |
+| `global_6.6.89_v` | CLEAN |
+| `6.6.118_w` | CLEAN |
+| `6.6.142_w` | CLEAN |
+| `6.6.89_w` | CLEAN |
+
+Two hunks need the prepatch, and both mutations were already there:
+`fs/proc/task_mmu.c` (#6) is cured by the `nr_subpages`/`res` declarations and
+the `VMA_PAD_START` fallback, and `fs/namespace.c` (#1) by the
+`#include <trace/hooks/fs.h>` insertion the action performs for a15-6.6.
+
+> 6.6.30 fails two hunks if the prepatch is skipped. That is **pre-existing** —
+> the previous v2.2.0 pin fails the same two hunks on the same tree before
+> prepatch — so it is not a consequence of this pin bump.
+
+This is source-level validation only. Nothing here was compiled.
+
+To move the pins, change all four values together and re-run a build; the
+`Resolve SUSFS ref` / `Resolve KernelSU ref` steps turn any unresolvable ref
+into a hard failure before compilation starts.
 
 ---
 
@@ -233,7 +320,8 @@ A `service.d` script (`files/battery/99-battery-tweaks.sh`) adds `vm.page-cluste
 | `qca_cld3_peach_v2.ko` (DDK) | The vendor Wi-Fi module, standalone |
 | *(with `debug=true`)* | Build/install logs, `vmlinux`, `Module.symvers`, modules tree |
 
-Modules are built with `CONFIG_MODVERSIONS=y`, so a modules ZIP loads **only** on the exact kernel build it shipped with.
+Modules are built with `CONFIG_MODVERSIONS=y`, so a modules ZIP loads **only**
+on the exact kernel build it shipped with.
 
 ---
 
@@ -280,23 +368,212 @@ The published repository is deliberately just the pipeline: `.github/**`, `confi
 
 ---
 
+## Known issues
+
+### `CONFIG_KSU_SUSFS_ENABLE_LOG` is load-bearing
+
+SUSFS v2.4.0's `fs/susfs.c` defines `SUSFS_LOGI`/`SUSFS_LOGE` fallbacks in the
+`#else` branch of `#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG`, but **not**
+`SUSFS_LOGI_RL`/`SUSFS_LOGE_RL`, which are called unconditionally at lines 78
+and 155. Turning `CONFIG_KSU_SUSFS_ENABLE_LOG` off therefore fails to compile
+with `call to undeclared function 'SUSFS_LOGI_RL'`.
+
+This pipeline always sets it to `y`, so builds are unaffected. The reason it is
+recorded here is that the line looks like a tunable log switch, and it is not —
+removing it breaks the build. Upstream bug in `simonpunk/susfs4ksu` at
+`f98f0822`; not worked around locally.
+
+### `CONFIG_UKSM_CPU_GOVERNOR` / `_SLEEP_MS` must stay pinned
+
+The 6.6.142 Hipuu perf-stack fork declares the UKSM choice and integer symbols
+with **no defaults**. Left unpinned they are `(NEW)`, and any `syncconfig` that
+sees them prompts interactively — under CI (stdin at EOF) that becomes an
+error-retry loop that looks exactly like a hung "Creating kernel config" step.
+
+Measured on the real 6.6.142 tree, stdin at EOF:
+
+| | `UKSM_CPU_GOVERNOR` | `UKSM_SLEEP_MS` |
+|---|---|---|
+| without the pins | *(empty)* — invalid value | 8 |
+| with the action's pins | `4` | `100` |
+
+So the pins are not cosmetic tidy-up; without them the resolved config contains
+an invalid empty governor. The action's `CONFIG_UKSM_CPU_GOVERNOR=4` /
+`CONFIG_UKSM_SLEEP_MS=100` lines, and the comment above them, are load-bearing —
+do not remove them.
+
+---
+
 ## Development
 
 ```bash
-SKIP_NETWORK=1 bash validate_workflow.sh     # local static validation
+python3 .validate_ci.py                     # static validation (needs pyyaml)
+python3 .validate_ci.py --tree ~/kernel     # + check every CONFIG_* against Kconfig
+python3 .check_config_e2e.py ~/kernel gki_defconfig \
+        .github/actions/build-kernel/action.yml    # + real olddefconfig round-trip
+python3 .negative_test_ci.py                # proves the validator fails on regressions
+KERNEL_TREE=~/kernel python3 .negative_test_ci.py   # + the 4 config-symbol cases
 ./debug_workflow.sh [status|logs|failed|watch|rerun|artifacts|download] [run_id]
 ```
 
-The validator checks YAML/JSON/XML parseability, DDK **and** battery patch hunk counts, workflow/action structure, config↔manifest alignment, full-SHA pins, absence of boot-image construction, and POSIX/LF conformance of the on-device loader.
+`.validate_ci.py` checks YAML/JSON/XML parseability, `bash -n` on every `run:`
+block in the workflow and the composite actions, config↔manifest alignment,
+full-40-char-SHA pins (and that `android15-6.6` is pinned for both KSU
+variants), POSIX `sh -n` + LF + no-`awk` conformance of the on-device loader,
+absence of boot-image construction, and that neither the retired
+`LTO_CLANG_NONE` symbol nor the retired SUSFS-v2.3.0-KSUN gate has been
+reintroduced.
 
-To read **compiler** warnings, use the live job log — the post-completion summary omits them, and a real failure can hide there:
+With `--tree`, it additionally resolves every `CONFIG_*` the action appends
+against the kernel's real Kconfig files. This catches the class of bug where a
+mistyped or non-existent symbol is discarded by `olddefconfig` without a word,
+so the build is green but the feature is missing. Six such lines were found and
+fixed this way (§ *Dead config symbols* below).
+
+`.check_config_e2e.py` goes one step further and is the strongest config check
+available without compiling: it resolves the stock `gki_defconfig` with the
+kernel's **own** `scripts/kconfig`, appends the action's lines, runs
+`olddefconfig`, and diffs. That catches symbols which are defined and whose
+request is still not honoured — e.g. a `=y` request on a child of a modular
+parent, which Kconfig silently demotes to `=m`, or a symbol gated behind an
+`if` whose controlling option is off (§ *Symbols that existed but never took*).
+
+Both need a kernel checkout and, for `kconfig`, a cross-compiler shim because
+Kconfig probes `$(CC)` even when it is only building its own config tool.
+
+`.negative_test_ci.py` injects each regression the validator claims to catch
+into a throwaway copy of the tree and asserts the validator fails with the
+expected message, plus positive controls that the unmodified tree passes. Nine
+cases run without a kernel tree; four more run when `KERNEL_TREE` is set. A
+check that cannot fail is worse than no check, so this is what keeps the
+validator honest.
+
+It does **not** apply kernel patches or compile anything — it is a static gate,
+not a build.
+
+### What has actually been compiled
+
+Static checks are cheap; compilation is not. What has been built locally (clang
+22, `LLVM=1`, `ARCH=arm64`, on the real OnePlusOSS 6.6.89 and 6.6.118 trees):
+
+| What | Result |
+|---|---|
+| `gki_defconfig` + the action's 181 config appends, through the kernel's own `olddefconfig` | 7,993-line config, **0 mismatches** (155 took as requested, 26 patch-added) |
+| ~1,168 objects across `kernel/sched`, `mm`, `fs`, `net`, `net/mac80211`, `net/wireless` | clean |
+| The individual files the pipeline patches — `mm/vmscan.o`, `mm/memory.o`, `mm/zsmalloc.o`, `fs/namespace.o`, `fs/exec.o`, `fs/proc/base.o`, `fs/proc/task_mmu.o`, `fs/readdir.o`, `kernel/sched/core.o`, `kernel/sched/fair.o`, `net/unix/af_unix.o` | all built |
+| BORE 7.0.0 on 6.6.118 — `bore.o`, `core.o`, `fair.o`, `fork.o`, `exit.o` + all six patch-landing assertions | **compiles**, ABI-neutral |
+| BORE 7.0.0 on **6.6.142** (Hipuu perf-stack) — same five objects, same assertions | **compiles**, ABI-neutral |
+| BORE 7.0.0 on 6.6.89 | correctly rejects (2/19 hunks) — documented scope |
+| LRNG v60 on 6.6.89 — 15 `lrng/*.o` + `crypto/drbg.o` + `kernel/sched/core.o` + `init/main.o` | **compiles**, `random.o` correctly excluded so the RNG interface has one provider |
+| **KernelSU + SUSFS on 6.6.89** — 34 `drivers/kernelsu/**/*.o` + `fs/susfs.o` (405 KB) | **compiles** — the core combination, including every file the SUSFS→KernelSU patch touches |
+| **Wireless module set on 6.6.89** — 48 module objects, modpost-resolved | **every advertised driver built**: ath9k_htc, ath10k_usb, carl9170, rtl8187, rtl8xxxu, rtw88, rt2800usb (rt2x00), zd1211rw, p54usb, mt76 + `cfg80211`/`mac80211` |
+| **Module-pack dependency closure** — 6 offline cases | **algorithm verified**: resolves 13 modules incl. out-of-seed `eeprom_93cx6`/`libarc4`/`rfkill`, terminates on cycles, keeps deps with no map entry, and confirms the `modules.dep` line-count gate is unreachable by construction |
+
+The KernelSU/SUSFS build is worth a note because it exposed a real ordering
+constraint and one upstream bug:
+
+- `drivers/kernelsu` will not compile until `security/selinux/` has run, because
+  `objsec.h` includes `flask.h`/`av_permissions.h`, which `genheaders` *generates*.
+  A partial `make drivers/kernelsu/` on a clean tree therefore fails with
+  `'flask.h' file not found` — a build-ordering artifact, not a source defect.
+- SUSFS v2.4.0's `fs/susfs.c` calls `SUSFS_LOGI_RL` unconditionally but defines
+  it only under `#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG`; the `#else` branch supplies
+  fallbacks for `SUSFS_LOGI`/`SUSFS_LOGE` only. Building with logging **off**
+  therefore fails with `call to undeclared function 'SUSFS_LOGI_RL'`. This
+  pipeline always sets `CONFIG_KSU_SUSFS_ENABLE_LOG=y`, so it takes the safe
+  branch and is unaffected — but it is an upstream hazard worth knowing if that
+  config line is ever turned off.
+
+**Not built:** a full `vmlinux`/`Image`, the linked module set (`.ko`), and the
+DDK/Kleaf path (needs Bazel). This box has 4 GB RAM; a full build wants ~16 GB,
+and the slice above was already stopped at a 50-minute timeout while still
+compiling happily. All three kernel trees have now been exercised: 6.6.89
+(base + LRNG + KernelSU/SUSFS + modules), 6.6.118 and 6.6.142 (BORE).
+
+On the modules: every advertised driver **compiled and passed modpost**, which is
+where a missing dependency or an unresolved symbol would surface. The final `.ko`
+link only runs under the whole-tree `modules` target, which needs the full build,
+so what is proven is "compiles and resolves", not "the `.ko` exists".
+
+The packager's **closure algorithm** is separately tested offline
+(`.test_module_closure.py`, 6 cases), including the regression that motivated
+using `modinfo` instead of `modules.dep`: a truncated `modules.dep` loses
+`rtl8187 → eeprom_93cx6` and ships a module that cannot `insmod`, while the
+modinfo-derived closure keeps it. What is *not* tested is the packager
+end-to-end, since that needs real `.ko` files.
+
+One defensive check was audited and found **unreachable**, which is the outcome
+you want: the step fails the build when `wc -l modules.dep` differs from the
+staged module count. That can only happen if a staged module has no dependency
+map entry, but `STAGE` is populated solely from `WANTED`, `WANTED` derives from
+the map keys plus the seeds, and the map is built by scanning the same
+`UNAME_DIR` the seeds come from — so every seed necessarily has an entry. The
+gate is a sound backstop, not a lurking failure.
+
+**Not tested at runtime.** Nothing has been booted on a device. A clean compile
+proves the code is syntactically valid and links against the tree's own headers;
+it says nothing about whether a scheduler, a root implementation or a hiding
+feature behaves correctly on hardware.
+
+### A caveat about the audit tooling itself
+
+Three rounds of "every appended symbol resolves" were run with a regex of
+`[A-Z0-9_]` for Kconfig symbol names. Kconfig names are `[A-Za-z0-9_]*`, so any
+symbol containing a lowercase letter — `MT76x0U`, `MT76x2U` — was silently
+**skipped** rather than checked. The conclusion happened to still hold once fixed
+(187 symbols audited instead of 181, still 0 mismatches), but the earlier
+coverage was incomplete. `.test_symbol_regex.py` now pins the pattern so the blind
+spot cannot return.
+
+For compiler warnings, use the live job log — the post-completion summary
+omits them, and a real failure can hide there:
 
 ```bash
 gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs --allow-escape-sequences
 ```
 
 > [!NOTE]
-> `validate_workflow.sh` and `debug_workflow.sh` are untracked, so a fresh clone has neither the scripts nor any ignore rules. Take care with `git add -A` after a build.
+> The local kernel-tree tooling (`validate_workflow.sh`, `debug_workflow.sh`),
+> `TESTING.md`, and `AGENTS.md` are kept in the working checkout but untracked
+> — see `.gitignore`. `.validate_ci.py`, `.negative_test_ci.py`, and
+> `.audit_config_keys.py` are likewise untracked. Take care with `git add -A`
+> after a build.
+
+### Dead config symbols
+
+Verified against the real OnePlusOSS 6.6.89 common tree
+(`grep -rE '^config <SYM>$' --include='Kconfig*'`), six lines this action
+appended had no Kconfig definition and were therefore silently dropped:
+
+| Line | Why it never worked | Resolution |
+|---|---|---|
+| `CONFIG_CAN_ESD_USB2=m` | typo — 6.6 defines `CAN_ESD_USB` | renamed, so the ESD CAN adapter is now actually built |
+| `CONFIG_NETFILTER_XT_TARGET_REJECT=y` | no such symbol; `net/netfilter/xt_REJECT.c` does not exist in this tree | replaced with the real per-family `IP_NF_TARGET_REJECT` / `IP6_NF_TARGET_REJECT` |
+| `CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3` | the -O3 choice member was removed upstream in 5.18 | removed; `-O3` is passed via `KCFLAGS_EXTRA`, which is what reaches the compiler |
+| `CONFIG_OPTIMIZE_INLINING=y` | removed in 6.x (forced on since 5.15) | removed |
+| `CONFIG_KSM_LEGACY=n` | never existed in this tree | removed |
+| `CONFIG_ANDROID_BINDER_IPC_RUST=m` | tree defines `ANDROID_BINDER_IPC*` but no `_RUST` variant | removed (dormant — `rust_build` is false everywhere) |
+
+`CAN_ESD_USB2` is the one with user-visible impact: the ESD CAN/USB adapter was
+listed as supported but had never been compiled.
+
+### Symbols that existed but never took
+
+Running the kernel's own `olddefconfig` over the real defconfig (not just name
+matching) found two more, where the symbol *is* defined and the request was
+still silently not honoured:
+
+| Symbol | What actually happened | Resolution |
+|---|---|---|
+| `CONFIG_BT_HCIBTUSB` and the other `BT_HCI*` | requested `=y`, but they are `tristate ... depends on USB`, and `CONFIG_BT` is `=m` in this tree — a `=y` child of a modular parent is unsatisfiable, so Kconfig demoted each to `=m` | request `=m` explicitly; the modules still ship in the modules ZIP |
+| `CONFIG_USB_AIRSPY`, `CONFIG_USB_HACKRF` | never built. Both live under `if MEDIA_SDR_SUPPORT`, which is `default y if !MEDIA_SUPPORT_FILTER` — off here, so the entries were never even offered to Kconfig | enable `CONFIG_MEDIA_SDR_SUPPORT=y`; the SDR support the feature list advertises now exists |
+
+`CONFIG_USB_AIRSPY`/`USB_HACKRF` is the significant one: NetHunter SDR was
+documented but absent from every build.
+
+Verified end-to-end with `.check_config_e2e.py` — stock `gki_defconfig` →
+append the action's 181 lines → `olddefconfig` → compare: **155 took as
+requested, 26 patch-added (exempt), 0 mismatches**.
 
 ---
 

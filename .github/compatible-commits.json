@@ -1,5 +1,12 @@
 {
-  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit. The susfs pins are keyed per KSU variant because each flavor tracks the susfs sync at a different point. android15-6.6 KSU pin 937215c (susfs sync 'KernelSU: Sync with the official main repo') is dry-run-verified against KSU main 3497a56; the previous sync eba2a88 broke against 3497a56's allowlist refactor (run 33350609755, caught by the .rej fail-fast at minute 3).",
+  "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit.",
+  "_provenance": {
+    "susfs_android15-6.6": "simonpunk/susfs4ksu branch gki-android15-6.6 -> f98f0822 (2026-11-15, 'kernel & KernelSU: Sync with upstream'), SUSFS_VERSION 'v2.4.0' read from kernel_patches/include/linux/susfs.h at that ref.",
+    "ksu_main": "tiann/KernelSU main HEAD 64833c00 (2026-11, 'feat(kernel): Add LSM hook for inode_setxattr (#3996)'). SUSFS v2.4.0's commit message names this exact SHA as its KernelSU sync point, so the two are matched by construction.",
+    "ksun_dev": "KernelSU-Next dev HEAD 7ccf6147, which carries the same inode_setxattr LSM hook (#3996) that SUSFS v2.4.0's KernelSU half expects.",
+    "why_paired": "The susfs pins are keyed per KSU variant because each flavour tracks the susfs sync at a different point. A SUSFS revision and a KernelSU revision must agree on the selinux_hide dispatch shape: v2.4.0 added susfs_selinux_inode_setxattr/_post_setxattr handlers that the KernelSU side must provide. Pairing v2.4.0 with a pre-64833c00 KernelSU drops that half of the feature.",
+    "history": "Previously pinned android15-6.6 KSU=937215c / KSUN=be7b7ef, both at SUSFS v2.2.0-v2.3.0. The v2.3.0 branch of the action used to hard-fail for KSUN on the belief that WildKernels' fix sets stopped at v2.2.0; next/susfs_fix_patches/v2.3.0/ and v2.4.0/ both exist upstream and ship the same fix_<file>.patch set, so that gate has been removed."
+  },
   "susfs": {
     "android12-5.10": {
       "KSU": "",
@@ -14,8 +21,8 @@
       "KSUN": ""
     },
     "android15-6.6": {
-      "KSU": "937215cb3a1b1f333d764c366c7a49972fa8e7a0",
-      "KSUN": "be7b7ef49a1e1b189c3abf00eacaa7ebdb4168c1"
+      "KSU": "f98f08223bbf469cc0a1542166383d253557fc32",
+      "KSUN": "f98f08223bbf469cc0a1542166383d253557fc32"
     },
     "android16-6.12": {
       "KSU": "",
@@ -23,7 +30,7 @@
     }
   },
   "ksu": {
-    "main": "3497a56261564ee7fca494e3bfa0fac80118a34d",
-    "dev": "234f6e040fcbca18b16d2398e1aa225712ec99ad"
+    "main": "64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2",
+    "dev": "7ccf61479621f240c0d968ef46f1b167b6ceb500"
   }
 }

@@ -1194,7 +1194,31 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
-          "v2.2.0")
+          "v2.2.0"|"v2.3.0"|"v2.4.0")
+            # All three share one shape, and all three are KSUN-capable.
+            #
+            # HISTORY, because the previous revision of this block asserted the
+            # opposite: v2.3.0 was originally gated to KSU-only with a hard exit,
+            # on the belief that "WildKernels fix patches stop at v2.2.0" and
+            # that a v2.3.0 base patch plus a v2.2.0 fix set left the module
+            # half-patched (run 33287059782). That is no longer true:
+            # next/susfs_fix_patches/v2.3.0/ and v2.4.0/ both exist upstream and
+            # both ship the same fix_<file>.patch set this loop consumes
+            # (fix_Kbuild, fix_dispatch.c, fix_init.c, fix_kernel_umount.c,
+            # fix_rules.c, fix_setuid_hook.c, fix_sucompat.c, fix_supercall.c)
+            # plus overwrite_hook_mode.patch and ksu_toolkit.patch. The fix
+            # patches are resolved from $susfs_version, so pointing the pin at a
+            # v2.3.0/v2.4.0 ref automatically pulls that version's fix set --
+            # there is no cross-version mix.
+            #
+            # v2.4.0 is the current upstream head of simonpunk/susfs4ksu
+            # gki-android15-6.6 (f98f0822, 2026-11-15, "kernel & KernelSU: Sync
+            # with upstream"), and its KernelSU half is synced to
+            # tiann/KernelSU 64833c00 (the inode_setxattr LSM hook commit). A
+            # v2.4.0 SUSFS tree therefore needs a KernelSU at or past that
+            # commit; older KernelSU still applies the kernel-side half but the
+            # selinux_hide dispatch it expects is absent. .github/
+            # compatible-commits.json carries the matching pins.
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               cd "$KSUN_FOLDER"
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
@@ -1211,24 +1235,6 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
-          "v2.3.0")
-            # v2.3.0 synced with tiann/KernelSU main at 34a82ab7 (see the
-            # upstream "Bump version to 2.3.0" commit); verified to apply
-            # cleanly to KSU main HEAD 932014ab (one commit past the sync
-            # point). KSUN is NOT supported on this susfs version yet:
-            # upstream hunks still reject there and WildKernels' fix sets
-            # only go up to v2.2.0, so mixing a v2.3.0 base patch with the
-            # v2.2.0 fix set leaves the module half-patched (that is exactly
-            # what failed run 33287059782). Fail loudly instead. KSUN builds
-            # resolve the v2.2.0 ref via the variant-keyed pin in
-            # .github/compatible-commits.json.
-            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
-              echo "::error::SUSFS v2.3.0 does not support KernelSU-Next yet (WildKernels fix patches stop at v2.2.0). Use ksu_variant=KSU, or pin susfs_branch to a v2.2.0 commit."
-              exit 1
-            fi
-            cd "$KSU_FOLDER"
-            patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-            ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
             exit 1
@@ -1236,19 +1242,36 @@ runs:
         esac
 
         cd "$COMMON_KERNEL_FOLDER"
-        if [ "${{ inputs.ksu_type }}" = "KSU" ] && [ -d "$KSU_FOLDER" ]; then
-          # A half-applied SUSFS->KernelSU patch leaves the module un-buildable
-          # (succeeded hunks drop Kbuild entries whose callers still exist),
-          # then Bazel dies at link with confusing errors an hour later.
-          # Detect rejects here at minute ~3 instead: fail fast with the list.
-          if REJ_LIST=$(find "$KSU_FOLDER" -name '*.rej' -type f | sort); then
-            if [ -n "$REJ_LIST" ]; then
-              echo "::error::SUSFS KernelSU patch left rejects; KSU/SUSFS drifted apart:"
-              echo "$REJ_LIST"
-              echo "Fix: update .github/compatible-commits.json to matching refs"
-              exit 1
-            fi
-          fi
+        # A half-applied SUSFS->KernelSU patch leaves the module un-buildable
+        # (succeeded hunks drop Kbuild entries whose callers still exist), then
+        # the build dies at link with confusing errors an hour later. Detect
+        # rejects here at minute ~3 instead: fail fast with the list.
+        #
+        # This covers BOTH flavours and BOTH module trees. It used to be gated
+        # on ksu_type=KSU and rooted at $KSU_FOLDER only, which left two real
+        # holes:
+        #   * KSUN builds were never checked at all, even though the KSUN
+        #     branch applies four extra fix_*.patch files whose failure is the
+        #     most likely way to end up half-patched; and
+        #   * the kernel tree itself was never checked, even though
+        #     apply-susfs-main-patch.sh applies 50_add_susfs_in_*.patch there.
+        # Scan whichever tree this variant actually created, and both of them
+        # for the kernel-side rejects.
+        SUSFS_REJ_TREES=""
+        [ -d "$COMMON_KERNEL_FOLDER" ] && SUSFS_REJ_TREES="$COMMON_KERNEL_FOLDER"
+        if [ "${{ inputs.ksu_type }}" = "KSUN" ] && [ -d "$KSUN_FOLDER" ]; then
+          SUSFS_REJ_TREES="$SUSFS_REJ_TREES $KSUN_FOLDER"
+        elif [ "${{ inputs.ksu_type }}" = "KSU" ] && [ -d "$KSU_FOLDER" ]; then
+          SUSFS_REJ_TREES="$SUSFS_REJ_TREES $KSU_FOLDER"
+        fi
+        # shellcheck disable=SC2086  # word splitting of the tree list is intended
+        REJ_LIST=$(find $SUSFS_REJ_TREES -name '*.rej' -type f 2>/dev/null | sort)
+        if [ -n "$REJ_LIST" ]; then
+          echo "::error::SUSFS patches left rejects; KSU/SUSFS drifted apart:"
+          echo "$REJ_LIST"
+          echo "Fix: update .github/compatible-commits.json to matching refs,"
+          echo "     or pin susfs_branch to a commit whose fix set matches this KernelSU."
+          exit 1
         fi
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
@@ -2164,14 +2187,27 @@ runs:
         echo "Patch to fix kernel panic caused by oplus_bsp_midas"
         apply_patch "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
 
+        # Netfilter bits Droidspaces' container networking expects.
+        #
+        # NETFILTER_XT_TARGET_REJECT was dropped from this list: no 6.6 Kconfig
+        # defines it and net/netfilter/xt_REJECT.c does not exist in the
+        # OnePlusOSS common tree (upstream removed the xt REJECT target, leaving
+        # only the nftables NFT_REJECT* and the per-family IP_NF/IP6_NF
+        # variants). olddefconfig discarded the line silently, so it never did
+        # anything.
+        #
+        # The per-family REJECT targets are what iptables-restore inside a
+        # container actually needs, and they were not configured anywhere, so
+        # they are added here rather than merely deleting the dead line.
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_SYSVIPC=y
         CONFIG_DEVTMPFS=y
         CONFIG_PID_NS=y
         CONFIG_POSIX_MQUEUE=y
-        CONFIG_NETFILTER_XT_TARGET_REJECT=y
         CONFIG_NETFILTER_XT_TARGET_LOG=y
         CONFIG_NETFILTER_XT_MATCH_RECENT=y
+        CONFIG_IP_NF_TARGET_REJECT=y
+        CONFIG_IP6_NF_TARGET_REJECT=y
         CONFIG_USER_NS=y
         EOF
         # MACVLAN backs Droidspaces' macvlan container networking (upstream
@@ -2351,20 +2387,37 @@ runs:
         # them from the modules ZIP too, even though the packaging step seeds
         # from kernel/net/can and kernel/drivers/net/can and the README
         # documents slcan as loadable.
+        # Two real defects were fixed in this block, both found by running the
+        # kernel's own Kconfig over this defconfig rather than by reading it:
+        #
+        # 1. BT_HCI* were requested =y but Kconfig returns =m. They are
+        #    `tristate ... depends on USB` and CONFIG_BT is =m in this tree, so a
+        #    =y request on the child of a modular parent is unsatisfiable --
+        #    Kconfig silently demotes it. Requesting =m states the real intent,
+        #    and the modules still land in the packaged modules ZIP.
+        #
+        # 2. USB_AIRSPY / USB_HACKRF never built at all. They sit under
+        #    `if MEDIA_SDR_SUPPORT` in drivers/media/usb/Kconfig, and that symbol
+        #    is `default y if !MEDIA_SUPPORT_FILTER` -- which is off here, so it
+        #    was n and the two entries were never offered to Kconfig. Enabling
+        #    the gate is what makes the SDR support the README advertises exist.
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
-        CONFIG_BT_HCIBTUSB=y
+        CONFIG_BT=m
+        CONFIG_BT_HCIBTUSB=m
         CONFIG_BT_HCIBTUSB_BCM=y
         CONFIG_BT_HCIBTUSB_RTL=y
-        CONFIG_BT_HCIVHCI=y
-        CONFIG_BT_HCIBCM203X=y
-        CONFIG_BT_HCIBPA10X=y
-        CONFIG_BT_HCIBFUSB=y
+        CONFIG_BT_HCIVHCI=m
+        CONFIG_BT_HCIBCM203X=m
+        CONFIG_BT_HCIBPA10X=m
+        CONFIG_BT_HCIBFUSB=m
+        CONFIG_MEDIA_SDR_SUPPORT=y
+        CONFIG_VIDEO_DEV=y
+        CONFIG_MEDIA_USB_SUPPORT=y
         CONFIG_USB_AIRSPY=y
         CONFIG_USB_HACKRF=y
         CONFIG_CAN=m
         CONFIG_CAN_DEV=m
         CONFIG_CAN_CALC_BITTIMING=y
-        CONFIG_CAN_LEDS=y
         CONFIG_CAN_VCAN=m
         CONFIG_CAN_GRCAN=m
         CONFIG_CAN_XILINXCAN=m
@@ -2382,7 +2435,7 @@ runs:
         CONFIG_CAN_MCP251X=m
         CONFIG_CAN_8DEV_USB=m
         CONFIG_CAN_EMS_USB=m
-        CONFIG_CAN_ESD_USB2=m
+        CONFIG_CAN_ESD_USB=m
         CONFIG_CAN_GS_USB=m
         CONFIG_CAN_KVASER_USB=m
         CONFIG_CAN_PEAK_USB=m
@@ -2758,15 +2811,25 @@ runs:
           cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_KSM=y
         CONFIG_UKSM=y
-        CONFIG_KSM_LEGACY=n
         CONFIG_UKSM_CPU_GOVERNOR=4
         CONFIG_UKSM_SLEEP_MS=100
         EOF
         fi
+        # Build-based configs.
+        #
+        # Removed lines that no 6.6 Kconfig defines (verified against the real
+        # OnePlusOSS 6.6.89 common tree: `grep -rE '^config <SYM>$' --include='Kconfig*'`):
+        #   CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3 -- the -O3 choice member was
+        #       removed upstream in 5.18. init/Kconfig now offers only
+        #       CC_OPTIMIZE_FOR_PERFORMANCE (-O2) and CC_OPTIMIZE_FOR_SIZE.
+        #       O3 is applied through KCFLAGS_EXTRA instead, which is what
+        #       actually reaches the compiler.
+        #   CONFIG_OPTIMIZE_INLINING -- also gone in 6.x (forced on since 5.15).
+        #   CONFIG_KSM_LEGACY -- never existed in this tree.
+        # olddefconfig drops unknown symbols without a word, so these lines were
+        # inert; they are removed so the list reflects what is really applied.
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
         CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
-        CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n
-        CONFIG_OPTIMIZE_INLINING=y
         CONFIG_FRAME_WARN=0
         CONFIG_TRACEPOINTS=y
         CONFIG_LRU_GEN_ENABLED=y
@@ -2833,8 +2896,13 @@ runs:
       run: |
         set -euo pipefail
         echo "Add Build based configs"
+        # ONLY CONFIG_RUST is appended. The previous CONFIG_ANDROID_BINDER_IPC_RUST=m
+        # was removed: the OnePlusOSS 6.6.89 tree's drivers/android/Kconfig
+        # declares ANDROID_BINDER_IPC, ANDROID_BINDERFS, ANDROID_BINDER_DEVICES
+        # and ANDROID_BINDER_IPC_SELFTEST, but no *_RUST variant, so the line was
+        # discarded by olddefconfig. Dormant today (rust_build is false in every
+        # config), but the same dead-symbol class as the CAN/O3 fixes above.
         cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
-        CONFIG_ANDROID_BINDER_IPC_RUST=m
         CONFIG_RUST=y
         EOF
 
@@ -3953,10 +4021,33 @@ runs:
             ;;
         esac
 
-        scripts/config --file "$OUT/.config" -e LTO_CLANG -d LTO_CLANG_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL
+        # LTO choice members are LTO_NONE / LTO_CLANG_THIN / LTO_CLANG_FULL.
+        # There is NO LTO_CLANG_NONE -- verified against Linux v6.6
+        # arch/Kconfig, whose choice is declared as
+        #   choice default LTO_NONE
+        #     config LTO_NONE / config LTO_CLANG_FULL / config LTO_CLANG_THIN
+        #
+        # What the previous sequence actually did, measured with the real v6.6
+        # scripts/config:
+        #   `-e LTO_CLANG_NONE` exits 0 and appends a literal
+        #   `CONFIG_LTO_CLANG_NONE=y` line -- scripts/config does not validate
+        #   names against the Kconfig tree.
+        #   `-e LTO_CLANG` sets a bool that only choice members ever `select`,
+        #   so it carries no mode information either.
+        # olddefconfig then drops the unknown line and recomputes LTO_CLANG
+        # from its selects, so the request was never carried by the explicit
+        # calls. `lto=none` most likely still ended up correct -- but only
+        # because no choice member remained set and LTO_NONE is the choice
+        # default, i.e. by fall-through rather than by intent. That is a latent
+        # trap, not a proven miscompile, so it is fixed for correctness and
+        # paired with the resolved-.config assertion below, which is what
+        # actually pins the behaviour down.
+        # palazik fixed the same construct in b4777f8 ("fix: use CONFIG_LTO_NONE
+        # for lto_type none").
+        scripts/config --file "$OUT/.config" -d LTO_CLANG -d LTO_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL
 
         case "${{ env.OP_LTO}}" in
-          "none") scripts/config --file "$OUT/.config" -e LTO_CLANG_NONE ;;
+          "none") scripts/config --file "$OUT/.config" -e LTO_NONE ;;
           "thin") scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN ;;
           "full") scripts/config --file "$OUT/.config" -e LTO_CLANG_FULL ;;
           *)
@@ -3989,6 +4080,31 @@ runs:
             exit 1
           fi
         fi
+
+        # LTO: assert the requested mode actually took. A mistyped symbol is
+        # not a silent no-op -- scripts/config appends the bogus line and exits
+        # 0, then olddefconfig discards it -- so the only trustworthy signal is
+        # the resolved .config. Without this, `lto=none` could quietly build
+        # ThinLTO, which is exactly what happened before the fix above. Checked
+        # after olddefconfig, so it also catches a defconfig that overrides the
+        # selection afterwards.
+        case "${{ env.OP_LTO }}" in
+          none) want_lto='CONFIG_LTO_NONE=y';      forbid_lto='CONFIG_LTO_CLANG_THIN' ;;
+          thin) want_lto='CONFIG_LTO_CLANG_THIN=y'; forbid_lto='CONFIG_LTO_CLANG_FULL' ;;
+          full) want_lto='CONFIG_LTO_CLANG_FULL=y'; forbid_lto='CONFIG_LTO_NONE' ;;
+          *)    echo "::error::Unsupported LTO option: ${{ env.OP_LTO }}"; exit 1 ;;
+        esac
+        if ! grep -qx "$want_lto" "$OUT/.config"; then
+          echo "::error::LTO mode '${{ env.OP_LTO }}' did not take: expected '$want_lto' in resolved .config"
+          grep -E '^(# )?CONFIG_LTO' "$OUT/.config" || echo "  (no CONFIG_LTO* symbol at all)"
+          exit 1
+        fi
+        if grep -qx "${forbid_lto}=y" "$OUT/.config"; then
+          echo "::error::LTO mode '${{ env.OP_LTO }}' is active but '$forbid_lto' is also set -- the .config is inconsistent"
+          grep -E '^(# )?CONFIG_LTO' "$OUT/.config"
+          exit 1
+        fi
+        echo "LTO: $want_lto (confirmed in resolved .config)"
 
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
