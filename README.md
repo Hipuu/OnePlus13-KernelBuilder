@@ -527,6 +527,33 @@ built `OP13-6.6.89` in 30m30s, producing
 `AK3_OP13_A16_android15-6.6.89_KSUN_33239_SuSFS_v2.2.0.zip`. Both flavours are
 therefore confirmed end to end, not just the default one.
 
+The two opt-in subsystems were confirmed **together, in one build**
+([`44025256649`](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/44025256649),
+`6.6.142`, `bore=true` + `lrng=true`, 37m28s). The log shows both apply steps
+succeeding in the same run — `✅ BORE scheduler applied` and
+`✅ LRNG v60 applied` — and the run then packaged
+`AK3_OP13_A16_android15-6.6.142_KSU_32731_SuSFS_v2.4.0.zip`. Those two patches
+touch the scheduler and the RNG respectively, so "they compose" is now measured
+rather than assumed.
+
+The **DDK/Bazel path** was confirmed too
+([`44030058374`](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/44030058374),
+`6.6.118`, `ddk=true`, 41m19s on a GitHub-hosted runner). It produced the vendor
+module `qca_cld3_peach_v2.ko` alongside the AnyKernel3 ZIP and modules pack —
+so the Kleaf build, the defconfig fragment, the KMI flag relaxation and the
+`modules_staging` repacking all work on a 16 GB hosted VM, matching the
+[Self-hosted runners](#self-hosted-runners) note that the DDK build completes
+there.
+
+Every build path in this repository has now been exercised in CI:
+
+| Path | Run | Result |
+|---|---|---|
+| KSU, all 7 variants | `44012089375` | 7/7 green |
+| KSUN, 6.6.89 | `44020861237` | green |
+| BORE + LRNG, 6.6.142 | `44025256649` | green |
+| DDK/Bazel, 6.6.118 | `44030058374` | green, `qca_cld3_peach_v2.ko` |
+
 The 6.6.89 job log confirms the versions that actually shipped:
 `SusFS Version: v2.4.0`, `KernelSU Version: 32731`, `✅ SUSFS patches applied`,
 and a modules ZIP whose dependency closure completed.
