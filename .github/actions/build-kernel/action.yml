@@ -1201,9 +1201,22 @@ runs:
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               cd "$KSUN_FOLDER"
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              # Repair each rejected file, then DELETE its .rej on success.
+              #
+              # The delete is load-bearing and was missing. This loop has always
+              # repaired the rejects correctly, but it left the marker files in
+              # place, so the reject scan further down could not tell a repaired
+              # file from an unrepaired one -- a KSUN build would pass the repair
+              # step and then be failed by the scan for the very files it had
+              # just fixed. Deleting the .rej is the only durable record that the
+              # fix applied, because `patch` itself reports success per hunk.
               for file in $(find ./kernel -maxdepth 2 -name "*.rej" -exec basename {} .rej \;); do
                 echo "Patching file: $file with fix_$file.patch"
-                patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/fix_$file.patch"
+                if patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/fix_$file.patch"; then
+                  find ./kernel -maxdepth 2 -name "$file.rej" -delete
+                else
+                  echo "::warning::fix_$file.patch did not apply cleanly; $file.rej kept so the reject scan fails loudly"
+                fi
               done
               echo "Patching Hook Mode!"
               patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/next/susfs_fix_patches/$susfs_version/overwrite_hook_mode.patch"
