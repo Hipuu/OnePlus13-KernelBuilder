@@ -1,11 +1,13 @@
 {
   "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit.",
   "_provenance": {
-    "susfs_android15-6.6": "simonpunk/susfs4ksu branch gki-android15-6.6 -> f98f0822 (2026-11-15, 'kernel & KernelSU: Sync with upstream'), SUSFS_VERSION 'v2.4.0' read from kernel_patches/include/linux/susfs.h at that ref.",
-    "ksu_main": "tiann/KernelSU main HEAD 64833c00 (2026-11, 'feat(kernel): Add LSM hook for inode_setxattr (#3996)'). SUSFS v2.4.0's commit message names this exact SHA as its KernelSU sync point, so the two are matched by construction.",
-    "ksun_dev": "KernelSU-Next dev HEAD 7ccf6147, which carries the same inode_setxattr LSM hook (#3996) that SUSFS v2.4.0's KernelSU half expects.",
-    "why_paired": "The susfs pins are keyed per KSU variant because each flavour tracks the susfs sync at a different point. A SUSFS revision and a KernelSU revision must agree on the selinux_hide dispatch shape: v2.4.0 added susfs_selinux_inode_setxattr/_post_setxattr handlers that the KernelSU side must provide. Pairing v2.4.0 with a pre-64833c00 KernelSU drops that half of the feature.",
-    "history": "Previously pinned android15-6.6 KSU=937215c / KSUN=be7b7ef, both at SUSFS v2.2.0-v2.3.0. The v2.3.0 branch of the action used to hard-fail for KSUN on the belief that WildKernels' fix sets stopped at v2.2.0; next/susfs_fix_patches/v2.3.0/ and v2.4.0/ both exist upstream and ship the same fix_<file>.patch set, so that gate has been removed."
+    "susfs_android15-6.6_KSU": "simonpunk/susfs4ksu gki-android15-6.6 -> f98f0822 (2026-11-15), SUSFS_VERSION 'v2.4.0' read from kernel_patches/include/linux/susfs.h at that ref.",
+    "susfs_android15-6.6_KSUN": "be7b7ef4 = SUSFS v2.2.0, the last revision whose KSUN fix-patch set actually matches a KernelSU-Next tree. v2.4.0 + KSUN leaves rejects in kernel/core/init.c, kernel/feature/sucompat.c, kernel/supercall/dispatch.c and others (CI run 44007359941), so KSUN stays on v2.2.0 until an upstream fix set lands.",
+    "ksu_main": "tiann/KernelSU main f49be695 (2026-11-17, 'kernel: Use the first match for exact symbol lookup (#3999)'). Verified: SUSFS v2.4.0's 10_enable_susfs_for_ksu.patch (106 hunks, 32 files) applies with ZERO rejects at this commit.",
+    "ksu_main_evidence": "Scanned 60 commits of tiann/KernelSU main with a hard-reset worktree per candidate. Only two are clean: f49be695 (newest, 2026-11-17) and 64833c00 (2026-11-14, the commit the SUSFS v2.4.0 message names as its sync point). Everything older fails 4-6 hunks because the patch target was restructured (offsets up to -138 lines). Pinning 64833c00 would also work but is 3 days stale for no benefit.",
+    "ksun_dev": "KernelSU-Next dev 7ccf6147 is carried only because KSUN still builds against SUSFS v2.2.0; it is NOT validated against v2.4.0.",
+    "why_paired": "The susfs pins are keyed per KSU variant because each flavour tracks the susfs sync at a different point. A SUSFS revision and a KernelSU revision must agree on the selinux_hide dispatch shape and on the file layout the enable patch expects.",
+    "history": "Previously both variants were pinned at SUSFS v2.2.0 (KSU=937215c / KSUN=be7b7ef). This revision moves only KSU to v2.4.0, because that is the pairing that was proven by an actual patch application rather than by reading a commit message."
   },
   "susfs": {
     "android12-5.10": {
@@ -22,7 +24,7 @@
     },
     "android15-6.6": {
       "KSU": "f98f08223bbf469cc0a1542166383d253557fc32",
-      "KSUN": "f98f08223bbf469cc0a1542166383d253557fc32"
+      "KSUN": "be7b7ef49a1e1b189c3abf00eacaa7ebdb4168c1"
     },
     "android16-6.12": {
       "KSU": "",
@@ -30,7 +32,7 @@
     }
   },
   "ksu": {
-    "main": "64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2",
+    "main": "f49be6952c43b9d960ab9ffa104a8f5e354b0c44",
     "dev": "7ccf61479621f240c0d968ef46f1b167b6ceb500"
   }
 }

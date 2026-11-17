@@ -1194,31 +1194,10 @@ runs:
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
             ;;
-          "v2.2.0"|"v2.3.0"|"v2.4.0")
-            # All three share one shape, and all three are KSUN-capable.
-            #
-            # HISTORY, because the previous revision of this block asserted the
-            # opposite: v2.3.0 was originally gated to KSU-only with a hard exit,
-            # on the belief that "WildKernels fix patches stop at v2.2.0" and
-            # that a v2.3.0 base patch plus a v2.2.0 fix set left the module
-            # half-patched (run 33287059782). That is no longer true:
-            # next/susfs_fix_patches/v2.3.0/ and v2.4.0/ both exist upstream and
-            # both ship the same fix_<file>.patch set this loop consumes
-            # (fix_Kbuild, fix_dispatch.c, fix_init.c, fix_kernel_umount.c,
-            # fix_rules.c, fix_setuid_hook.c, fix_sucompat.c, fix_supercall.c)
-            # plus overwrite_hook_mode.patch and ksu_toolkit.patch. The fix
-            # patches are resolved from $susfs_version, so pointing the pin at a
-            # v2.3.0/v2.4.0 ref automatically pulls that version's fix set --
-            # there is no cross-version mix.
-            #
-            # v2.4.0 is the current upstream head of simonpunk/susfs4ksu
-            # gki-android15-6.6 (f98f0822, 2026-11-15, "kernel & KernelSU: Sync
-            # with upstream"), and its KernelSU half is synced to
-            # tiann/KernelSU 64833c00 (the inode_setxattr LSM hook commit). A
-            # v2.4.0 SUSFS tree therefore needs a KernelSU at or past that
-            # commit; older KernelSU still applies the kernel-side half but the
-            # selinux_hide dispatch it expects is absent. .github/
-            # compatible-commits.json carries the matching pins.
+          "v2.2.0")
+            # v2.2.0 is the last SUSFS revision whose KSUN fix-patch set matches
+            # a KernelSU-Next tree. v2.3.0/v2.4.0 are handled separately below
+            # and are KSU-only.
             if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
               cd "$KSUN_FOLDER"
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
@@ -1234,6 +1213,32 @@ runs:
               cd "$KSU_FOLDER"
               patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             fi
+            ;;
+          "v2.3.0"|"v2.4.0")
+            # KSU-ONLY, and this is measured, not assumed.
+            #
+            # CI run 44007359941 pinning v2.4.0 with KSUN left rejects in
+            #   kernel/Kbuild, kernel/core/init.c (6/8 hunks),
+            #   kernel/feature/kernel_umount.c, kernel/feature/sucompat.c (2/4),
+            #   kernel/hook/setuid_hook.c, kernel/selinux/rules.c,
+            #   kernel/supercall/dispatch.c (2/9)
+            # even though next/susfs_fix_patches/v2.4.0/ does ship fix_*.patch
+            # for every one of those filenames -- the fix set is authored against
+            # tiann/KernelSU's layout, not against KernelSU-Next's.
+            #
+            # A previous revision of this block removed the guard believing the
+            # fix sets made v2.3.0+ KSUN-capable. That was wrong: the presence of
+            # a fix_<file>.patch does not mean it applies to a different fork.
+            # The guard is restored, and the reject scan below now also covers
+            # the KSUN tree so this can never again half-patch silently.
+            if [ "${{ inputs.ksu_type }}" = "KSUN" ]; then
+              echo "::error::SUSFS $susfs_version is KSU-only in this pipeline."
+              echo "::error::The WildKernels v$susfs_version fix set targets tiann/KernelSU; against KernelSU-Next it leaves rejects in kernel/core/init.c, kernel/feature/sucompat.c, kernel/supercall/dispatch.c and others."
+              echo "::error::Use ksu_variant=KSU, or build KSUN against SUSFS v2.2.0 (the pinned default for KSUN)."
+              exit 1
+            fi
+            cd "$KSU_FOLDER"
+            patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
             ;;
           *)
             echo "::error::Unsupported SUSFS version: $susfs_version"
