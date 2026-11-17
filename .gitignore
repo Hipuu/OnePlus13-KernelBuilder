@@ -1,0 +1,25 @@
+# Local development tooling — kept in the working checkout, deliberately not
+# published. The repository ships the pipeline only (`.github/**`, `configs/`,
+# `manifests/`); see the Repository layout section of README.md.
+#
+# These need a kernel checkout, pyyaml, and (for the e2e config check) a
+# cross-compiler shim, so they are not useful to someone who only wants to
+# dispatch a build.
+.validate_ci.py
+.validate_config_symbols.py
+.check_config_e2e.py
+.negative_test_ci.py
+.test_module_closure.py
+.test_symbol_regex.py
+.audit_config_keys.py
+.audit_feature_inventory.py
+
+# Pre-existing local-only helpers referenced by README.md.
+validate_workflow.sh
+debug_workflow.sh
+TESTING.md
+AGENTS.md
+
+# Transient build/scratch output.
+ccache.log
+debug_artifacts/
