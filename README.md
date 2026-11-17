@@ -390,22 +390,39 @@ kernel/selinux/rules.c.rej
 kernel/supercall/dispatch.c.rej    2 of 9 hunks
 ```
 
-So the pins are split by variant:
+So the pins are split by variant, and **both are CI-verified**:
 
-| Variant | SUSFS | KernelSU |
-|---|---|---|
-| KSU | `f98f0822` (v2.4.0) | `f49be695` (tiann/KernelSU main, 2026-11-17) |
-| KSUN | `be7b7ef4` (v2.2.0) | `7ccf6147` (KernelSU-Next dev) |
+| Variant | SUSFS | KernelSU | Verified by |
+|---|---|---|---|
+| KSU | `f98f0822` (v2.4.0) | `f49be695` (tiann/KernelSU main) | run `44012089375`, all 7 variants → `..._KSU_32731_SuSFS_v2.4.0.zip` |
+| KSUN | `be7b7ef4` (v2.2.0) | `234f6e04` (KernelSU-Next dev) | run `44020861237` → `..._KSUN_33239_SuSFS_v2.2.0.zip` |
 
-`f49be695` was chosen by applying the 106-hunk enable patch against **60**
-commits of `tiann/KernelSU` with a hard-reset worktree per candidate. Only two
-are clean — `f49be695` (newest) and `64833c00` (the commit the v2.4.0 message
-names as its sync point). Everything older fails 4–6 hunks because the target
-file was restructured (offsets to −138 lines).
+The two paths are structurally different, which is why they need different
+revisions:
 
-A previous revision of this action removed the KSU-only guard on the reasoning
-that the fix sets made v2.3.0+ KSUN-capable. That was wrong, and CI caught it,
-which is why the guard is back and the reject scan now also covers the KSUN tree.
+- **KSU** applies the enable patch cleanly on its own — no fix set involved at
+  v2.4.0. Found by applying the 106-hunk patch against 60 commits of
+  `tiann/KernelSU` with a hard-reset worktree each time; only `f49be695` (newest)
+  and `64833c00` are clean.
+- **KSUN** never applies cleanly on its own. It is designed to apply the patch
+  best-effort (6 rejects at v2.2.0), then repair each rejected file with
+  `fix_<file>.patch`, then `overwrite_hook_mode` + `ksu_toolkit`. Bumping it to
+  `7ccf6147` was tried and broke it (53 failed hunks, no fix set covers them);
+  reverted to `234f6e04`.
+
+> **Bug found by CI, not by review.** The KSUN repair loop had always worked, but
+> it left each `.rej` file in place. The stricter reject scan added earlier in
+> this work then failed KSUN builds for the very files the loop had just
+> repaired — it had no way to tell a repaired file from an unrepaired one. The
+> loop now deletes each `.rej` only when its fix patch succeeds, so a genuinely
+> unrepairable file still fails loudly. Without running the build, this would
+> have shipped as "KSUN is broken" with the wrong cause.
+
+A previous revision of this action removed the KSU-only guard for v2.3.0+ on the
+reasoning that the fix sets made those versions KSUN-capable. That was wrong
+(run `44007359941` left rejects in `kernel/core/init.c` 6/8, `sucompat.c` 2/4,
+`supercall/dispatch.c` 2/9 and four more). The guard is back, and the reject scan
+now also covers the KSUN tree.
 
 ### `CONFIG_KSU_SUSFS_ENABLE_LOG` is load-bearing
 
@@ -503,6 +520,12 @@ built **all seven variants** green on GitHub-hosted runners, KSU variant, SUSFS 
 | `OP13-6.6.118` (A16) | 35m33s | `AK3_OP13_A16_android15-6.6.118_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
 | `OP13-CPH-6.6.89` (A15) | 28m21s | `AK3_OP13-CPH_A15_android15-6.6.89_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
 | `OP13-CPH-6.6.56` (A15) | 29m46s | `AK3_OP13-CPH_A15_android15-6.6.56_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+
+A separate KSUN run
+([`44020861237`](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/44020861237))
+built `OP13-6.6.89` in 30m30s, producing
+`AK3_OP13_A16_android15-6.6.89_KSUN_33239_SuSFS_v2.2.0.zip`. Both flavours are
+therefore confirmed end to end, not just the default one.
 
 The 6.6.89 job log confirms the versions that actually shipped:
 `SusFS Version: v2.4.0`, `KernelSU Version: 32731`, `✅ SUSFS patches applied`,
