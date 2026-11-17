@@ -370,6 +370,43 @@ The published repository is deliberately just the pipeline: `.github/**`, `confi
 
 ## Known issues
 
+### SUSFS v2.3.0/v2.4.0 are KSU-only — KSUN stays on v2.2.0
+
+SUSFS v2.4.0's KernelSU half does **not** fit KernelSU-Next, despite
+`next/susfs_fix_patches/v2.4.0/` shipping a `fix_<file>.patch` for every file
+the base patch touches. Those fix patches are authored against
+**tiann/KernelSU's** file layout, not KernelSU-Next's.
+
+Measured, not assumed — CI run `44007359941` pinned v2.4.0 with KSUN and failed
+all seven variants at the patch stage:
+
+```
+kernel/Kbuild.rej
+kernel/core/init.c.rej             6 of 8 hunks
+kernel/feature/kernel_umount.c.rej
+kernel/feature/sucompat.c.rej      2 of 4 hunks
+kernel/hook/setuid_hook.c.rej
+kernel/selinux/rules.c.rej
+kernel/supercall/dispatch.c.rej    2 of 9 hunks
+```
+
+So the pins are split by variant:
+
+| Variant | SUSFS | KernelSU |
+|---|---|---|
+| KSU | `f98f0822` (v2.4.0) | `f49be695` (tiann/KernelSU main, 2026-11-17) |
+| KSUN | `be7b7ef4` (v2.2.0) | `7ccf6147` (KernelSU-Next dev) |
+
+`f49be695` was chosen by applying the 106-hunk enable patch against **60**
+commits of `tiann/KernelSU` with a hard-reset worktree per candidate. Only two
+are clean — `f49be695` (newest) and `64833c00` (the commit the v2.4.0 message
+names as its sync point). Everything older fails 4–6 hunks because the target
+file was restructured (offsets to −138 lines).
+
+A previous revision of this action removed the KSU-only guard on the reasoning
+that the fix sets made v2.3.0+ KSUN-capable. That was wrong, and CI caught it,
+which is why the guard is back and the reject scan now also covers the KSUN tree.
+
 ### `CONFIG_KSU_SUSFS_ENABLE_LOG` is load-bearing
 
 SUSFS v2.4.0's `fs/susfs.c` defines `SUSFS_LOGI`/`SUSFS_LOGE` fallbacks in the
@@ -453,7 +490,29 @@ not a build.
 
 ### What has actually been compiled
 
-Static checks are cheap; compilation is not. What has been built locally (clang
+**Full CI builds.** The authoritative evidence is no longer local: workflow run
+[`44012089375`](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/44012089375)
+built **all seven variants** green on GitHub-hosted runners, KSU variant, SUSFS on:
+
+| Variant | Time | Artifacts |
+|---|---|---|
+| `OP13-6.6.89` (A16) | 30m23s | `AK3_OP13_A16_android15-6.6.89_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-6.6.66` (A15) | 34m21s | `AK3_OP13_A15_android15-6.6.66_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-6.6.142` (A16) | 43m03s | `AK3_OP13_A16_android15-6.6.142_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-6.6.30` (A15) | 43m40s | `AK3_OP13_A15_android15-6.6.30_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-6.6.118` (A16) | 35m33s | `AK3_OP13_A16_android15-6.6.118_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-CPH-6.6.89` (A15) | 28m21s | `AK3_OP13-CPH_A15_android15-6.6.89_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+| `OP13-CPH-6.6.56` (A15) | 29m46s | `AK3_OP13-CPH_A15_android15-6.6.56_KSU_32731_SuSFS_v2.4.0.zip` + modules ZIP |
+
+The 6.6.89 job log confirms the versions that actually shipped:
+`SusFS Version: v2.4.0`, `KernelSU Version: 32731`, `✅ SUSFS patches applied`,
+and a modules ZIP whose dependency closure completed.
+
+That run also **found a real bug**, which is the point of running it: the first
+attempt (run `44007359941`, KSUN) failed all seven variants at the SUSFS patch
+stage. See § *Known issues* — the KSUN pairing is reverted.
+
+Static checks are cheap; compilation is not. What was also built locally (clang
 22, `LLVM=1`, `ARCH=arm64`, on the real OnePlusOSS 6.6.89 and 6.6.118 trees):
 
 | What | Result |
