@@ -130,6 +130,10 @@ A GitHub Actions CI/CD pipeline that builds a custom, feature-packed kernel for 
 > carried only by the choice *default* rather than by intent. `none` now sets
 > `LTO_NONE` explicitly, and the resolved `.config` is asserted for every mode
 > ([palazik `b4777f8`](https://github.com/palazik/actions_oplus_sm8750/commit/b4777f8f022741b810e9ea073292e8eca71a0ac3)).
+>
+> **Confirmed in a real build**: CI run
+> [`44035768439`](https://github.com/Hipuu/OnePlus13-KernelBuilder/actions/runs/44035768439)
+> with `lto=none` logs `LTO: CONFIG_LTO_NONE=y (confirmed in resolved .config)`.
 
 ---
 
@@ -553,6 +557,21 @@ Every build path in this repository has now been exercised in CI:
 | KSUN, 6.6.89 | `44020861237` | green |
 | BORE + LRNG, 6.6.142 | `44025256649` | green |
 | DDK/Bazel, 6.6.118 | `44030058374` | green, `qca_cld3_peach_v2.ko` |
+| `lto=none` + `O3` + `battery_save` + `audit_off`, 6.6.89 | `44035768439` | green |
+
+The last run is the one that vindicates the `LTO_CLANG_NONE` fix. Before it, the
+only evidence that `lto=none` worked was a local `scripts/config` simulation. The
+job log now prints the assertion's own output:
+
+```
+LTO: CONFIG_LTO_NONE=y (confirmed in resolved .config)
+```
+
+so `lto=none` is proven to select `LTO_NONE` in a real kernel build rather than
+falling through to whatever the defconfig had already chosen. The same run also
+carried `optimize_level=O3`, `battery_save=true` and `audit_off=true`, all of
+which reached the config (`optimize_level: O3`, `BATTERY_SAVE: true`,
+`AUDIT_OFF: true`) and still produced a flashable ZIP.
 
 The 6.6.89 job log confirms the versions that actually shipped:
 `SusFS Version: v2.4.0`, `KernelSU Version: 32731`, `✅ SUSFS patches applied`,
