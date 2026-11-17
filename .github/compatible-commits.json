@@ -1,13 +1,12 @@
 {
   "_comment": "Default commits resolved when no explicit branch/hash is supplied. Update these after verifying a build passes with a newer commit.",
   "_provenance": {
-    "susfs_android15-6.6_KSU": "simonpunk/susfs4ksu gki-android15-6.6 -> f98f0822 (2026-11-15), SUSFS_VERSION 'v2.4.0' read from kernel_patches/include/linux/susfs.h at that ref.",
-    "susfs_android15-6.6_KSUN": "be7b7ef4 = SUSFS v2.2.0, the last revision whose KSUN fix-patch set actually matches a KernelSU-Next tree. v2.4.0 + KSUN leaves rejects in kernel/core/init.c, kernel/feature/sucompat.c, kernel/supercall/dispatch.c and others (CI run 44007359941), so KSUN stays on v2.2.0 until an upstream fix set lands.",
-    "ksu_main": "tiann/KernelSU main f49be695 (2026-11-17, 'kernel: Use the first match for exact symbol lookup (#3999)'). Verified: SUSFS v2.4.0's 10_enable_susfs_for_ksu.patch (106 hunks, 32 files) applies with ZERO rejects at this commit.",
-    "ksu_main_evidence": "Scanned 60 commits of tiann/KernelSU main with a hard-reset worktree per candidate. Only two are clean: f49be695 (newest, 2026-11-17) and 64833c00 (2026-11-14, the commit the SUSFS v2.4.0 message names as its sync point). Everything older fails 4-6 hunks because the patch target was restructured (offsets up to -138 lines). Pinning 64833c00 would also work but is 3 days stale for no benefit.",
-    "ksun_dev": "KernelSU-Next dev 7ccf6147 is carried only because KSUN still builds against SUSFS v2.2.0; it is NOT validated against v2.4.0.",
-    "why_paired": "The susfs pins are keyed per KSU variant because each flavour tracks the susfs sync at a different point. A SUSFS revision and a KernelSU revision must agree on the selinux_hide dispatch shape and on the file layout the enable patch expects.",
-    "history": "Previously both variants were pinned at SUSFS v2.2.0 (KSU=937215c / KSUN=be7b7ef). This revision moves only KSU to v2.4.0, because that is the pairing that was proven by an actual patch application rather than by reading a commit message."
+    "susfs_android15-6.6_KSU": "simonpunk/susfs4ksu gki-android15-6.6 -> f98f0822 (2026-11-15), SUSFS_VERSION 'v2.4.0'. Verified by full CI build (run 44012089375, all 7 variants green, log shows 'SusFS Version: v2.4.0').",
+    "susfs_android15-6.6_KSUN": "be7b7ef4 = SUSFS v2.2.0. The v2.4.0 KSUN fix set does not fit KernelSU-Next (CI run 44007359941 left rejects in kernel/core/init.c 6/8, sucompat.c 2/4, supercall/dispatch.c 2/9 and four more files), so KSUN stays on v2.2.0.",
+    "ksu_main": "tiann/KernelSU main f49be695 (2026-11-17). Verified two ways: (a) SUSFS v2.4.0's 106-hunk enable patch applies with zero rejects; (b) full CI build run 44012089375 produced 'KernelSU Version: 32731' artifacts for all seven variants.",
+    "ksu_dev": "KernelSU-Next dev 234f6e04 (2026-08-10). VERIFIED, not guessed: the KSUN path applies the v2.2.0 enable patch best-effort (6 rejects), then repairs each with fix_<file>.patch from next/susfs_fix_patches/v2.2.0/ (Kbuild, init.c, kernel_umount.c, sucompat.c, setuid_hook.c, supercall.c), then overwrite_hook_mode + ksu_toolkit -- leaving ZERO rejects. A version bump to 7ccf6147 was tried and broke this: 53 failed hunks and no fix set covers them.",
+    "why_paired": "The susfs pins are keyed per KSU variant because each flavour tracks the susfs sync at a different point. The two paths are structurally different: KSU applies cleanly on its own and needs no fix set at v2.4.0, while KSUN always relies on the fix-patch repair loop.",
+    "history": "Original repo pins were KSU=937215c / KSUN=be7b7ef / dev=234f6e04, all at SUSFS v2.2.0. This revision moves ONLY KSU to v2.4.0 (KSU commit f49be695) and leaves KSUN/dev untouched, because that is the configuration proven by CI. An intermediate revision bumped dev to 7ccf6147 on the assumption that newer is better; it broke KSUN and was reverted."
   },
   "susfs": {
     "android12-5.10": {
@@ -33,6 +32,6 @@
   },
   "ksu": {
     "main": "f49be6952c43b9d960ab9ffa104a8f5e354b0c44",
-    "dev": "7ccf61479621f240c0d968ef46f1b167b6ceb500"
+    "dev": "234f6e040fcbca18b16d2398e1aa225712ec99ad"
   }
 }
